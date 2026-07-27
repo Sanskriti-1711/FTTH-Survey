@@ -178,16 +178,32 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         return;
       }
     }
-    // NON-DEMO PATH — upload → discover → import
+    // NON-DEMO PATH — auto-create project → upload → discover → import
     console.log('[importSurveyPackage] Running non-demo import flow');
     set({ isLoading: true, error: null });
     try {
+      // Step 0: If no projectId provided, auto-create a project from the file name
+      let targetProjectId = projectId;
+      if (!targetProjectId) {
+        const projectName = file?.name
+          ? file.name.replace(/\.(zip|gpkg|geojson)$/i, '')
+          : 'Imported Survey';
+        const newProject = await projectsApi.createProject({
+          name: projectName,
+          description: `Auto-created from ${file?.name ?? 'survey package'}`,
+          region: 'Field Survey',
+          status: 'active' as const,
+        });
+        targetProjectId = newProject.id;
+        console.log('[importSurveyPackage] Created project:', targetProjectId);
+      }
+
       // Step 1: Upload the file (returns session_id)
-      const uploadResult = await projectsApi.uploadGpkg(projectId, file);
+      const uploadResult = await projectsApi.uploadGpkg(targetProjectId, file);
       const sessionId = uploadResult.session_id;
 
       // Step 2: Discover layers from the uploaded file
-      const discoverResult = await projectsApi.discoverGpkg(projectId, sessionId);
+      const discoverResult = await projectsApi.discoverGpkg(targetProjectId, sessionId);
 
       // Extract layer names from discover result (supports both array and nested formats)
       const layersPayload = discoverResult.layers ?? [];
@@ -200,11 +216,16 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       }
 
       // Step 3: Import the selected layers
-      await projectsApi.importGpkg(projectId, { selected_layers: layerNames });
+      await projectsApi.importGpkg(targetProjectId, { selected_layers: layerNames });
 
-      // Step 4: Refresh project list
+      // Step 4: Refresh project list and set active project
       const projects = await projectsApi.listProjects();
-      set({ projects, isLoading: false });
+      const createdProject = projects.find((p) => p.id === targetProjectId) ?? null;
+      set({
+        projects,
+        activeProject: createdProject,
+        isLoading: false,
+      });
       return;
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown import error';
