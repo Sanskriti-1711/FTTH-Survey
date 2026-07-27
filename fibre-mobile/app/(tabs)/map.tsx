@@ -15,6 +15,16 @@ import { useAuthStore } from '../../lib/stores/auth';
 import { useProjectStore } from '../../lib/stores/project';
 import { getDemoAllFeatures, DEMO_GEOJSON_FEATURES, DEMO_FEATURES, DEMO_LAYERS } from '../../lib/stores/demo-data';
 import { recalculateDependentProperties } from '../../lib/utils/spatial';
+import {
+  splitLineAtPoint,
+  mergeLines,
+  createLineString,
+  findNearestVertex,
+  updateVertex,
+  createGeoJSONFeature,
+} from '../../lib/utils/geometry-operations';
+import GeometryEditor from '../../lib/components/GeometryEditor';
+import type { GeometryMode } from '../../lib/components/GeometryEditor';
 import { Card, Badge } from '../../components/ui/Card';
 import { StatusBadge } from '../../components/ui/StatusBadge';
 import MapLibreMap, { BASEMAPS } from '../../lib/components/MapLibreMap';
@@ -193,6 +203,13 @@ export default function MapScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [dragMode, setDragMode] = useState(false);
 
+  // ── Phase 2: Geometry Editor State ───────────────────────────────────
+  const [geoMode, setGeoMode] = useState<GeometryMode>('select');
+  const [mergeSelection, setMergeSelection] = useState<[string | null, string | null]>([null, null]);
+  const [drawPoints, setDrawPoints] = useState<[number, number][]>([]);
+  const [vertexEdit, setVertexEdit] = useState<{ featureId: string; layerId: string; vertexIdx: number } | null>(null);
+  const [geomBusy, setGeomBusy] = useState(false);
+
   // ── Undo Stack for drag operations ───────────────────────────────────
   const MAX_UNDO = 50;
   type UndoEntry = {
@@ -203,6 +220,8 @@ export default function MapScreen() {
     newLng: number;
     newLat: number;
     timestamp: number;
+    /** For vertex drags — the index of the vertex that was moved */
+    vertexIdx?: number;
   };
   const undoStackRef = useRef<UndoEntry[]>([]);
   const [undoCount, setUndoCount] = useState(0);
@@ -234,9 +253,19 @@ export default function MapScreen() {
       let found = false;
       const updated = layerFeatures.map((f) => {
         const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
-        if (fid === entry.featureId && f.geometry?.type === 'Point') {
-          found = true;
-          return { ...f, geometry: { ...f.geometry, coordinates: [entry.oldLng, entry.oldLat] } };
+        if (fid === entry.featureId) {
+          if (f.geometry?.type === 'Point') {
+            found = true;
+            return { ...f, geometry: { ...f.geometry, coordinates: [entry.oldLng, entry.oldLat] } };
+          }
+          if ((f.geometry?.type === 'LineString' || f.geometry?.type === 'MultiLineString') && entry.vertexIdx !== undefined) {
+            found = true;
+            const coords = [...(f.geometry.coordinates as [number, number][])];
+            if (coords[entry.vertexIdx] !== undefined) {
+              coords[entry.vertexIdx] = [entry.oldLng, entry.oldLat];
+            }
+            return { ...f, geometry: { ...f.geometry, coordinates: coords } };
+          }
         }
         return f;
       });
@@ -317,6 +346,12 @@ export default function MapScreen() {
     const geo = activeGeojsonRef.current;
     for (const [id, features] of Object.entries(geo)) {
       if (features.length > 0 && features[0]?.geometry?.type === 'Point') {
+        ids.add(id);
+      }
+    }
+    // Also add line layers for geometry editing modes
+    for (const [id, features] of Object.entries(geo)) {
+      if (features.length > 0 && (features[0]?.geometry?.type === 'LineString' || id.includes('trench') || id.includes('duct') || id.includes('cable'))) {
         ids.add(id);
       }
     }
@@ -803,6 +838,258 @@ export default function MapScreen() {
     [pushUndo]
   );
 
+  // ── Handle GeoJSON changes from GeometryEditor ──────────────────────────
+  const onGeometryChange = useCallback(
+    (layerId: string, action: 'split' | 'merge' | 'create' | 'vertex_update',
+      updatedFeatures: any[], description: string) => {
+      setGeomBusy(true);
+
+      // Update the active GeoJSON
+      const currentHasImported = Object.keys(useProjectStore.getState().projectGeojsons).length > 0;
+
+      if (currentHasImported && layerId.startsWith(IMPORT_ID_PREFIX)) {
+        const cleanKey = layerId.slice(IMPORT_ID_PREFIX.length);
+        const current = useProjectStore.getState().projectGeojsons;
+        useProjectStore.getState().setProjectGeojsons({
+          ...current,
+          [cleanKey]: updatedFeatures,
+        });
+      } else if (DEMO_GEOJSON_FEATURES[layerId] || !currentHasImported) {
+        setLocalDemoGeojson((prev) => ({ ...prev, [layerId]: updatedFeatures }));
+      }
+
+      console.log(`[Geometry] ${description}`);
+      setGeomBusy(false);
+    },
+    [setGeomBusy, setLocalDemoGeojson],
+  );
+
+  // ── Phase 2: Geometry Mode Handler ────────────────────────────────────
+  const handleGeometryAction = useCallback(
+    (featureId: string, layerId: string, lng: number, lat: number, mode: GeometryMode) => {
+      const geojson = activeGeojsonRef.current;
+      const features = geojson[layerId];
+      if (!features) return;
+
+      if (mode === 'split') {
+        // ── Split line at clicked point ────────────────────────────────
+        const feature = features.find((f) =>
+          (f.properties as any)?.id === featureId || (f.properties as any)?._id === featureId
+        );
+        if (!feature || (feature.geometry?.type !== 'LineString' && feature.geometry?.type !== 'MultiLineString')) {
+          return;
+        }
+
+        const coords = feature.geometry.coordinates as [number, number][];
+        const result = splitLineAtPoint(coords, lng, lat);
+        if (!result) return;
+
+        // Create two new features from the split
+        const props = { ...(feature.properties ?? {}) };
+        const baseName = (props.name as string) ?? 'Trench';
+        const featA = createGeoJSONFeature(result.coordsA, layerId, {
+          ...props,
+          name: `${baseName} (A)`,
+          split_from: featureId,
+        });
+        const featB = createGeoJSONFeature(result.coordsB, layerId, {
+          ...props,
+          name: `${baseName} (B)`,
+          split_from: featureId,
+        });
+
+        // Remove original, add two new features
+        const updated = features
+          .filter((f) => (f.properties as any)?.id !== featureId && (f.properties as any)?._id !== featureId)
+          .concat([featA, featB]);
+
+        onGeometryChange(layerId, 'split', updated,
+          `Split "${baseName}" into 2 segments (${result.coordsA.length} + ${result.coordsB.length} vertices)`);
+      } else if (mode === 'merge') {
+        // ── Merge two lines ────────────────────────────────────────────
+        const [firstId, secondId] = mergeSelection;
+        if (!firstId) {
+          // Select first feature
+          setMergeSelection([featureId, null]);
+          return;
+        }
+        if (featureId === firstId) {
+          // Tapped same feature — deselect
+          setMergeSelection([null, null]);
+          return;
+        }
+
+        // Find both features
+        const featA = features.find((f) =>
+          (f.properties as any)?.id === firstId || (f.properties as any)?._id === firstId
+        );
+        const featB = features.find((f) =>
+          (f.properties as any)?.id === featureId || (f.properties as any)?._id === featureId
+        );
+        if (!featA || !featB) return;
+        if (featA.geometry?.type !== 'LineString' || featB.geometry?.type !== 'LineString') return;
+
+        const coordsA = featA.geometry.coordinates as [number, number][];
+        const coordsB = featB.geometry.coordinates as [number, number][];
+        const merged = mergeLines(coordsA, coordsB);
+        if (!merged) return;
+
+        // Create merged feature
+        const propsA = { ...(featA.properties ?? {}) };
+        const mergedFeature = createGeoJSONFeature(merged.merged, layerId, {
+          ...propsA,
+          name: `${propsA.name ?? 'Trench'} (Merged)`,
+          merged_from: [firstId, featureId].join(','),
+          merge_dist_m: Math.round(merged.distM),
+        });
+
+        const updated = features
+          .filter((f) => {
+            const id = (f.properties as any)?.id || (f.properties as any)?._id;
+            return id !== firstId && id !== featureId;
+          })
+          .concat([mergedFeature]);
+
+        setMergeSelection([null, null]);
+        onGeometryChange(layerId, 'merge', updated,
+          `Merged 2 segments into one (endpoint dist: ${Math.round(merged.distM)}m)`);
+      } else if (mode === 'edit_vertices') {
+        // ── Select feature for vertex editing ──────────────────────────
+        const feature = features.find((f) =>
+          (f.properties as any)?.id === featureId || (f.properties as any)?._id === featureId
+        );
+        if (!feature || feature.geometry?.type !== 'LineString') return;
+
+        const coords = feature.geometry.coordinates as [number, number][];
+        const nearest = findNearestVertex(coords, lng, lat, 0.0005); // ~50m threshold
+        if (!nearest) {
+          // Click was too far from any vertex — select the feature anyway
+          setVertexEdit({ featureId, layerId, vertexIdx: 0 });
+          return;
+        }
+
+        setVertexEdit({ featureId, layerId, vertexIdx: nearest.idx });
+      }
+    },
+    [mergeSelection, onGeometryChange],
+  );
+
+  // ── Vertex drag end handler — updates the LineString coordinate and store ──
+  const handleVertexDragEnd = useCallback(
+    (featureId: string, layerId: string, vertexIdx: number, newLng: number, newLat: number) => {
+      const geojson = activeGeojsonRef.current;
+      const features = geojson[layerId];
+      if (!features) return;
+
+      let oldLng = 0, oldLat = 0;
+      let found = false;
+      const updatedFeatures = features.map((f) => {
+        const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
+        if (fid === featureId && f.geometry?.type === 'LineString') {
+          found = true;
+          const coords = [...(f.geometry.coordinates as [number, number][])];
+          const vertex = coords[vertexIdx];
+          if (vertex) {
+            oldLng = vertex[0];
+            oldLat = vertex[1];
+            coords[vertexIdx] = [newLng, newLat];
+          }
+          return {
+            ...f,
+            geometry: {
+              ...f.geometry,
+              coordinates: coords,
+            },
+          };
+        }
+        return f;
+      });
+
+      if (!found) return;
+
+      // Push to undo stack with vertex index so undo can restore the LineString vertex
+      pushUndo({
+        featureId,
+        layerId,
+        oldLng,
+        oldLat,
+        newLng,
+        newLat,
+        vertexIdx,
+        timestamp: Date.now(),
+      });
+
+      // ── Recalculate dependent properties (length_m, etc.) ───────────────
+      const fullGeojson: Record<string, GeoJSONFeature[]> = { ...activeGeojsonRef.current };
+      fullGeojson[layerId] = updatedFeatures;
+      const recalc = recalculateDependentProperties(layerId, fullGeojson, updatedFeatures);
+
+      if (recalc.changes.length > 0) {
+        console.log(`[Vertex] Spatial recalc: ${recalc.changes.join('; ')}`);
+      }
+
+      // Update the store with the recalculated features
+      const currentHasImported = Object.keys(useProjectStore.getState().projectGeojsons).length > 0;
+
+      if (currentHasImported && layerId.startsWith(IMPORT_ID_PREFIX)) {
+        const cleanKey = layerId.slice(IMPORT_ID_PREFIX.length);
+        const current = useProjectStore.getState().projectGeojsons;
+        useProjectStore.getState().setProjectGeojsons({
+          ...current,
+          [cleanKey]: recalc.geojson[layerId] ?? updatedFeatures,
+        });
+      } else {
+        setLocalDemoGeojson((prev) => {
+          const next = { ...prev };
+          for (const [key, features] of Object.entries(recalc.geojson)) {
+            if (DEMO_GEOJSON_FEATURES[key] || key === layerId) {
+              next[key] = features;
+            }
+          }
+          return next;
+        });
+      }
+
+      // Update vertexEdit to the same vertex (keep selection active)
+      setVertexEdit({ featureId, layerId, vertexIdx });
+
+      console.log(`[Vertex] Moved vertex ${vertexIdx} of ${featureId} to [${newLng.toFixed(6)}, ${newLat.toFixed(6)}]`);
+    },
+    [pushUndo],
+  );
+
+  // ── Clear draw points callback ─────────────────────────────────────────
+  const handleClearDrawPoints = useCallback(() => {
+    setDrawPoints([]);
+  }, []);
+
+  // ── Handle empty map area click (for draw bypass) ───────────────────────
+  const handleEmptyMapClick = useCallback(
+    (lng: number, lat: number) => {
+      if (geoMode === 'draw_bypass') {
+        setDrawPoints((prev) => [...prev, [lng, lat]]);
+      }
+    },
+    [geoMode],
+  );
+
+  // ── Handle feature click depending on geometry mode ─────────────────────
+  const handleGeoFeatureAction = useCallback(
+    (featureId: string, layerId: string, lng: number, lat: number, mode: GeometryMode) => {
+      if (mode === 'select') {
+        // Normal feature click — handled by existing handleMapFeatureClick
+        return;
+      }
+      // In draw or vertex mode, treat feature clicks as empty-area clicks
+      if (mode === 'draw_bypass' || mode === 'edit_vertices') {
+        handleEmptyMapClick(lng, lat);
+        return;
+      }
+      handleGeometryAction(featureId, layerId, lng, lat, mode);
+    },
+    [handleGeometryAction, handleEmptyMapClick],
+  );
+
   // ── Save notes for current feature ───────────────────────────────────────
   const handleSaveNotes = useCallback(() => {
     if (!selectedFeaturePopup?.id) return;
@@ -836,12 +1123,14 @@ export default function MapScreen() {
     return mergedFeatureList.filter((f) => f.feature.layer_id === layerFeaturePanel.layerId);
   }, [mergedFeatureList, layerFeaturePanel.layerId]);
 
-  // ── Handle feature card press ───────────────────────────────────────────
+  // ── Handle feature card press ── opens feature attributes ───────────────
   const handleFeatureCardPress = (featureId: string) => {
     // Close the feature panel if open
     if (layerFeaturePanel.visible) {
       closeLayerFeaturePanel();
     }
+
+    // First try to find in demo features (rich metadata)
     const found = demoFeatures.find((f) => f.feature.id === featureId);
     if (found) {
       selectFeature(found.feature.id, {
@@ -852,10 +1141,36 @@ export default function MapScreen() {
             found.feature.layer_name + ' #' + found.feature.id.slice(-3)
         ),
         layerName: found.feature.layer_name,
+        layerId: found.feature.layer_id,  // Pass layerId for schema lookup
         status: found.feature.status,
       });
       setSelectedMapFeatureId(found.feature.id);
       setViewMode('map');
+      return;
+    }
+
+    // Fallback for imported/unknown features — search in mapLayerData (which has augmented IDs)
+    for (const layer of mapLayerData) {
+      for (const feat of layer.features) {
+        const fid = (feat.properties as any)?.id ?? (feat.properties as any)?._id ?? '';
+        if (fid === featureId) {
+          const props = feat.properties ?? {};
+          selectFeature(featureId, {
+            id: featureId,
+            name: String(
+              (props as any).name ??
+              (props as any).address ??
+              `${layer.name} #${featureId.slice(-6)}`
+            ),
+            layerName: layer.name,
+            layerId: layer.id,
+            status: 'assigned',
+          });
+          setSelectedMapFeatureId(featureId);
+          setViewMode('map');
+          return;
+        }
+      }
     }
   };
 
@@ -901,8 +1216,18 @@ export default function MapScreen() {
           {/* Interactive MapLibre Map */}
           <MapLibreMap
             layers={mapLayerData}
-            onFeatureClick={handleMapFeatureClick}
+            onFeatureClick={(featureId, layerId, lngLat, screenPt) => {
+              // Route clicks through geometry mode handler when in a non-select mode
+              if (geoMode !== 'select') {
+                handleGeoFeatureAction(featureId, layerId, lngLat[0], lngLat[1], geoMode);
+                return;
+              }
+              handleMapFeatureClick(featureId, layerId, lngLat, screenPt);
+            }}
+            onEmptyAreaClick={handleEmptyMapClick}
             onFeatureDragEnd={handleFeatureDragEnd}
+            onVertexDragEnd={handleVertexDragEnd}
+            vertexDragTarget={vertexEdit}
             draggableLayerIds={draggableLayerIds}
             dragMode={dragMode}
             selectedFeatureId={selectedMapFeatureId ?? undefined}
@@ -910,6 +1235,35 @@ export default function MapScreen() {
             mapStyle={currentBasemapStyle}
             flyToCenter={flyToCenter}
           />
+
+          {/* Geometry Editor */}
+          {viewMode === 'map' && (
+            <GeometryEditor
+              mode={geoMode}
+              onModeChange={(mode) => {
+                setGeoMode(mode);
+                // Reset any pending state on mode change
+                setMergeSelection([null, null]);
+                setDrawPoints([]);
+                setVertexEdit(null);
+                // Also reset popup if any
+                if (mode !== 'select') {
+                  selectFeature(null);
+                  setSelectedMapFeatureId(null);
+                  setPopupScreenCoords(null);
+                }
+              }}
+              onGeometryChange={onGeometryChange}
+              onFeatureAction={handleGeoFeatureAction}
+              onEmptyMapClick={handleEmptyMapClick}
+              onClearDrawPoints={handleClearDrawPoints}
+              allGeojson={activeGeojsonRef.current}
+              mergeSelection={mergeSelection}
+              drawPoints={drawPoints}
+              vertexEdit={vertexEdit}
+              isBusy={geomBusy}
+            />
+          )}
 
           {/* Layer Legend Overlay — with collapsible group headers */}
           <MapLegend
