@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Project, AssignmentJob, GeoJSONFeature, Layer } from '../utils/types';
+import type { Project, AssignmentJob, Feature, GeoJSONFeature, Layer } from '../utils/types';
 import * as projectsApi from '../api/projects';
 import * as assignmentsApi from '../api/assignments';
 import { useAuthStore } from './auth';
@@ -29,11 +29,18 @@ interface ProjectState {
   isLoading: boolean;
   error: string | null;
 
+  /** Progress of fetching GeoJSON layers from the backend: { fetched: N, total: N } */
+  layerFetchProgress: { fetched: number; total: number } | null;
+
   /** GeoJSON features for the active project, keyed by layer ID */
   projectGeojsons: Record<string, GeoJSONFeature[]>;
   /** Layers for the imported project (for map layer display) */
   projectLayers: Layer[];
 
+  /** Convert backend Feature[] into GeoJSONFeature[] for map rendering */
+  featuresToGeoJSON: (features: Feature[]) => GeoJSONFeature[];
+  /** Fetch all layers + features for a real project from the backend and populate projectGeojsons + projectLayers */
+  fetchProjectGeojsons: (projectId: string) => Promise<void>;
   fetchProjects: () => Promise<void>;
   fetchAssignments: (engineerId: string) => Promise<void>;
   setActiveProject: (project: Project | null) => void;
@@ -59,8 +66,82 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   stats: null,
   isLoading: false,
   error: null,
+  layerFetchProgress: null,
   projectGeojsons: {},
   projectLayers: [],
+
+  /** Convert backend Feature[] into GeoJSONFeature[] for map rendering */
+  featuresToGeoJSON: (features: Feature[]): GeoJSONFeature[] => {
+    return features.map((f) => ({
+      type: 'Feature' as const,
+      geometry: (f.geometry as { type: string; coordinates: unknown[] }) ?? {
+        type: 'Point',
+        coordinates: [0, 0],
+      },
+      properties: { ...f.properties, id: f.id, _feature_id: f.id },
+    }));
+  },
+
+  /**
+   * Fetch all layers + features for a real project from the backend
+   * and populate projectGeojsons + projectLayers.
+   */
+  fetchProjectGeojsons: async (projectId: string) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode || projectId.startsWith('demo-') || projectId.startsWith('imported-')) {
+      return; // Not a real project — nothing to fetch
+    }
+    set({ isLoading: true, error: null });
+    try {
+      // Step 1: Get all layers for this project
+      const { layers } = await projectsApi.getProjectLayers(projectId);
+      const totalLayers = layers.length;
+
+      // Step 2: Fetch features for ALL layers in parallel, tracking progress
+      let fetchedCount = 0;
+      set({ layerFetchProgress: { fetched: 0, total: totalLayers } });
+
+      const layerPromises = layers.map((layer) =>
+        projectsApi
+          .getLayerDetail(projectId, layer.layer_id)
+          .then((data) => {
+            // Update progress on each successful fetch
+            fetchedCount++;
+            set({ layerFetchProgress: { fetched: fetchedCount, total: totalLayers } });
+            return {
+              key: layer.layer_id,
+              features: get().featuresToGeoJSON(data.features?.filter((f) => f.geometry) ?? []),
+            };
+          })
+          .catch((err) => {
+            // Update progress even on failure (still "fetched")
+            fetchedCount++;
+            set({ layerFetchProgress: { fetched: fetchedCount, total: totalLayers } });
+            console.warn(`[fetchProjectGeojsons] Failed for layer ${layer.layer_id}:`, err);
+            return { key: layer.layer_id, features: [] };
+          })
+      );
+
+      const results = await Promise.all(layerPromises);
+      const geojsons: Record<string, GeoJSONFeature[]> = {};
+      for (const { key, features } of results) {
+        if (features.length > 0) geojsons[key] = features;
+      }
+
+      console.log(
+        `[fetchProjectGeojsons] Fetched ${Object.keys(geojsons).length} layers with ${Object.values(geojsons).reduce(
+          (sum, f) => sum + f.length,
+          0
+        )} features total`
+      );
+
+      set({ projectGeojsons: geojsons, projectLayers: layers, isLoading: false, layerFetchProgress: null });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to fetch project GeoJSON';
+      console.error('[fetchProjectGeojsons] Error:', message);
+      set({ error: message, isLoading: false, layerFetchProgress: null });
+    }
+  },
 
   fetchProjects: async () => {
     const { demoMode } = useAuthStore.getState();
@@ -185,9 +266,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       // Step 0: If no projectId provided, auto-create a project from the file name
       let targetProjectId = projectId;
       if (!targetProjectId) {
-        const projectName = file?.name
+        // Append timestamp to prevent duplicate name conflicts (backend enforces unique names)
+        const baseName = file?.name
           ? file.name.replace(/\.(zip|gpkg|geojson)$/i, '')
           : 'Imported Survey';
+        const projectName = `${baseName}-${Date.now()}`;
         const newProject = await projectsApi.createProject({
           name: projectName,
           description: `Auto-created from ${file?.name ?? 'survey package'}`,
@@ -195,7 +278,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           status: 'active' as const,
         });
         targetProjectId = newProject.id;
-        console.log('[importSurveyPackage] Created project:', targetProjectId);
+        console.log('[importSurveyPackage] Created project:', targetProjectId, 'name:', projectName);
       }
 
       // Step 1: Upload the file (returns session_id)
@@ -219,6 +302,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       await projectsApi.importGpkg(targetProjectId, { selected_layers: layerNames });
 
       // Step 4: Refresh project list and set active project
+      // NOTE: GeoJSON data is NOT fetched here — the map's useEffect handles fetching
+      // when the map loads. This keeps the import flow fast.
       const projects = await projectsApi.listProjects();
       const createdProject = projects.find((p) => p.id === targetProjectId) ?? null;
       set({
@@ -229,7 +314,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return;
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown import error';
+      // Log the FULL error details including backend validation messages
+      const errorDetail = (err as any)?.data ?? (err as any)?.response ?? err;
       console.warn('[importSurveyPackage] API import failed:', message);
+      console.warn('[importSurveyPackage] Full error detail:', JSON.stringify(errorDetail, null, 2));
 
       // Fall back to demo data so the user isn't stuck
       const sim = simulateImport();

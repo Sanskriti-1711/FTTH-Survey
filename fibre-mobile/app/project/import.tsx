@@ -14,7 +14,6 @@ import { useThemeStore } from '../../lib/stores/theme';
 import { useProjectStore } from '../../lib/stores/project';
 import { Card } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
-import { ProgressBar } from '../../components/ui/StatusBadge';
 import { Toast } from '../../components/ui/Toast';
 import { Spacing, Radius } from '../../lib/theme/colors';
 import { ArrowLeft, Upload, FileArchive, CheckCircle, FileText } from 'lucide-react-native';
@@ -27,8 +26,7 @@ export default function ProjectImportScreen() {
   const { importSurveyPackage, activeProject, isLoading, error: storeError } = useProjectStore();
 
   const [file, setFile] = useState<{ uri: string; name: string; type: string; size?: number } | null>(null);
-  const [step, setStep] = useState<'select' | 'uploading' | 'discovering' | 'importing' | 'done'>('select');
-  const [progress, setProgress] = useState(0);
+  const [step, setStep] = useState<'select' | 'uploading' | 'done'>('select');
   const [toastVisible, setToastVisible] = useState(false);
   const [toastMsg, setToastMsg] = useState('');
   const [toastType, setToastType] = useState<'success' | 'error'>('error');
@@ -61,28 +59,25 @@ export default function ProjectImportScreen() {
     }
   };
 
+  // Track which import phase we're in for better UX feedback
+  const [importPhase, setImportPhase] = useState<string>('');
+
   const handleImport = async () => {
     // Pass a default file object so the store can try zip parsing or fall back to demo data
     const importFile = file ?? { uri: '', name: 'demo-survey.zip', type: 'application/zip' };
 
     try {
       setStep('uploading');
-      setProgress(0.2);
-
-      const progressInterval = setInterval(() => {
-        setProgress((p) => Math.min(p + 0.1, 0.9));
-      }, 500);
+      setImportPhase('Importing survey package... This may take a moment.');
 
       await importSurveyPackage(projectId as string ?? '', importFile);
 
-      clearInterval(progressInterval);
-      setProgress(1);
       setStep('done');
+      setImportPhase('');
 
       // Check if the store recorded a warning (e.g. fallback to demo data)
       const currentState = useProjectStore.getState();
       if (currentState.error) {
-        // Fallback errors are warnings — user can still view the map with demo data
         const errMsg = (currentState.error ?? '').toLowerCase();
         const isFallback = errMsg.includes('demo data') || errMsg.includes('fallback');
         showToast(currentState.error, isFallback ? 'warning' : 'error');
@@ -91,15 +86,14 @@ export default function ProjectImportScreen() {
       }
     } catch {
       setStep('select');
+      setImportPhase('');
       showToast('Failed to import package');
     }
   };
 
   const stepLabel = () => {
+    if (importPhase) return importPhase;
     switch (step) {
-      case 'uploading': return 'Uploading file...';
-      case 'discovering': return 'Discovering layers...';
-      case 'importing': return 'Importing features...';
       case 'done': return `Project "${activeProject?.name ?? 'Imported'}" ready!`;
       default: return 'Ready to import';
     }
@@ -160,19 +154,22 @@ export default function ProjectImportScreen() {
         {step !== 'select' && (
           <Card title="Import Progress" variant="outlined">
             <View style={styles.progressSection}>
-              <Text style={[styles.progressLabel, { color: colors.textSecondary }]}>
-                {stepLabel()}
-              </Text>
-              <ProgressBar progress={progress} height={8} showLabel />
+              {step === 'done' ? (
+                <View style={[styles.doneRow, { backgroundColor: colors.success + '10' }]}>
+                  <CheckCircle size={20} stroke={colors.success} />
+                  <Text style={[styles.doneText, { color: colors.success }]}>
+                    Package imported successfully
+                  </Text>
+                </View>
+              ) : (
+                <View style={styles.inProgressRow}>
+                  <ActivityIndicator size="small" color={colors.primary} />
+                  <Text style={[styles.progressLabel, { color: colors.textSecondary }]}>
+                    {stepLabel()}
+                  </Text>
+                </View>
+              )}
             </View>
-            {step === 'done' && (
-              <View style={[styles.doneRow, { backgroundColor: colors.success + '10' }]}>
-                <CheckCircle size={20} stroke={colors.success} />
-                <Text style={[styles.doneText, { color: colors.success }]}>
-                  Package imported successfully
-                </Text>
-              </View>
-            )}
           </Card>
         )}
 
@@ -255,6 +252,12 @@ const styles = StyleSheet.create({
   fileChange: { fontSize: 13, fontWeight: '500', marginTop: Spacing.xs },
   progressSection: { gap: Spacing.md },
   progressLabel: { fontSize: 14, fontWeight: '500' },
+  inProgressRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+    paddingVertical: Spacing.sm,
+  },
   doneRow: {
     flexDirection: 'row',
     alignItems: 'center',

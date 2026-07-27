@@ -6,6 +6,7 @@ import {
   TouchableOpacity,
   FlatList,
   TextInput,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -386,8 +387,27 @@ export default function MapScreen() {
   }, [storeLayers]);
 
   // ── Determine GeoJSON source: merge demo + imported data ────────────
-  const { projectGeojsons, projectLayers, activeProject: storeActiveProject } = useProjectStore();
+  const {
+    projectGeojsons,
+    projectLayers,
+    activeProject: storeActiveProject,
+    fetchProjectGeojsons,
+    layerFetchProgress,
+  } = useProjectStore();
   const hasImportedData = Object.keys(projectGeojsons).length > 0;
+
+  // ── Auto-fetch GeoJSON from backend when a real project is active but empty ──
+  useEffect(() => {
+    if (
+      storeActiveProject &&
+      !storeActiveProject.id.startsWith('demo-') &&
+      !storeActiveProject.id.startsWith('imported-') &&
+      !hasImportedData
+    ) {
+      console.log('[Map] Active project found but GeoJSON empty — fetching from backend');
+      fetchProjectGeojsons(storeActiveProject.id);
+    }
+  }, [storeActiveProject?.id, hasImportedData]);
 
   // Merge: always show demo data + prefix imported data with 'imp-'
   // Uses local state copy for reactivity — drag updates trigger re-renders
@@ -399,17 +419,30 @@ export default function MapScreen() {
 
   const activeGeojson = useMemo(() => {
     if (!hasImportedData) {
+      // CRITICAL: When a real backend project is active but data hasn't loaded yet,
+      // return an EMPTY object — NOT demo data. This prevents showing 'wrong' layers.
+      if (
+        storeActiveProject &&
+        !storeActiveProject.id.startsWith('demo-') &&
+        !storeActiveProject.id.startsWith('imported-')
+      ) {
+        const empty: Record<string, GeoJSONFeature[]> = {};
+        activeGeojsonRef.current = empty;
+        return empty;
+      }
+      // Only show demo data when no real project is active
       activeGeojsonRef.current = localDemoGeojson;
       return localDemoGeojson;
     }
-    const merged: Record<string, GeoJSONFeature[]> = { ...localDemoGeojson };
+    // When a real project is active, show ONLY imported layers — no demo data
+    const onlyImported: Record<string, GeoJSONFeature[]> = {};
     for (const [key, features] of Object.entries(projectGeojsons)) {
       const importedKey = `${IMPORT_ID_PREFIX}${key}`;
-      merged[importedKey] = features;
+      onlyImported[importedKey] = features;
     }
-    activeGeojsonRef.current = merged;
-    return merged;
-  }, [hasImportedData, projectGeojsons, localDemoGeojson]);
+    activeGeojsonRef.current = onlyImported;
+    return onlyImported;
+  }, [hasImportedData, projectGeojsons, localDemoGeojson, storeActiveProject]);
 
   // Build layer names: demo defaults + imported layer names with '(Imported)' suffix
   const activeLayerNames = useMemo(() => {
@@ -475,39 +508,39 @@ export default function MapScreen() {
 
   const demoFeatures = getDemoAllFeatures();
 
-  // ── Merge demo + imported features for list view ────────────────────────
+  // ── Build feature list for list view: when a real project is active, show ONLY imported ──
   const mergedFeatureList = useMemo(() => {
-    const list = [...demoFeatures];
-    if (hasImportedData) {
-      for (const [key, features] of Object.entries(projectGeojsons)) {
-        const importedKey = `${IMPORT_ID_PREFIX}${key}`;
-        const layerName = activeLayerNames[importedKey] ?? key.toUpperCase();
-        features.forEach((feat, i) => {
-          const props = feat.properties ?? {};
-          const entries = Object.entries(props).filter(([k]) => !k.startsWith('_'));
-          const firstPropKey = entries[0]?.[0];
-          const firstPropVal = entries[0]?.[1];
-          list.push({
-            feature: {
-              id: `imp-feat-${key}-${i + 1}`,
-              layer_name: layerName,
-              layer_id: importedKey,
-              properties: props,
-              field_schema: null,
-              field_measurements: null,
-              comparison_notes: '',
-              status: 'assigned' as const,
-              photo_url: null,
-              created_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            },
-            geojson: feat,
-          });
+    if (!hasImportedData) {
+      return [...demoFeatures];
+    }
+
+    // Only imported features — no demo data
+    const list: any[] = [];
+    for (const [key, features] of Object.entries(projectGeojsons)) {
+      const importedKey = `${IMPORT_ID_PREFIX}${key}`;
+      const layerName = activeLayerNames[importedKey] ?? key.toUpperCase();
+      features.forEach((feat, i) => {
+        const props = feat.properties ?? {};
+        list.push({
+          feature: {
+            id: `imp-feat-${key}-${i + 1}`,
+            layer_name: layerName,
+            layer_id: importedKey,
+            properties: props,
+            field_schema: null,
+            field_measurements: null,
+            comparison_notes: '',
+            status: 'assigned' as const,
+            photo_url: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+          geojson: feat,
         });
-      }
+      });
     }
     return list;
-  }, [demoFeatures, hasImportedData, projectGeojsons, activeLayerNames]);
+  }, [hasImportedData, projectGeojsons, activeLayerNames]);
 
   const filteredFeatures = useMemo(() => {
     let list = selectedLayer
@@ -537,22 +570,24 @@ export default function MapScreen() {
     [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, demoFeatureIdMap, importFeatureIdMap, activeLayerColors]
   );
 
-  // Build visible layers: always include demo base, add imported layers on top
+  // Build visible layers: when a real project is active, show ONLY imported layers
   const visibleLayers = useMemo(() => {
-    // Always start with demo layers
-    const demoBase = DEMO_LAYERS.map((l) => ({
-      id: l.layer_id,
-      name: l.layer_name,
-      visible: layerVisibility[l.layer_id] !== false,
-      featureCount: l.feature_count,
-      geometryType: resolveGeometryType(l.layer_id) as any,
-    }));
-    if (!hasImportedData) return demoBase.filter((l) => layerVisibility[l.id] !== false);
+    if (!hasImportedData) {
+      const demoBase = DEMO_LAYERS.map((l) => ({
+        id: l.layer_id,
+        name: l.layer_name,
+        visible: layerVisibility[l.layer_id] !== false,
+        featureCount: l.feature_count,
+        geometryType: resolveGeometryType(l.layer_id) as any,
+      }));
+      return demoBase.filter((l) => layerVisibility[l.id] !== false);
+    }
 
-    const all = [...demoBase];
+    // Only imported layers — no demo data
+    const imported: any[] = [];
     for (const [key, features] of Object.entries(projectGeojsons)) {
       const importedKey = `${IMPORT_ID_PREFIX}${key}`;
-      all.push({
+      imported.push({
         id: importedKey,
         name: activeLayerNames[importedKey] ?? key.toUpperCase(),
         visible: layerVisibility[importedKey] !== false,
@@ -560,27 +595,28 @@ export default function MapScreen() {
         geometryType: (features[0]?.geometry?.type as any) ?? resolveGeometryType(key),
       });
     }
-    return all.filter((l) => layerVisibility[l.id] !== false);
+    return imported.filter((l) => layerVisibility[l.id] !== false);
   }, [hasImportedData, projectGeojsons, activeLayerNames, layerVisibility]);
 
-  // All layers for the panel: always include demo base + imported
+  // All layers for the panel: when a real project is active, show ONLY imported layers
   const allPanelLayers = useMemo(() => {
-    const demoBase = DEMO_LAYERS.map((l) => ({
-      id: l.layer_id,
-      name: l.layer_name,
-      visible: layerVisibility[l.layer_id] !== false,
-      featureCount: l.feature_count,
-      geometryType: resolveGeometryType(l.layer_id) as any,
-    }));
     if (!hasImportedData) {
+      const demoBase = DEMO_LAYERS.map((l) => ({
+        id: l.layer_id,
+        name: l.layer_name,
+        visible: layerVisibility[l.layer_id] !== false,
+        featureCount: l.feature_count,
+        geometryType: resolveGeometryType(l.layer_id) as any,
+      }));
       allPanelLayersRef.current = demoBase;
       return demoBase;
     }
 
-    const all = [...demoBase];
+    // Only imported layers — no demo data
+    const imported: any[] = [];
     for (const [key, features] of Object.entries(projectGeojsons)) {
       const importedKey = `${IMPORT_ID_PREFIX}${key}`;
-      all.push({
+      imported.push({
         id: importedKey,
         name: activeLayerNames[importedKey] ?? key.toUpperCase(),
         visible: layerVisibility[importedKey] !== false,
@@ -588,8 +624,8 @@ export default function MapScreen() {
         geometryType: (features[0]?.geometry?.type as any) ?? resolveGeometryType(key),
       });
     }
-    allPanelLayersRef.current = all;
-    return all;
+    allPanelLayersRef.current = imported;
+    return imported;
   }, [hasImportedData, projectGeojsons, activeLayerNames, layerVisibility]);
 
   // ── Transform allPanelLayers into LegendLayer format (for MapLegend) ────
@@ -1251,6 +1287,45 @@ export default function MapScreen() {
             </View>
           )}
 
+          {/* Loading overlay when a real project is active but data is being fetched */}
+          {storeActiveProject && !storeActiveProject.id.startsWith('demo-') && !storeActiveProject.id.startsWith('imported-') && !hasImportedData && (
+            <View style={[styles.loadingOverlay, { backgroundColor: colors.background + 'CC' }]}>
+              <View style={[styles.loadingBox, { backgroundColor: colors.surface }]}>
+                <Text style={{ fontSize: 32, marginBottom: 8 }}>📡</Text>
+                <Text style={[styles.loadingTitle, { color: colors.textPrimary }]}>
+                  Loading Project Data
+                </Text>
+                {layerFetchProgress ? (
+                  <>
+                    <Text style={[styles.loadingDesc, { color: colors.textSecondary }]}>
+                      Fetched {layerFetchProgress.fetched}/{layerFetchProgress.total} layers for {storeActiveProject?.name ?? 'project'}...
+                    </Text>
+                    {/* Progress bar */}
+                    <View style={[styles.progressBarBg, { backgroundColor: colors.outlineLight }]}>
+                      <View
+                        style={[
+                          styles.progressBarFill,
+                          {
+                            backgroundColor: colors.primary,
+                            width: `${Math.round((layerFetchProgress.fetched / layerFetchProgress.total) * 100)}%` as any,
+                          },
+                        ]}
+                      />
+                    </View>
+                    <ActivityIndicator size="small" color={colors.primary} style={{ marginTop: 12 }} />
+                  </>
+                ) : (
+                  <>
+                    <Text style={[styles.loadingDesc, { color: colors.textSecondary }]}>
+                      Awaiting layer list from server...
+                    </Text>
+                    <ActivityIndicator size="small" color={colors.primary} style={{ marginTop: 8 }} />
+                  </>
+                )}
+              </View>
+            </View>
+          )}
+
           {/* Interactive MapLibre Map */}
           <MapLibreMap
             layers={mapLayerData}
@@ -1872,4 +1947,51 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   basemapLabel: { fontSize: 12, fontWeight: '600' },
+
+  // ── Loading Overlay ───────────────────────────────────────────────────
+  loadingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 100,
+  },
+  loadingBox: {
+    paddingHorizontal: 32,
+    paddingVertical: 28,
+    borderRadius: 16,
+    alignItems: 'center',
+    maxWidth: 320,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  loadingTitle: {
+    fontSize: 17,
+    fontWeight: '600',
+    marginBottom: 4,
+    textAlign: 'center',
+  },
+  loadingDesc: {
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 18,
+    marginBottom: 16,
+  },
+  progressBarBg: {
+    width: '100%',
+    height: 6,
+    borderRadius: 3,
+    marginTop: 8,
+    overflow: 'hidden',
+  },
+  progressBarFill: {
+    height: 6,
+    borderRadius: 3,
+  },
 });

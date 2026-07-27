@@ -64,11 +64,26 @@ export async function uploadGpkg(
   file: { uri: string; name: string; type: string }
 ): Promise<{ session_id: string }> {
   const form = new FormData();
-  form.append('file', {
-    uri: file.uri,
-    name: file.name,
-    type: file.type,
-  } as unknown as Blob);
+
+  // On React Native, file objects use { uri, name, type } — on web we need
+  // an actual Blob/File.  Detect browser context by checking for `document`
+  // (present in browsers, absent in React Native Hermes).
+  if (typeof document !== 'undefined') {
+    // Web: fetch the blob and reconstruct as a File with correct MIME type.
+    // Using bare Blob defaults to application/octet-stream which can be
+    // rejected by Django validators expecting application/zip or similar.
+    const response = await fetch(file.uri);
+    const blob = await response.blob();
+    const webFile = new File([blob], file.name, { type: file.type || 'application/zip' });
+    form.append('file', webFile);
+  } else {
+    // React Native: use the standard RN pattern
+    form.append('file', {
+      uri: file.uri,
+      name: file.name,
+      type: file.type,
+    } as unknown as Blob);
+  }
 
   return apiFetch(`/api/projects/${projectId}/import/upload/`, {
     method: 'POST',

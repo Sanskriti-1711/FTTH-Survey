@@ -36,7 +36,7 @@ import type { AssignmentJob } from '../../lib/utils/types';
 export default function HomeScreen() {
   const colors = useThemeStore((s) => s.colors);
   const { user, demoMode } = useAuthStore();
-  const { assignments, stats, fetchAssignments, fetchProjects } = useProjectStore();
+  const { projects, assignments, stats, fetchAssignments, fetchProjects } = useProjectStore();
   const { loadDemoLayers } = useMapStore();
   const [refreshing, setRefreshing] = useState(false);
 
@@ -192,6 +192,42 @@ export default function HomeScreen() {
           />
         </Card>
 
+        {/* My Projects */}
+        <View style={styles.sectionHeader}>
+          <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>
+            My Projects
+          </Text>
+          <TouchableOpacity onPress={() => router.push('/project/import')}>
+            <Text style={[styles.seeAll, { color: colors.primary }]}>+ New</Text>
+          </TouchableOpacity>
+        </View>
+
+        {projects.length === 0 ? (
+          <EmptyState
+            title="No Projects Yet"
+            description="Import a survey package to get started"
+            action={
+              <Button
+                title="Import Survey Package"
+                variant="secondary"
+                size="sm"
+                onPress={() => router.push('/project/import')}
+              />
+            }
+          />
+        ) : (
+          projects.slice(0, 5).map((proj) => (
+            <ProjectCard
+              key={proj.id}
+              project={proj}
+              onPress={() => {
+                useProjectStore.getState().setActiveProject(proj);
+                router.push('/(tabs)/map');
+              }}
+            />
+          ))
+        )}
+
         {/* Active Assignments */}
         <View style={styles.sectionHeader}>
           <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>
@@ -232,6 +268,54 @@ export default function HomeScreen() {
         )}
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+// ── Project Card ───────────────────────────────────────────────────────────
+
+function ProjectCard({
+  project,
+  onPress,
+}: {
+  project: import('../../lib/utils/types').Project;
+  onPress: () => void;
+}) {
+  const colors = useThemeStore((s) => s.colors);
+
+  const statusColor = {
+    draft: colors.textTertiary,
+    in_progress: colors.warning,
+    active: colors.success,
+    completed: colors.primary,
+    archived: colors.textTertiary,
+  }[project.status] ?? colors.textTertiary;
+
+  return (
+    <TouchableOpacity
+      style={[styles.jobCard, { backgroundColor: colors.surface }]}
+      onPress={onPress}
+      activeOpacity={0.7}
+    >
+      <View style={styles.jobHeader}>
+        <View style={styles.jobInfo}>
+          <Text style={[styles.jobName, { color: colors.textPrimary }]} numberOfLines={1}>
+            {project.name}
+          </Text>
+          <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginTop: 2 }}>
+            <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
+            <Text style={[styles.jobMeta, { color: colors.textSecondary }]}>
+              {project.status.replace('_', ' ')} · {project.region}
+            </Text>
+          </View>
+        </View>
+        <ChevronRight size={16} stroke={colors.textTertiary} />
+      </View>
+      <View style={styles.jobFooter}>
+        <Text style={[styles.jobDate, { color: colors.textTertiary }]}>
+          Created: {new Date(project.created_at).toLocaleDateString()}
+        </Text>
+      </View>
+    </TouchableOpacity>
   );
 }
 
@@ -380,4 +464,9 @@ const styles = StyleSheet.create({
     marginTop: Spacing.md,
   },
   jobDate: { fontSize: 12 },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
 });
