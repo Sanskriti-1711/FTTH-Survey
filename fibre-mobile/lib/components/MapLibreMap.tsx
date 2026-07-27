@@ -347,6 +347,7 @@ function NativeMapView({
   // ── Point Drag State ─────────────────────────────────────────────────
   const [isDragging, setIsDragging] = useState(false);
   const [dragCoords, setDragCoords] = useState<[number, number] | null>(null);
+  const [dragDistance, setDragDistance] = useState<number | null>(null);
   const [layerShapes, setLayerShapes] = useState<Record<string, any>>({});
   const dragRef = useRef<{
     featureId: string;
@@ -362,6 +363,18 @@ function NativeMapView({
   const zoomRef = useRef(15);
   const onDragEndRef = useRef(onFeatureDragEnd);
   onDragEndRef.current = onFeatureDragEnd;
+
+  // ── Haversine distance (metres) ────────────────────────────────────────
+  const haversineDistance = useCallback((lng1: number, lat1: number, lng2: number, lat2: number): number => {
+    const R = 6371000;
+    const toRad = (d: number) => (d * Math.PI) / 180;
+    const dLng = toRad(lng2 - lng1);
+    const dLat = toRad(lat2 - lat1);
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }, []);
 
   const MapLibreGL = NativeMapLibre;
 
@@ -458,6 +471,12 @@ function NativeMapView({
           }
           return { ...prev, [ds.layerId]: { ...current, features } };
         });
+
+        // Update drag distance during move (ds already declared above)
+        if (ds) {
+          const dist = haversineDistance(ds.startLng, ds.startLat, coords[0], coords[1]);
+          setDragDistance(Math.round(dist));
+        }
       },
       onPanResponderRelease: () => {
         const ds = dragRef.current;
@@ -472,12 +491,14 @@ function NativeMapView({
         }
         setIsDragging(false);
         setDragCoords(null);
+        setDragDistance(null);
         dragCoordsRef.current = null;
         dragRef.current = null;
       },
       onPanResponderTerminate: () => {
         setIsDragging(false);
         setDragCoords(null);
+        setDragDistance(null);
         dragCoordsRef.current = null;
         dragRef.current = null;
       },
@@ -760,6 +781,19 @@ function NativeMapView({
           pointerEvents="auto"
           {...panResponder.panHandlers}
         />
+      )}
+
+      {/* Drag Distance Display — shown during drag on native */}
+      {isDragging && dragDistance !== null && (
+        <View style={styles.dragDistanceOverlay}>
+          <View style={styles.dragDistanceCard}>
+            <Text style={styles.dragDistanceIcon}>↕️</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'baseline' }}>
+              <Text style={styles.dragDistanceValue}>{dragDistance}</Text>
+              <Text style={styles.dragDistanceUnit}>m</Text>
+            </View>
+          </View>
+        </View>
       )}
 
       {/* Loading Overlay — only on loading, not during timeout to avoid visual stacking */}
@@ -1295,6 +1329,9 @@ function WebMapView({
   }, []);
 
   // ── Point Drag (Geometry Editing) ────────────────────────────────────
+  const [dragDistance, setDragDistance] = useState<number | null>(null);
+  const dragOriginRef = useRef<{ lng: number; lat: number } | null>(null);
+
   const dragStateRef = useRef<{
     active: boolean;
     featureId: string;
@@ -1309,6 +1346,21 @@ function WebMapView({
     /** If dragging a vertex, the parent feature's source ID */
     parentSourceId?: string;
   } | null>(null);
+
+  // ── Haversine distance (metres) ────────────────────────────────────────
+  const haversineDistance = useCallback(
+    (lng1: number, lat1: number, lng2: number, lat2: number): number => {
+      const R = 6371000;
+      const toRad = (d: number) => (d * Math.PI) / 180;
+      const dLng = toRad(lng2 - lng1);
+      const dLat = toRad(lat2 - lat1);
+      const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    },
+    []
+  );
 
   // Separate effect: enable/disable drag-pan based on dragMode
   useEffect(() => {
@@ -1346,6 +1398,17 @@ function WebMapView({
       if (!ds?.active) return;
       const lngLat = containerToLngLat(e);
       if (!lngLat) return;
+
+      // Calculate and display drag distance
+      if (dragOriginRef.current) {
+        const dist = haversineDistance(
+          dragOriginRef.current.lng,
+          dragOriginRef.current.lat,
+          lngLat.lng,
+          lngLat.lat
+        );
+        setDragDistance(Math.round(dist));
+      }
 
       const src = map.getSource(ds.sourceId) as any;
       if (!src?._data?.features) return;
@@ -1447,6 +1510,20 @@ function WebMapView({
           : `ml-lyr-${ds.layerId}-dragging`;
         if (map.getLayer(dragLayerId)) map.removeLayer(dragLayerId);
       } catch {}
+
+      // Remove origin marker layer
+      try {
+        if (ds) {
+          const origLayerId = `ml-orig-${ds.sourceId}`;
+          const origSourceId = `${ds.sourceId}-origin`;
+          if (map.getLayer(origLayerId)) map.removeLayer(origLayerId);
+          if (map.getSource(origSourceId)) map.removeSource(origSourceId);
+        }
+      } catch {}
+
+      // Reset distance tracking
+      setDragDistance(null);
+      dragOriginRef.current = null;
       dragStateRef.current = null;
     };
 
@@ -1457,6 +1534,10 @@ function WebMapView({
       const wasVertexDrag = ds.vertexIdx !== undefined;
       const vertexIdx = ds.vertexIdx;
       const parentSourceId = ds.parentSourceId;
+
+      // Reset drag distance before cancel
+      setDragDistance(null);
+      dragOriginRef.current = null;
       cancelDrag();
 
       if (lngLat && ds) {
@@ -1520,6 +1601,10 @@ function WebMapView({
 
         map.getCanvas().style.cursor = 'grabbing';
 
+        // Store the original position for distance tracking
+        dragOriginRef.current = { lng: e.lngLat.lng, lat: e.lngLat.lat };
+        setDragDistance(null);
+
         dragStateRef.current = {
           active: true,
           featureId: fid,
@@ -1548,6 +1633,50 @@ function WebMapView({
             });
           } catch {}
         }
+
+        // Add/update an origin position marker at the original location
+        const origLayerId = `ml-orig-${sourceId}`;
+        const origSourceId = `${sourceId}-origin`;
+        try {
+          if (!map.getSource(origSourceId)) {
+            map.addSource(origSourceId, {
+              type: 'geojson',
+              data: {
+                type: 'FeatureCollection',
+                features: [{
+                  type: 'Feature',
+                  geometry: { type: 'Point', coordinates: [e.lngLat.lng, e.lngLat.lat] },
+                  properties: {},
+                }],
+              },
+            });
+          } else {
+            // Update existing source with new origin coordinates
+            map.getSource(origSourceId).setData({
+              type: 'FeatureCollection',
+              features: [{
+                type: 'Feature',
+                geometry: { type: 'Point', coordinates: [e.lngLat.lng, e.lngLat.lat] },
+                properties: {},
+              }],
+            });
+          }
+          if (!map.getLayer(origLayerId)) {
+            map.addLayer({
+              id: origLayerId,
+              type: 'circle',
+              source: origSourceId,
+              paint: {
+                'circle-radius': 10,
+                'circle-color': 'rgba(255, 255, 255, 0.5)',
+                'circle-stroke-width': 2,
+                'circle-stroke-color': '#ff6b6b',
+                'circle-stroke-opacity': 0.8,
+                'circle-opacity': 0.3,
+              },
+            });
+          }
+        } catch {}
       };
 
       try {
@@ -1693,6 +1822,19 @@ function WebMapView({
             setMapKey((k) => k + 1);
           }}
         />
+      )}
+
+      {/* Drag Distance Display — shown during point drag */}
+      {dragDistance !== null && (
+        <View style={styles.dragDistanceOverlay}>
+          <View style={styles.dragDistanceCard}>
+            <Text style={styles.dragDistanceIcon}>↕️</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'baseline' }}>
+              <Text style={styles.dragDistanceValue}>{dragDistance}</Text>
+              <Text style={styles.dragDistanceUnit}>m</Text>
+            </View>
+          </View>
+        </View>
       )}
 
       {status === 'ready' && isEmpty && <EmptyOverlay />}
@@ -1918,6 +2060,44 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   emptyBadgeText: { fontSize: 11, fontWeight: '700', color: '#FFFFFF' },
+  // ── Drag Distance Overlay ────────────────────────────────────────────
+  dragDistanceOverlay: {
+    position: 'absolute',
+    top: 12,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    zIndex: 100,
+    pointerEvents: 'none',
+  },
+  dragDistanceCard: {
+    backgroundColor: '#1F2937',
+    borderRadius: 20,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 6,
+  },
+  dragDistanceIcon: {
+    fontSize: 14,
+  },
+  dragDistanceValue: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  dragDistanceUnit: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: '#9CA3AF',
+    marginLeft: 2,
+  },
   emptyTitle: {
     fontSize: 16,
     fontWeight: '600',

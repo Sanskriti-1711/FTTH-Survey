@@ -3,7 +3,6 @@ import type { Project, AssignmentJob, GeoJSONFeature, Layer } from '../utils/typ
 import * as projectsApi from '../api/projects';
 import * as assignmentsApi from '../api/assignments';
 import { useAuthStore } from './auth';
-import { useAuthStore } from './auth';
 import {
   DEMO_PROJECTS,
   DEMO_ASSIGNMENTS,
