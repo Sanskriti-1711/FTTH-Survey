@@ -4,10 +4,11 @@
 // For local dev: http://localhost:8000 (Django on same machine)
 // For LAN:       http://YOUR_IP:8000 (other devices on network)
 // For cloud:     https://your-domain.com
+// During development, always use localhost.
+// For production deployment, set the EXPO_PUBLIC_API_URL env var
+// or override this constant before deploying.
 export const API_BASE_URL =
-  process.env.NODE_ENV !== 'production'
-    ? 'http://localhost:8000'
-    : 'https://api.fibre360.com';
+  process.env.EXPO_PUBLIC_API_URL || 'http://localhost:8000';
 
 export const MICROSERVICE_BASE_URL = 'https://fiber-import.zeabur.app';
 

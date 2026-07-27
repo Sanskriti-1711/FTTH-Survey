@@ -1,15 +1,33 @@
+import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { API_BASE_URL } from '../utils/constants';
 import { useOfflineStore } from '../stores/offline';
 
 // ── Token Management ─────────────────────────────────────────────────────
+// SecureStore only works on native (iOS/Android). On web, fall back to localStorage.
 const TOKENS = { access: 'fibre360_access', refresh: 'fibre360_refresh' } as const;
+
+const isWeb = Platform.OS === 'web';
+
+const webStorage = {
+  getItem: (key: string): string | null => {
+    try { return localStorage.getItem(key); } catch { return null; }
+  },
+  setItem: (key: string, value: string): void => {
+    try { localStorage.setItem(key, value); } catch { /* quota exceeded */ }
+  },
+  removeItem: (key: string): void => {
+    try { localStorage.removeItem(key); } catch { /* ignore */ }
+  },
+};
 
 export let apiClientToken: string | null = null;
 
 export async function loadStoredToken(): Promise<string | null> {
   try {
-    const token = await SecureStore.getItemAsync(TOKENS.access);
+    const token = isWeb
+      ? webStorage.getItem(TOKENS.access)
+      : await SecureStore.getItemAsync(TOKENS.access);
     if (token) apiClientToken = token;
     return token;
   } catch {
@@ -19,18 +37,29 @@ export async function loadStoredToken(): Promise<string | null> {
 
 export async function saveTokens(access: string, refresh: string): Promise<void> {
   apiClientToken = access;
-  await SecureStore.setItemAsync(TOKENS.access, access);
-  await SecureStore.setItemAsync(TOKENS.refresh, refresh);
+  if (isWeb) {
+    webStorage.setItem(TOKENS.access, access);
+    webStorage.setItem(TOKENS.refresh, refresh);
+  } else {
+    await SecureStore.setItemAsync(TOKENS.access, access);
+    await SecureStore.setItemAsync(TOKENS.refresh, refresh);
+  }
 }
 
 export async function clearTokens(): Promise<void> {
   apiClientToken = null;
-  await SecureStore.deleteItemAsync(TOKENS.access);
-  await SecureStore.deleteItemAsync(TOKENS.refresh);
+  if (isWeb) {
+    webStorage.removeItem(TOKENS.access);
+    webStorage.removeItem(TOKENS.refresh);
+  } else {
+    await SecureStore.deleteItemAsync(TOKENS.access);
+    await SecureStore.deleteItemAsync(TOKENS.refresh);
+  }
 }
 
 async function getRefreshToken(): Promise<string | null> {
   try {
+    if (isWeb) return webStorage.getItem(TOKENS.refresh);
     return await SecureStore.getItemAsync(TOKENS.refresh);
   } catch {
     return null;
