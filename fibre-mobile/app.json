@@ -1,0 +1,54 @@
+{
+  "expo": {
+    "name": "Fiber360",
+    "slug": "fibre360-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "fibre360",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0D5CFF"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.fibre360.mobile",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Fiber360 needs camera access to capture field photos.",
+        "NSLocationWhenInUseUsageDescription": "Fiber360 needs your location to show your position on the survey map.",
+        "NSPhotoLibraryUsageDescription": "Fiber360 needs photo library access to save captured photos."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0D5CFF"
+      },
+      "package": "com.fibre360.mobile",
+      "permissions": [
+        "CAMERA",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE"
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-image-picker",
+      "expo-document-picker",
+      "expo-location",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "kotlinVersion": "2.2.0"
+          }
+        }
+      ]
+    ]
+  }
+}

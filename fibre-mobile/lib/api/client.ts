@@ -1,0 +1,139 @@
+import * as SecureStore from 'expo-secure-store';
+import { API_BASE_URL } from '../utils/constants';
+import { useOfflineStore } from '../stores/offline';
+
+// ── Token Management ─────────────────────────────────────────────────────
+const TOKENS = { access: 'fibre360_access', refresh: 'fibre360_refresh' } as const;
+
+export let apiClientToken: string | null = null;
+
+export async function loadStoredToken(): Promise<string | null> {
+  try {
+    const token = await SecureStore.getItemAsync(TOKENS.access);
+    if (token) apiClientToken = token;
+    return token;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveTokens(access: string, refresh: string): Promise<void> {
+  apiClientToken = access;
+  await SecureStore.setItemAsync(TOKENS.access, access);
+  await SecureStore.setItemAsync(TOKENS.refresh, refresh);
+}
+
+export async function clearTokens(): Promise<void> {
+  apiClientToken = null;
+  await SecureStore.deleteItemAsync(TOKENS.access);
+  await SecureStore.deleteItemAsync(TOKENS.refresh);
+}
+
+async function getRefreshToken(): Promise<string | null> {
+  try {
+    return await SecureStore.getItemAsync(TOKENS.refresh);
+  } catch {
+    return null;
+  }
+}
+
+// ── API Error ─────────────────────────────────────────────────────────────
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+    public data?: unknown
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+// ── Fetch Wrapper ─────────────────────────────────────────────────────────
+
+/**
+ * Check if the device has network access before making a request.
+ * Throws early with a clear message so callers can handle offline gracefully.
+ */
+function requireOnline(): void {
+  const { isOnline, connectivitySource } = useOfflineStore.getState();
+  if (!isOnline) {
+    throw new ApiError(
+      connectivitySource === 'demo'
+        ? 'Demo mode: no network available. Toggle online in Offline Storage to simulate connectivity.'
+        : 'No internet connection. Data will sync automatically when reconnected.',
+      0
+    );
+  }
+}
+
+async function refreshAccessToken(): Promise<string | null> {
+  const refresh = await getRefreshToken();
+  if (!refresh) return null;
+
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/users/token/refresh/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh }),
+    });
+
+    if (!res.ok) return null;
+
+    const data = await res.json();
+    await saveTokens(data.access, data.refresh ?? refresh);
+    return data.access;
+  } catch {
+    return null;
+  }
+}
+
+export async function apiFetch<T = unknown>(
+  path: string,
+  options: RequestInit & { isFormData?: boolean } = {}
+): Promise<T> {
+  const { isFormData, ...fetchOptions } = options;
+
+  const headers: Record<string, string> = {};
+
+  if (!isFormData) {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  if (apiClientToken) {
+    headers['Authorization'] = `Bearer ${apiClientToken}`;
+  }
+
+  const url = path.startsWith('http') ? path : `${API_BASE_URL}${path}`;
+
+  // Abort early if offline — avoid pointless timeout waits
+  requireOnline();
+
+  let res = await fetch(url, { ...fetchOptions, headers });
+
+  // Auto-refresh on 401
+  if (res.status === 401) {
+    const newToken = await refreshAccessToken();
+    if (newToken) {
+      headers['Authorization'] = `Bearer ${newToken}`;
+      res = await fetch(url, { ...fetchOptions, headers });
+    }
+  }
+
+  if (!res.ok) {
+    let data: unknown = null;
+    try {
+      data = await res.json();
+    } catch { /* no body */ }
+    throw new ApiError(
+      `Request failed with status ${res.status}`,
+      res.status,
+      data
+    );
+  }
+
+  // Handle 204 No Content
+  if (res.status === 204) return undefined as T;
+
+  return res.json() as Promise<T>;
+}

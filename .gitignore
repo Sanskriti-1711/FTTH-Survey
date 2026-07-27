@@ -1,0 +1,59 @@
+# ── Node.js / Expo ─────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── Expo / Metro ──────────────────────────────────────────
+.expo/
+*.tsbuildinfo
+metro.log
+
+# ── Build outputs (web exports) ───────────────────────────
+fibre-mobile/dist/
+fibre-mobile/dist-fresh/
+fibre-mobile/build_output/
+fibre-mobile/web-dist/
+fibre-mobile/web-drag/
+fibre-mobile/web-final/
+fibre-mobile/web-grouped/
+fibre-mobile/web-mobile-drag/
+fibre-mobile/web-prod/
+fibre-mobile/web-spatial/
+fibre-mobile/web-test/
+fibre-mobile/web-undo/
+
+# ── Android ───────────────────────────────────────────────
+fibre-mobile/android/build/
+fibre-mobile/android/.gradle/
+fibre-mobile/android/local.properties
+*.iml
+*.hprof
+android/app/src/main/java/inline/
+
+# ── iOS (future) ──────────────────────────────────────────
+fibre-mobile/ios/
+*.jsbundle
+
+# ── Environment ───────────────────────────────────────────
+.env
+.env.local
+.env.production
+
+# ── OS files ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# ── Survey packages (large uploads) ───────────────────────
+survey_package.zip
+survey_package_wgs84.zip
+
+# ── Docker ────────────────────────────────────────────────
+docker-compose.override.yml
+
+# ── IDE / Editor ──────────────────────────────────────────
+.idea/
+.vscode/
+*.sublime-*
