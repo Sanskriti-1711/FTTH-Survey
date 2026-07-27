@@ -65,6 +65,7 @@ export default function MapFeaturePopup({
   status,
   properties,
   layerId,
+  labelOverrides,
   onClose,
   onOpenDetails,
   onDismiss,
