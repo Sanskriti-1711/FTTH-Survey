@@ -32,11 +32,17 @@ export interface Feature {
   layer_name: string;
   layer_id: string;
   properties: Record<string, unknown>;
+  /** GeoJSON geometry object (returned from backend) */
+  geometry?: Record<string, unknown> | null;
   field_schema: FieldSchemaField[] | null;
   field_measurements: Record<string, unknown> | null;
   comparison_notes: string;
   status: 'pending' | 'assigned' | 'under_review' | 'approved' | 'redo';
   photo_url: string | null;
+  /** UUID of the user who last edited this feature */
+  edited_by?: string | null;
+  /** ISO timestamp of the last edit */
+  edited_at?: string | null;
   created_at: string;
   updated_at: string;
 }

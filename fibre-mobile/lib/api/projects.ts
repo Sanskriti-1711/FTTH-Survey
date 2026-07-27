@@ -89,23 +89,22 @@ export async function discoverGpkg(
 
 export async function importGpkg(
   projectId: string,
-  sessionId: string,
-  layerNames?: string[]
-): Promise<{ imported_features: number }> {
+  data: { selected_layers: string[] }
+): Promise<{
+  project_id: string;
+  status: string;
+  imported_layers: string[];
+}> {
   return apiFetch(`/api/projects/${projectId}/import/import/`, {
     method: 'POST',
-    body: JSON.stringify({ session_id: sessionId, layers: layerNames }),
+    body: JSON.stringify(data),
   });
 }
 
 export async function importStatus(
-  projectId: string,
-  sessionId: string
-): Promise<{ status: string; progress: number }> {
-  return apiFetch(`/api/projects/${projectId}/import/status/`, {
-    method: 'POST',
-    body: JSON.stringify({ session_id: sessionId }),
-  });
+  projectId: string
+): Promise<{ project_id: string; status: string; session_id?: string; original_filename?: string }> {
+  return apiFetch(`/api/projects/${projectId}/import/status/`);
 }
 
 // ── Feature Updates ──────────────────────────────────────────────────────
@@ -131,6 +130,34 @@ export async function updateFeature(
       body: JSON.stringify(data),
     }
   );
+}
+
+// ── Layer Field Config ───────────────────────────────────────────────────
+
+export async function getLayerFieldConfig(
+  projectId: string,
+  layerId: string
+): Promise<{
+  project_id: string;
+  layer_id: string;
+  schema: import('../utils/types').FieldSchemaField[];
+}> {
+  return apiFetch(`/api/projects/${projectId}/layers/${layerId}/field-config/`);
+}
+
+export async function updateLayerFieldConfig(
+  projectId: string,
+  layerId: string,
+  schema: import('../utils/types').FieldSchemaField[]
+): Promise<{
+  project_id: string;
+  layer_id: string;
+  schema: import('../utils/types').FieldSchemaField[];
+}> {
+  return apiFetch(`/api/projects/${projectId}/layers/${layerId}/field-config/`, {
+    method: 'PUT',
+    body: JSON.stringify({ schema }),
+  });
 }
 
 // ── Completion ────────────────────────────────────────────────────────────

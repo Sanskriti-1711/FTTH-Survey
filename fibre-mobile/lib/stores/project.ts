@@ -178,17 +178,39 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         return;
       }
     }
-    // NON-DEMO PATH — gracefully fall back to demo data if API unavailable
-    console.warn('[importSurveyPackage] demoMode is false — attempting API call, will fall back if unavailable');
+    // NON-DEMO PATH — upload → discover → import
+    console.log('[importSurveyPackage] Running non-demo import flow');
     set({ isLoading: true, error: null });
     try {
-      const { session_id } = await projectsApi.uploadGpkg(projectId, file);
-      await projectsApi.importGpkg(projectId, session_id);
+      // Step 1: Upload the file (returns session_id)
+      const uploadResult = await projectsApi.uploadGpkg(projectId, file);
+      const sessionId = uploadResult.session_id;
+
+      // Step 2: Discover layers from the uploaded file
+      const discoverResult = await projectsApi.discoverGpkg(projectId, sessionId);
+
+      // Extract layer names from discover result (supports both array and nested formats)
+      const layersPayload = discoverResult.layers ?? [];
+      const layerNames: string[] = Array.isArray(layersPayload)
+        ? layersPayload.map((l: any) => l.name ?? l.layer_name ?? l)
+        : [];
+
+      if (layerNames.length === 0) {
+        throw new Error('No layers discovered in the uploaded file');
+      }
+
+      // Step 3: Import the selected layers
+      await projectsApi.importGpkg(projectId, { selected_layers: layerNames });
+
+      // Step 4: Refresh project list
       const projects = await projectsApi.listProjects();
       set({ projects, isLoading: false });
       return;
     } catch (err: unknown) {
-      console.warn('[importSurveyPackage] API unavailable — falling back to demo data:', err);
+      const message = err instanceof Error ? err.message : 'Unknown import error';
+      console.warn('[importSurveyPackage] API import failed:', message);
+
+      // Fall back to demo data so the user isn't stuck
       const sim = simulateImport();
       set((state) => ({
         projects: [sim.project, ...state.projects],
@@ -196,7 +218,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         projectGeojsons: sim.geojsons,
         projectLayers: sim.layers,
         isLoading: false,
-        error: `Backend unavailable — using demo data. (${err instanceof Error ? err.message : 'API error'})`,
+        error: `Import failed: ${message}. Using demo data as fallback.`,
       }));
       return;
     }
