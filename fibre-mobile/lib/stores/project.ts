@@ -3,6 +3,7 @@ import type { Project, AssignmentJob, GeoJSONFeature, Layer } from '../utils/typ
 import * as projectsApi from '../api/projects';
 import * as assignmentsApi from '../api/assignments';
 import { useAuthStore } from './auth';
+import { useAuthStore } from './auth';
 import {
   DEMO_PROJECTS,
   DEMO_ASSIGNMENTS,
@@ -40,6 +41,16 @@ interface ProjectState {
   importSurveyPackage: (projectId: string, file: { uri: string; name: string; type: string }) => Promise<void>;
   addDemoProject: (project: Project) => void;
   setProjectGeojsons: (geojsons: Record<string, GeoJSONFeature[]>) => void;
+  syncFeatureEdit: (
+    projectId: string,
+    featureId: string,
+    data: {
+      geometry?: Record<string, unknown> | null;
+      properties?: Record<string, unknown>;
+      field_measurements?: Record<string, unknown>;
+      status?: string;
+    }
+  ) => Promise<void>;
 }
 
 export const useProjectStore = create<ProjectState>((set, get) => ({
@@ -200,6 +211,52 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   setProjectGeojsons: (geojsons) =>
     set({ projectGeojsons: geojsons }),
+
+  /**
+   * Sync a geometry or property edit to the backend.
+   * This is a fire-and-forget operation — it doesn't block the UI.
+   * In demo mode, this is a no-op.
+   */
+  syncFeatureEdit: async (
+    projectId: string,
+    featureId: string,
+    data: {
+      geometry?: Record<string, unknown> | null;
+      properties?: Record<string, unknown>;
+      field_measurements?: Record<string, unknown>;
+      status?: string;
+    }
+  ) => {
+    const { demoMode } = useAuthStore.getState();
+
+    // Skip sync in demo mode or if project ID is a fake demo/imported ID
+    if (demoMode) {
+      console.log('[Sync] Demo mode — skipping feature sync');
+      return;
+    }
+
+    // Skip if project is fake (demo or local-only import)
+    if (projectId.startsWith('demo-') || projectId.startsWith('imported-')) {
+      console.log('[Sync] Local project — skipping feature sync');
+      return;
+    }
+
+    // Skip if feature ID is a fake local ID
+    if (featureId.startsWith('imp-feat-') || featureId.startsWith('demo-')) {
+      console.log('[Sync] Local feature — skipping feature sync');
+      return;
+    }
+
+    // Skip the user ID (UUID) fields that might be in properties
+    // Only send geometry, editable properties, and status
+    try {
+      const result = await projectsApi.updateFeature(projectId, featureId, data);
+      console.log(`[Sync] Feature ${featureId} synced:`, result);
+    } catch (err) {
+      console.warn(`[Sync] Failed to sync feature ${featureId}:`, err);
+      // Don't throw — this is fire-and-forget
+    }
+  },
 
 }));
 

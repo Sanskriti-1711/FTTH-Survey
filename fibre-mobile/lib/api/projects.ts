@@ -108,6 +108,31 @@ export async function importStatus(
   });
 }
 
+// ── Feature Updates ──────────────────────────────────────────────────────
+
+export async function updateFeature(
+  projectId: string,
+  featureId: string,
+  data: {
+    geometry?: Record<string, unknown> | null;
+    properties?: Record<string, unknown>;
+    field_measurements?: Record<string, unknown>;
+    comparison_notes?: string;
+    status?: string;
+  }
+): Promise<{
+  project_id: string;
+  feature: Feature;
+}> {
+  return apiFetch(
+    `/api/projects/${projectId}/features/${featureId}/update/`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }
+  );
+}
+
 // ── Completion ────────────────────────────────────────────────────────────
 
 export async function getProjectCompletion(projectId: string): Promise<{

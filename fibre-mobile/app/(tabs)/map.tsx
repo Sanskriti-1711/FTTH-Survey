@@ -831,6 +831,18 @@ export default function MapScreen() {
       };
       applyRecalc();
 
+      // ── Fire-and-forget sync to backend (no-op in demo mode) ───────
+      const syncProjectId = useProjectStore.getState().activeProject?.id;
+      const movedFeature = updatedFeatures.find((f) => {
+        const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
+        return fid === featureId;
+      });
+      if (syncProjectId && movedFeature?.geometry) {
+        useProjectStore.getState().syncFeatureEdit(syncProjectId, featureId, {
+          geometry: movedFeature.geometry as Record<string, unknown>,
+        });
+      }
+
       console.log(
         `[Drag] Moved ${featureId} to [${newLng.toFixed(6)}, ${newLat.toFixed(6)}]`
       );
@@ -856,6 +868,20 @@ export default function MapScreen() {
         });
       } else if (DEMO_GEOJSON_FEATURES[layerId] || !currentHasImported) {
         setLocalDemoGeojson((prev) => ({ ...prev, [layerId]: updatedFeatures }));
+      }
+
+      // ── Sync geometry changes to backend (no-op in demo mode) ──────
+      const syncProjectId = useProjectStore.getState().activeProject?.id;
+      if (syncProjectId) {
+        for (const feat of updatedFeatures) {
+          const featId = (feat.properties as any)?.id ?? (feat.properties as any)?._id ?? '';
+          if (featId && feat.geometry) {
+            useProjectStore.getState().syncFeatureEdit(syncProjectId, featId, {
+              geometry: feat.geometry as Record<string, unknown>,
+              properties: feat.properties as Record<string, unknown>,
+            });
+          }
+        }
       }
 
       console.log(`[Geometry] ${description}`);
@@ -1047,6 +1073,18 @@ export default function MapScreen() {
             }
           }
           return next;
+        });
+      }
+
+      // ── Fire-and-forget sync to backend (no-op in demo mode) ───────
+      const syncProjectId = useProjectStore.getState().activeProject?.id;
+      const movedFeature = updatedFeatures.find((f) => {
+        const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
+        return fid === featureId;
+      });
+      if (syncProjectId && movedFeature?.geometry) {
+        useProjectStore.getState().syncFeatureEdit(syncProjectId, featureId, {
+          geometry: movedFeature.geometry as Record<string, unknown>,
         });
       }
 
