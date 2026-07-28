@@ -18,10 +18,7 @@ import { useSurveyStore } from '../../lib/stores/survey';
 import { useSurveyFeaturesStore, SURVEY_COLOR } from '../../lib/stores/survey-features';
 import { getDemoAllFeatures, DEMO_GEOJSON_FEATURES, DEMO_FEATURES, DEMO_LAYERS } from '../../lib/stores/demo-data';
 import { recalculateDependentProperties } from '../../lib/utils/spatial';
-import {
-  createGeoJSONFeature,
-  createPointFeature,
-} from '../../lib/utils/geometry-operations';
+// Geometry operation utilities removed — all edits now route through survey-features store
 import GeometryEditor from '../../lib/components/GeometryEditor';
 import type { GeometryMode, EditingFeature } from '../../lib/components/GeometryEditor';
 import LineSelectionToolbar from '../../lib/components/LineSelectionToolbar';
@@ -233,6 +230,10 @@ export default function MapScreen() {
     setDisplayMode,
     fetchSurveyFeatures,
     clearSurveyFeatures,
+    upsertSurveyFeature,
+    updateSurveyFeature,
+    deleteSurveyFeature,
+    getSurveyFeatureForHld,
   } = useSurveyFeaturesStore();
 
   const [viewMode, setViewMode] = useState<'map' | 'list'>('map');
@@ -296,6 +297,15 @@ export default function MapScreen() {
       previousFeatures: GeoJSONFeature[];
       description: string;
     };
+    /** For survey-feature operations — restores the previous survey feature state */
+    surveyUndo?: {
+      surveyFeatureId: string;
+      layerId: string;
+      previousGeometry: Record<string, unknown>;
+      previousAttributes: Record<string, unknown>;
+      previousStatus: string;
+      description: string;
+    };
   };
   const undoStackRef = useRef<UndoEntry[]>([]);
   const [undoCount, setUndoCount] = useState(0);
@@ -317,6 +327,19 @@ export default function MapScreen() {
     const entry = stack[stack.length - 1];
     undoStackRef.current = stack.slice(0, -1);
     setUndoCount(undoStackRef.current.length);
+
+    // ── SURVEY UNDO: restore a survey feature's previous geometry/attributes ──
+    if (entry.surveyUndo) {
+      const { surveyFeatureId, layerId, previousGeometry, previousAttributes, previousStatus, description } = entry.surveyUndo;
+      console.log(`[Undo] Restoring survey feature ${surveyFeatureId.slice(-8)}: ${description}`);
+      // Use updateSurveyFeature to restore previous state
+      updateSurveyFeature(surveyFeatureId, layerId, {
+        survey_geometry: previousGeometry,
+        survey_attributes: previousAttributes,
+        survey_status: previousStatus as any,
+      });
+      return;
+    }
 
     // ── SNAPSHOT RESTORE: multi-feature operations (split, merge, create, delete) ──
     if (entry.layerSnapshot) {
@@ -420,7 +443,7 @@ export default function MapScreen() {
         return next;
       });
     }
-  }, []);
+  }, [updateSurveyFeature]);
 
   // Refs are kept in sync INSIDE the respective useMemo/useState hooks below
   // to avoid TDZ errors from referencing later-declared const variables in dependency arrays.
@@ -997,30 +1020,52 @@ export default function MapScreen() {
     });
   }, []);
 
-  // ── Point drag end handler — MOVES the point visually AND records SurveyChange (Sprint 6) ──
+  // ── Helper: find an HLD feature's original geometry + attributes from active GeoJSON ──
+  // Used when creating a SurveyFeature — we need to freeze the original HLD state.
+  const findHldFeatureOriginal = useCallback(
+    (featureId: string, layerId: string): {
+      geometry: Record<string, unknown> | null;
+      attributes: Record<string, unknown> | null;
+    } => {
+      const features = activeGeojsonRef.current[layerId];
+      if (!features) return { geometry: null, attributes: null };
+      const found = features.find((f) => {
+        const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
+        return fid === featureId;
+      });
+      if (!found) return { geometry: null, attributes: null };
+      return {
+        geometry: found.geometry as Record<string, unknown> | null,
+        attributes: { ...(found.properties as Record<string, unknown>) },
+      };
+    },
+    [],
+  );
+
+  // ── Helper: auto-switch to overlay mode when a survey edit is made ──
+  // So the engineer immediately sees blue HLD + orange survey side by side.
+  const autoOverlayOnEdit = useCallback(() => {
+    if (displayMode === 'hld') {
+      setDisplayMode('overlay');
+    }
+  }, [displayMode, setDisplayMode]);
+
+  // ── Point drag end handler — routes through SurveyFeature store (HLD stays read-only) ──
+  // When the engineer drags a point, we create/update a SurveyFeature with the new
+  // geometry. The HLD GeoJSON is NEVER mutated — the orange survey layer shows the move.
   const handleFeatureDragEnd = useCallback(
     (featureId: string, layerId: string, newLng: number, newLat: number) => {
       const layerFeatures = activeGeojsonRef.current[layerId];
       if (!layerFeatures) return;
 
-      let oldLng = 0, oldLat = 0;
-      let found = false;
-
-      // Find the feature and update its coordinates IN PLACE
-      const updatedFeatures = layerFeatures.map((f) => {
+      // Find the HLD feature to get its original coordinates
+      const hldFeature = layerFeatures.find((f) => {
         const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
-        if (fid === featureId && f.geometry?.type === 'Point') {
-          found = true;
-          const [olng, olat] = f.geometry.coordinates as [number, number];
-          oldLng = olng;
-          oldLat = olat;
-          // MOVE the point — the same PDP/Premise/MFG at a new location
-          return { ...f, geometry: { ...f.geometry, coordinates: [newLng, newLat] } };
-        }
-        return f;
+        return fid === featureId && f.geometry?.type === 'Point';
       });
+      if (!hldFeature) return;
 
-      if (!found) return;
+      const [oldLng, oldLat] = hldFeature.geometry.coordinates as [number, number];
 
       // Check if the point actually moved (threshold ~0.5m)
       const dist = Math.sqrt((newLng - oldLng) ** 2 + (newLat - oldLat) ** 2) * 111000;
@@ -1029,43 +1074,89 @@ export default function MapScreen() {
         return;
       }
 
-      // Push to undo stack so Ctrl+Z can restore the previous position
-      pushUndo({
-        featureId,
-        layerId,
-        oldLng,
-        oldLat,
-        newLng,
-        newLat,
-        timestamp: Date.now(),
-      });
+      // ── Build the new survey geometry (Point at new location) ──
+      const newSurveyGeometry = {
+        type: 'Point',
+        coordinates: [newLng, newLat],
+      };
 
-      // ── APPLY the move to the GeoJSON data (point actually moves on map) ──
-      const currentHasImported = Object.keys(useProjectStore.getState().projectGeojsons).length > 0;
+      // ── Check if a SurveyFeature already exists for this HLD feature ──
+      const existingSurvey = getSurveyFeatureForHld(featureId);
+      const layerName = activeLayerNames[layerId] ?? layerId.toUpperCase();
 
-      if (currentHasImported && layerId.startsWith(IMPORT_ID_PREFIX)) {
-        const cleanKey = layerId.slice(IMPORT_ID_PREFIX.length);
-        const current = useProjectStore.getState().projectGeojsons;
-        useProjectStore.getState().setProjectGeojsons({
-          ...current,
-          [cleanKey]: updatedFeatures,
+      // ── Get original HLD geometry + attributes (frozen snapshot) ──
+      const { geometry: origGeom, attributes: origAttrs } = findHldFeatureOriginal(featureId, layerId);
+
+      if (existingSurvey) {
+        // ── UPDATE: push undo with previous state, then update via store ──
+        pushUndo({
+          featureId,
+          layerId,
+          oldLng,
+          oldLat,
+          newLng,
+          newLat,
+          timestamp: Date.now(),
+          surveyUndo: {
+            surveyFeatureId: existingSurvey.id,
+            layerId,
+            previousGeometry: existingSurvey.survey_geometry,
+            previousAttributes: existingSurvey.survey_attributes,
+            previousStatus: existingSurvey.survey_status,
+            description: `Drag point ${featureId.slice(-8)} back to [${oldLng.toFixed(6)}, ${oldLat.toFixed(6)}]`,
+          },
         });
-      } else if (DEMO_GEOJSON_FEATURES[layerId] || !currentHasImported) {
-        setLocalDemoGeojson((prev) => ({ ...prev, [layerId]: updatedFeatures }));
+
+        updateSurveyFeature(existingSurvey.id, layerId, {
+          survey_geometry: newSurveyGeometry,
+          survey_status: 'modified',
+        });
+      } else {
+        // ── CREATE: upsert a new SurveyFeature referencing the HLD feature ──
+        upsertSurveyFeature(
+          featureId,           // hldFeatureId
+          layerId,             // layerId
+          layerName,           // layerName
+          newSurveyGeometry,   // surveyGeometry
+          origAttrs ?? {},     // surveyAttributes (copy from HLD)
+          origGeom,            // originalGeometry (frozen)
+          origAttrs,           // originalAttributes (frozen)
+          `Dragged point from [${oldLng.toFixed(6)}, ${oldLat.toFixed(6)}] to [${newLng.toFixed(6)}, ${newLat.toFixed(6)}]`,
+        ).then((sf) => {
+          if (sf) {
+            pushUndo({
+              featureId,
+              layerId,
+              oldLng,
+              oldLat,
+              newLng,
+              newLat,
+              timestamp: Date.now(),
+              surveyUndo: {
+                surveyFeatureId: sf.id,
+                layerId,
+                previousGeometry: origGeom as Record<string, unknown>,
+                previousAttributes: origAttrs as Record<string, unknown>,
+                previousStatus: 'new',
+                description: `Undo: remove survey feature for ${featureId.slice(-8)}`,
+              },
+            });
+          }
+        });
       }
 
-      // ── RECORD SurveyChange for audit trail (HLD original saved for comparison) ──
-      // IMPORTANT: Pass the REAL DB feature UUID (featureId from GeoJSON properties.id),
-      // NOT the compositeKey. The backend's SurveyChangeSerializer expects a valid
-      // Feature UUID in the `feature` ForeignKey field.
+      // ── Auto-switch to overlay mode so engineer sees both HLD + survey ──
+      autoOverlayOnEdit();
+
+      // ── Also record SurveyChange for audit trail (existing mechanism) ──
       const compositeKey = surveyPointKey(layerId, featureId);
       recordPointMove(featureId, compositeKey, layerId, oldLng, oldLat, newLng, newLat);
 
       console.log(
-        `[Drag] Moved ${featureId}: [${oldLng.toFixed(6)},${oldLat.toFixed(6)}] → [${newLng.toFixed(6)},${newLat.toFixed(6)}] (${dist.toFixed(1)}m) — SurveyChange recorded`
+        `[Drag] SurveyFeature ${existingSurvey ? 'updated' : 'upserting...'} for ${featureId}: [${oldLng.toFixed(6)},${oldLat.toFixed(6)}] → [${newLng.toFixed(6)},${newLat.toFixed(6)}] (${dist.toFixed(1)}m) — HLD untouched`
       );
     },
-    [pushUndo, recordPointMove]
+    [pushUndo, recordPointMove, getSurveyFeatureForHld, findHldFeatureOriginal, activeLayerNames, upsertSurveyFeature, updateSurveyFeature, autoOverlayOnEdit]
   );
 
   // ── Handle GeoJSON changes from GeometryEditor ──────────────────────────
@@ -1153,28 +1244,54 @@ export default function MapScreen() {
     console.log('[Edit] Done editing');
   }, []);
 
-  // ── Handle delete feature — remove from GeoJSON ─
+  // ── Handle delete feature — mark SurveyFeature as 'removed' (HLD stays intact) ──
+  // If the feature has a SurveyFeature, we set its status to 'removed' so it
+  // disappears from the orange survey layer. The blue HLD feature remains untouched.
+  // If the feature was engineer-created (no HLD original), we delete the SurveyFeature entirely.
   const handleDeleteFeature = useCallback(
     (featureId: string, layerId: string) => {
-      const geojson = activeGeojsonRef.current;
-      const features = geojson[layerId];
-      if (!features) return;
+      // Check if a SurveyFeature exists for this feature
+      const existingSurvey = getSurveyFeatureForHld(featureId);
 
-      const updatedFeatures = features.filter((f) => {
-        const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
-        return fid !== featureId;
-      });
-
-      if (updatedFeatures.length === features.length) {
-        console.warn(`[Delete] Feature ${featureId} not found in layer ${layerId}`);
-        return;
+      if (existingSurvey) {
+        // ── Has an HLD original → mark as 'removed' (HLD stays on map in blue) ──
+        pushUndo({
+          featureId,
+          layerId,
+          oldLng: 0,
+          oldLat: 0,
+          newLng: 0,
+          newLat: 0,
+          timestamp: Date.now(),
+          surveyUndo: {
+            surveyFeatureId: existingSurvey.id,
+            layerId,
+            previousGeometry: existingSurvey.survey_geometry,
+            previousAttributes: existingSurvey.survey_attributes,
+            previousStatus: existingSurvey.survey_status,
+            description: `Undo: restore survey feature ${featureId.slice(-8)}`,
+          },
+        });
+        updateSurveyFeature(existingSurvey.id, layerId, {
+          survey_status: 'removed',
+        });
+        console.log(`[Delete] Marked SurveyFeature ${existingSurvey.id.slice(-8)} as 'removed' — HLD untouched`);
+      } else {
+        // ── No HLD original (engineer-created point) → delete the SurveyFeature ──
+        // Try to find it by ID directly (featureId might be the SurveyFeature ID itself)
+        const allSurveyForLayer = surveyFeatures[layerId] ?? [];
+        const sf = allSurveyForLayer.find((s) => s.id === featureId);
+        if (sf) {
+          deleteSurveyFeature(sf.id, layerId);
+          console.log(`[Delete] Deleted engineer-created SurveyFeature ${sf.id.slice(-8)}`);
+        } else {
+          // Fallback: no survey feature found — this might be an HLD-only feature
+          // (shouldn't happen in the new architecture, but handle gracefully)
+          console.warn(`[Delete] No SurveyFeature found for ${featureId} in ${layerId} — HLD is read-only, nothing to delete`);
+        }
       }
-
-      onGeometryChange(layerId, 'create', updatedFeatures,
-        `Deleted feature ${featureId.slice(-8)} from "${activeLayerNames[layerId] ?? layerId}"`);
-      console.log(`[Delete] Removed ${featureId} from ${layerId}`);
     },
-    [onGeometryChange, activeLayerNames],
+    [getSurveyFeatureForHld, surveyFeatures, updateSurveyFeature, deleteSurveyFeature, pushUndo],
   );
 
   // ── Deselect the currently selected line feature ──────────────────────
@@ -1184,6 +1301,8 @@ export default function MapScreen() {
   }, []);
 
   // ── Handle empty map area click (for add point / deselect) ───────────
+  // When adding a point, we create a SurveyFeature (not an HLD feature).
+  // original_hld_feature = null indicates this is an engineer-created point.
   const handleEmptyMapClick = useCallback(
     (lng: number, lat: number) => {
       // Clear line selection when tapping empty area
@@ -1193,26 +1312,42 @@ export default function MapScreen() {
           console.warn('[AddPoint] No target layer selected — tap a layer chip first');
           return;
         }
-        // Create a new point feature at the clicked location
-        const newFeature = createPointFeature(lng, lat, addPointTargetLayer);
-        const geojson = activeGeojsonRef.current;
-        const existing = geojson[addPointTargetLayer] ?? [];
-        const updatedFeatures = [...existing, newFeature];
-        onGeometryChange(addPointTargetLayer, 'create', updatedFeatures,
-          `Added new point at [${lng.toFixed(6)}, ${lat.toFixed(6)}] to "${activeLayerNames[addPointTargetLayer] ?? addPointTargetLayer}"`);
-        console.log(`[AddPoint] Created ${newFeature.properties?.name ?? 'point'} at [${lng.toFixed(6)}, ${lat.toFixed(6)}]`);
 
-        // Show editable fields form for the new point
-        const featureId = (newFeature.properties?.id ?? newFeature.properties?._id ?? '') as string;
-        setSurveyForm({
-          layerId: addPointTargetLayer,
-          featureId,
-          initialValues: newFeature.properties as Record<string, unknown>,
-          isNewPoint: true,
+        // ── Build the new survey geometry (Point at clicked location) ──
+        const surveyGeometry = { type: 'Point', coordinates: [lng, lat] };
+        const layerName = activeLayerNames[addPointTargetLayer] ?? addPointTargetLayer.toUpperCase();
+
+        // ── Create a SurveyFeature with original_hld_feature = null ──
+        // (engineer-created points don't reference any HLD feature)
+        upsertSurveyFeature(
+          `new-point-${Date.now()}`,   // hldFeatureId — synthetic ID for new points
+          addPointTargetLayer,         // layerId
+          layerName,                   // layerName
+          surveyGeometry,              // surveyGeometry
+          {},                          // surveyAttributes (empty — engineer fills via SurveyForm)
+          null,                        // originalGeometry (no HLD original)
+          null,                        // originalAttributes (no HLD original)
+          `Engineer-added new point at [${lng.toFixed(6)}, ${lat.toFixed(6)}]`,
+        ).then((sf) => {
+          if (sf) {
+            console.log(`[AddPoint] SurveyFeature created: ${sf.id} at [${lng.toFixed(6)}, ${lat.toFixed(6)}]`);
+            // Show editable fields form for the new point
+            setSurveyForm({
+              layerId: addPointTargetLayer,
+              featureId: sf.id,         // Use the SurveyFeature ID, not a synthetic HLD ID
+              initialValues: sf.survey_attributes as Record<string, unknown>,
+              isNewPoint: true,
+            });
+          }
+        }).catch((err) => {
+          console.error('[AddPoint] Failed to create SurveyFeature:', err);
         });
+
+        // ── Auto-switch to overlay mode so the new orange point is visible ──
+        autoOverlayOnEdit();
       }
     },
-    [geoMode, addPointTargetLayer, onGeometryChange, activeLayerNames],
+    [geoMode, addPointTargetLayer, activeLayerNames, upsertSurveyFeature, autoOverlayOnEdit],
   );
 
   // Clear line selection when geoMode changes away from select (entering add_point)
@@ -1222,50 +1357,34 @@ export default function MapScreen() {
     }
   }, [geoMode]);
 
-  // ── Save new point form data — update the feature's properties ──────
+  // ── Save SurveyForm data — update the SurveyFeature's attributes via the store ──
+  // The HLD GeoJSON is never touched. The SurveyFeature gets the engineer's edits.
   const handleSurveyFormSave = useCallback(
     (featureId: string, layerId: string, properties: Record<string, unknown>) => {
-      const geojson = activeGeojsonRef.current;
-      const features = geojson[layerId];
-      if (!features) return;
-
-      const updatedFeatures = features.map((f) => {
-        const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
-        if (fid === featureId) {
-          return {
-            ...f,
-            properties: {
-              ...f.properties,
-              ...properties,
-              // Keep essential IDs
-              id: f.properties?.id ?? f.properties?._id ?? featureId,
-              _id: f.properties?.id ?? f.properties?._id ?? featureId,
-            },
-          };
-        }
-        return f;
+      // featureId here is the SurveyFeature ID (set in handleEmptyMapClick)
+      // Update the SurveyFeature's survey_attributes via the store
+      updateSurveyFeature(featureId, layerId, {
+        survey_attributes: properties,
+        survey_status: 'modified',
       });
-
-      onGeometryChange(layerId, 'create', updatedFeatures,
-        `Updated fields for new point ${featureId.slice(-8)}`);
 
       // Close the form
       setSurveyForm(null);
-      console.log(`[SurveyForm] Saved fields for ${featureId}`);
+      console.log(`[SurveyForm] Saved attributes to SurveyFeature ${featureId.slice(-8)}`);
     },
-    [onGeometryChange],
+    [updateSurveyFeature],
   );
 
-  // ── Dismiss new point form — remove the feature from GeoJSON ────────
+  // ── Dismiss new point form — delete the SurveyFeature (engineer-created, no HLD) ──
   const handleSurveyFormDismiss = useCallback(() => {
     if (!surveyForm) return;
     const { featureId, layerId } = surveyForm;
 
-    // Delete the newly created feature
-    handleDeleteFeature(featureId, layerId);
+    // Delete the SurveyFeature (featureId is the SurveyFeature ID for new points)
+    deleteSurveyFeature(featureId, layerId);
     setSurveyForm(null);
-    console.log('[SurveyForm] Dismissed — feature removed');
-  }, [surveyForm, handleDeleteFeature]);
+    console.log('[SurveyForm] Dismissed — SurveyFeature removed');
+  }, [surveyForm, deleteSurveyFeature]);
 
   // ── Save notes for current feature ───────────────────────────────────────
   const handleSaveNotes = useCallback(() => {
