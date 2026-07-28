@@ -32,6 +32,7 @@ import type {
   BackendSyncQueueItem,
   PaginatedResponse,
   PaginationParams,
+  SurveyFeatureData,
 } from '../utils/types';
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -244,5 +245,68 @@ export async function pushToSyncQueue(
 export async function processSyncQueue(): Promise<{ processed: number }> {
   return apiFetch('/api/survey/sync/process/', {
     method: 'POST',
+  });
+}
+
+// ── Survey Features (HLD/Survey Separation) ──────────────────────────────
+
+export async function listSurveyFeatures(
+  params?: PaginationParams & {
+    project?: string;
+    layer_id?: string;
+    survey_status?: string;
+    sync_status?: string;
+    hld_feature?: string;
+  }
+): Promise<PaginatedResponse<SurveyFeatureData>> {
+  return apiFetch(`/api/survey/survey-features/${buildQuery(params ?? {})}`);
+}
+
+export async function createSurveyFeature(
+  data: Omit<SurveyFeatureData, 'id' | 'engineer' | 'engineer_name' | 'project_name' | 'hld_feature_id' | 'created_at' | 'updated_at'>
+): Promise<SurveyFeatureData> {
+  return apiFetch('/api/survey/survey-features/', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function getSurveyFeature(featureId: string): Promise<SurveyFeatureData> {
+  return apiFetch(`/api/survey/survey-features/${featureId}/`);
+}
+
+export async function updateSurveyFeature(
+  featureId: string,
+  data: Partial<SurveyFeatureData>
+): Promise<SurveyFeatureData> {
+  return apiFetch(`/api/survey/survey-features/${featureId}/`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteSurveyFeature(featureId: string): Promise<void> {
+  return apiFetch(`/api/survey/survey-features/${featureId}/`, {
+    method: 'DELETE',
+  });
+}
+
+/** Create-or-update by HLD feature reference — the primary endpoint for the mobile app */
+export async function upsertSurveyFeature(
+  data: {
+    original_hld_feature: string;
+    project: string;
+    layer_id: string;
+    layer_name: string;
+    survey_geometry: Record<string, unknown>;
+    survey_attributes?: Record<string, unknown>;
+    original_geometry?: Record<string, unknown> | null;
+    original_attributes?: Record<string, unknown> | null;
+    change_reason?: string;
+  }
+): Promise<SurveyFeatureData> {
+  return apiFetch('/api/survey/survey-features/upsert/', {
+    method: 'POST',
+    body: JSON.stringify(data),
   });
 }

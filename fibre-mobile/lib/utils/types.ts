@@ -422,6 +422,40 @@ export interface SurveyStatusData {
   updated_at: string;
 }
 
+// ── Survey Feature (HLD/Survey Separation) ───────────────────────────────
+
+/** A survey-engineer copy of an HLD feature. The HLD remains read-only. */
+export interface SurveyFeatureData {
+  id: string;
+  /** UUID of the original HLD feature (null for engineer-created points) */
+  original_hld_feature: string | null;
+  /** Read-only convenience field (same as original_hld_feature) */
+  hld_feature_id: string | null;
+  project: string;
+  project_name?: string;
+  engineer: string;
+  engineer_name?: string;
+  layer_id: string;
+  layer_name: string;
+  /** Frozen geometry from the HLD feature — never changes */
+  original_geometry: Record<string, unknown> | null;
+  /** Frozen attributes from the HLD feature — never changes */
+  original_attributes: Record<string, unknown> | null;
+  /** Engineer-edited geometry */
+  survey_geometry: Record<string, unknown>;
+  /** Engineer-edited attributes */
+  survey_attributes: Record<string, unknown>;
+  survey_status: 'new' | 'modified' | 'removed' | 'pending_review' | 'rejected' | 'approved' | 'completed';
+  version_number: number;
+  sync_status: 'pending' | 'synced' | 'failed';
+  change_reason: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Display mode for the map: HLD only, Survey only, or overlay */
+export type LayerDisplayMode = 'hld' | 'survey' | 'overlay';
+
 // ── Pagination ───────────────────────────────────────────────────────────
 
 export interface PaginatedResponse<T> {

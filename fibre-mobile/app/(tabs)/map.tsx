@@ -15,6 +15,7 @@ import { useMapStore } from '../../lib/stores/map';
 import { useAuthStore } from '../../lib/stores/auth';
 import { useProjectStore } from '../../lib/stores/project';
 import { useSurveyStore } from '../../lib/stores/survey';
+import { useSurveyFeaturesStore, SURVEY_COLOR } from '../../lib/stores/survey-features';
 import { getDemoAllFeatures, DEMO_GEOJSON_FEATURES, DEMO_FEATURES, DEMO_LAYERS } from '../../lib/stores/demo-data';
 import { recalculateDependentProperties } from '../../lib/utils/spatial';
 import {
@@ -31,7 +32,7 @@ import MapLibreMap, { BASEMAPS } from '../../lib/components/MapLibreMap';
 import MapLegend, { buildLayerGroups, DEFAULT_LAYER_GROUPS } from '../../lib/components/MapLegend';
 import MapFeaturePopup from '../../lib/components/MapFeaturePopup';
 import type { MapLayerData, BasemapStyle } from '../../lib/components/MapLibreMap';
-import type { GeoJSONFeature } from '../../lib/utils/types';
+import type { GeoJSONFeature, LayerDisplayMode } from '../../lib/utils/types';
 import { Spacing, Radius } from '../../lib/theme/colors';
 import {
   X,
@@ -225,6 +226,13 @@ export default function MapScreen() {
   } = useMapStore();
   const { projects } = useProjectStore();
   const { recordPointMove } = useSurveyStore();
+  const {
+    surveyFeatures,
+    displayMode,
+    setDisplayMode,
+    fetchSurveyFeatures,
+    clearSurveyFeatures,
+  } = useSurveyFeaturesStore();
 
   const [viewMode, setViewMode] = useState<'map' | 'list'>('map');
   const [selectedLayer, setSelectedLayer] = useState<string | null>(null);
@@ -238,6 +246,11 @@ export default function MapScreen() {
   const [popupScreenCoords, setPopupScreenCoords] = useState<{ x: number; y: number } | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [dragMode, setDragMode] = useState(false);
+
+  // ── HLD/Survey Display Mode ──────────────────────────────────────────────
+  // 'hld' = blue only (original HLD), 'survey' = orange only (engineer edits),
+  // 'overlay' = both HLD + Survey visible simultaneously
+  // displayMode is managed by useSurveyFeaturesStore (declared above)
 
   // ── Geometry Editor State (simplified: select, add_point, delete_feature only) ──
   // ── Geometry Editor State (simplified: select, add_point only) ──
@@ -542,6 +555,17 @@ export default function MapScreen() {
     return onlyImported;
   }, [hasImportedData, projectGeojsons, localDemoGeojson, storeActiveProject]);
 
+  // ── Fetch Survey Features when the active project changes ────────────────
+  // This loads all engineer survey edits from the backend so they can be
+  // rendered as orange survey layers alongside the blue HLD layers.
+  useEffect(() => {
+    if (storeActiveProject && !storeActiveProject.id.startsWith('demo-') && !storeActiveProject.id.startsWith('imported-')) {
+      fetchSurveyFeatures(storeActiveProject.id);
+    } else {
+      clearSurveyFeatures();
+    }
+  }, [storeActiveProject?.id, fetchSurveyFeatures, clearSurveyFeatures]);
+
   // ── Draggable layer IDs — ONLY point layers that allow geometry editing (Sprint 6) ──
   // Recomputes when activeGeojson changes so imported layers (imp-*) are included.
   const draggableLayerIds = useMemo(() => {
@@ -676,10 +700,62 @@ export default function MapScreen() {
   }, [mergedFeatureList, selectedLayer, searchQuery]);
 
   // Modify buildMapLayerData to use activeLayerColors
+  // ── In 'overlay' mode, HLD layers are forced to blue ──
+  const effectiveLayerColors = useMemo(() => {
+    if (displayMode === 'overlay') {
+      const overridden: Record<string, string> = {};
+      for (const [key, color] of Object.entries(activeLayerColors)) {
+        overridden[key] = '#2563EB'; // Blue for HLD in overlay mode
+      }
+      return overridden;
+    }
+    return activeLayerColors;
+  }, [activeLayerColors, displayMode]);
+
   const mapLayerData = useMemo(() => {
-    return buildMapLayerData(activeGeojson, layerVisibility, activeLayerNames,
-      hasImportedData ? importFeatureIdMap : demoFeatureIdMap, activeLayerColors);
-  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, demoFeatureIdMap, importFeatureIdMap, activeLayerColors]);
+    // ── HLD layers (blue in overlay, normal otherwise) ──
+    const hldLayers = displayMode === 'survey'
+      ? [] // In survey-only mode, hide HLD layers
+      : buildMapLayerData(activeGeojson, layerVisibility, activeLayerNames,
+          hasImportedData ? importFeatureIdMap : demoFeatureIdMap, effectiveLayerColors);
+
+    // ── Survey layers (orange) — only when survey features exist ──
+    if (displayMode === 'hld') return hldLayers;
+
+    const surveyLayers: any[] = [];
+    for (const [layerId, sfList] of Object.entries(surveyFeatures)) {
+      if (sfList.length === 0) continue;
+      const visibleFeatures = sfList
+        .filter((sf) => sf.survey_status !== 'removed')
+        .map((sf) => ({
+          type: 'Feature' as const,
+          geometry: sf.survey_geometry as { type: string; coordinates: unknown[] },
+          properties: {
+            ...sf.survey_attributes,
+            id: sf.id,
+            _id: sf.id,
+            _layer_id: `survey-${layerId}`,
+            _is_survey: true,
+            _hld_feature_id: sf.original_hld_feature,
+            _survey_status: sf.survey_status,
+          },
+        }));
+
+      if (visibleFeatures.length === 0) continue;
+
+      const geomType = (visibleFeatures[0]?.geometry?.type as any) ?? 'Point';
+      surveyLayers.push({
+        id: `survey-${layerId}`,
+        name: `Survey: ${activeLayerNames[layerId] ?? layerId.toUpperCase()}`,
+        features: visibleFeatures,
+        visible: true,
+        color: SURVEY_COLOR, // Orange
+        geometryType: geomType,
+      });
+    }
+
+    return [...hldLayers, ...surveyLayers];
+  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, demoFeatureIdMap, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures]);
 
   // Build visible layers: when a real project is active, show ONLY imported layers
   const visibleLayers = useMemo(() => {
@@ -1614,6 +1690,25 @@ export default function MapScreen() {
             activeOpacity={0.8}
           >
             <Text style={{ fontSize: 20, color: geoMode === 'add_point' ? '#FFFFFF' : undefined }}>📍</Text>
+          </TouchableOpacity>
+          {/* HLD/Survey Display Mode Toggle — cycles hld → survey → overlay */}
+          <TouchableOpacity
+            style={[styles.fab, {
+              backgroundColor: displayMode === 'survey' ? SURVEY_COLOR : displayMode === 'overlay' ? '#2563EB' : colors.surface,
+            }]}
+            onPress={() => {
+              const next: LayerDisplayMode = displayMode === 'hld' ? 'survey' : displayMode === 'survey' ? 'overlay' : 'hld';
+              setDisplayMode(next);
+            }}
+            activeOpacity={0.8}
+          >
+            <Text style={{
+              fontSize: 16,
+              fontWeight: '700' as any,
+              color: displayMode === 'hld' ? colors.textSecondary : '#FFFFFF',
+            }}>
+              {displayMode === 'hld' ? '🔵' : displayMode === 'survey' ? '🟠' : '🔀'}
+            </Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.fab, { backgroundColor: colors.surface }]}
