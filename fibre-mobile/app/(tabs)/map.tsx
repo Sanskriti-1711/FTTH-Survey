@@ -594,10 +594,14 @@ export default function MapScreen() {
     }
   }, [storeActiveProject?.id, fetchSurveyFeatures, clearSurveyFeatures]);
 
-  // ── Draggable layer IDs — ONLY point layers that allow geometry editing (Sprint 6) ──
-  // Recomputes when activeGeojson changes so imported layers (imp-*) are included.
+  // ── Draggable layer IDs — HLD point layers + survey point layers ──
+  // HLD layers: from activeGeojsonRef (blue points)
+  // Survey layers: from surveyFeatures store (orange points) — prefixed with 'survey-'
+  // Both are draggable so the engineer can re-adjust either the original or the survey copy.
   const draggableLayerIds = useMemo(() => {
     const ids = new Set<string>();
+
+    // ── HLD point layers ──
     const geo = activeGeojsonRef.current;
     for (const [id, features] of Object.entries(geo)) {
       if (features.length === 0) continue;
@@ -605,8 +609,20 @@ export default function MapScreen() {
         ids.add(id);
       }
     }
+
+    // ── Survey point layers (orange) ──
+    // Only include survey layers whose features are Point geometry and not 'removed'
+    for (const [layerId, sfList] of Object.entries(surveyFeatures)) {
+      const visible = sfList.filter((sf) => sf.survey_status !== 'removed');
+      if (visible.length === 0) continue;
+      const geomType = (visible[0]?.survey_geometry as any)?.type;
+      if (geomType === 'Point') {
+        ids.add(`survey-${layerId}`);
+      }
+    }
+
     return ids;
-  }, [activeGeojson]);
+  }, [activeGeojson, surveyFeatures]);
 
   // Build layer names: demo defaults + imported layer names with '(Imported)' suffix
   const activeLayerNames = useMemo(() => {
@@ -1051,10 +1067,71 @@ export default function MapScreen() {
   }, [displayMode, setDisplayMode]);
 
   // ── Point drag end handler — routes through SurveyFeature store (HLD stays read-only) ──
-  // When the engineer drags a point, we create/update a SurveyFeature with the new
-  // geometry. The HLD GeoJSON is NEVER mutated — the orange survey layer shows the move.
+  // Two cases:
+  //   A) Engineer drags a BLUE HLD point → creates/updates a SurveyFeature (orange appears)
+  //   B) Engineer drags an ORANGE survey point → updates the existing SurveyFeature directly
+  // In both cases, the HLD GeoJSON is NEVER mutated.
   const handleFeatureDragEnd = useCallback(
     (featureId: string, layerId: string, newLng: number, newLat: number) => {
+      // ════════════════════════════════════════════════════════════════════
+      // CASE B: Dragging an orange SURVEY point (layerId starts with 'survey-')
+      // The featureId IS the SurveyFeature ID — update it directly.
+      // ════════════════════════════════════════════════════════════════════
+      if (layerId.startsWith('survey-')) {
+        const baseLayerId = layerId.slice('survey-'.length);
+        const sfList = surveyFeatures[baseLayerId] ?? [];
+        const sf = sfList.find((s) => s.id === featureId);
+        if (!sf) {
+          console.warn(`[Drag] Survey feature ${featureId} not found in ${layerId}`);
+          return;
+        }
+
+        // Get old coordinates from the survey geometry
+        const oldCoords = (sf.survey_geometry as any)?.coordinates as [number, number] | undefined;
+        if (!oldCoords) return;
+        const [oldLng, oldLat] = oldCoords;
+
+        // Check if the point actually moved (threshold ~0.5m)
+        const dist = Math.sqrt((newLng - oldLng) ** 2 + (newLat - oldLat) ** 2) * 111000;
+        if (dist < 0.5) {
+          console.log(`[Drag] Survey point ${featureId.slice(-8)} didn't move enough (${dist.toFixed(1)}m) — ignoring`);
+          return;
+        }
+
+        // Push undo with previous survey state
+        pushUndo({
+          featureId,
+          layerId: baseLayerId,
+          oldLng,
+          oldLat,
+          newLng,
+          newLat,
+          timestamp: Date.now(),
+          surveyUndo: {
+            surveyFeatureId: sf.id,
+            layerId: baseLayerId,
+            previousGeometry: sf.survey_geometry,
+            previousAttributes: sf.survey_attributes,
+            previousStatus: sf.survey_status,
+            description: `Re-drag survey point back to [${oldLng.toFixed(6)}, ${oldLat.toFixed(6)}]`,
+          },
+        });
+
+        // Update the survey feature's geometry
+        updateSurveyFeature(sf.id, baseLayerId, {
+          survey_geometry: { type: 'Point', coordinates: [newLng, newLat] },
+          survey_status: 'modified',
+        });
+
+        console.log(
+          `[Drag] Re-dragged survey point ${featureId.slice(-8)}: [${oldLng.toFixed(6)},${oldLat.toFixed(6)}] → [${newLng.toFixed(6)},${newLat.toFixed(6)}] (${dist.toFixed(1)}m)`
+        );
+        return;
+      }
+
+      // ════════════════════════════════════════════════════════════════════
+      // CASE A: Dragging a BLUE HLD point → create/update a SurveyFeature
+      // ════════════════════════════════════════════════════════════════════
       const layerFeatures = activeGeojsonRef.current[layerId];
       if (!layerFeatures) return;
 
@@ -1156,7 +1233,7 @@ export default function MapScreen() {
         `[Drag] SurveyFeature ${existingSurvey ? 'updated' : 'upserting...'} for ${featureId}: [${oldLng.toFixed(6)},${oldLat.toFixed(6)}] → [${newLng.toFixed(6)},${newLat.toFixed(6)}] (${dist.toFixed(1)}m) — HLD untouched`
       );
     },
-    [pushUndo, recordPointMove, getSurveyFeatureForHld, findHldFeatureOriginal, activeLayerNames, upsertSurveyFeature, updateSurveyFeature, autoOverlayOnEdit]
+    [pushUndo, recordPointMove, getSurveyFeatureForHld, findHldFeatureOriginal, activeLayerNames, upsertSurveyFeature, updateSurveyFeature, autoOverlayOnEdit, surveyFeatures]
   );
 
   // ── Handle GeoJSON changes from GeometryEditor ──────────────────────────
