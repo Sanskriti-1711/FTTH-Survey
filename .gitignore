@@ -8,6 +8,8 @@ yarn-error.log*
 .expo/
 *.tsbuildinfo
 metro.log
+server.log
+*.log
 
 # ── Build outputs (web exports) ───────────────────────────
 fibre-mobile/dist/

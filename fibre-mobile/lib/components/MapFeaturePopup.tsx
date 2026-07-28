@@ -40,6 +40,10 @@ export interface FeaturePopupProps {
   onClose: () => void;
   onOpenDetails: () => void;
   onDismiss: () => void;
+  /** Geometry type for contextual editing */
+  featureGeometryType?: 'Point' | 'LineString' | 'Polygon';
+  /** Called when user taps Edit to enter editing mode */
+  onStartEdit?: () => void;
   /** Notes */
   notesDraft: string;
   onNotesChange: (text: string) => void;
@@ -69,6 +73,8 @@ export default function MapFeaturePopup({
   onClose,
   onOpenDetails,
   onDismiss,
+  onStartEdit,
+  featureGeometryType,
   notesDraft,
   onNotesChange,
   onSaveNotes,
@@ -302,6 +308,18 @@ export default function MapFeaturePopup({
 
         {/* Action buttons */}
         <View style={styles.actions}>
+          {onStartEdit && (
+            <TouchableOpacity
+              style={[styles.actionBtn, { backgroundColor: colors.primary }]}
+              onPress={onStartEdit}
+              activeOpacity={0.7}
+            >
+              <Text style={[styles.actionText, { color: colors.onPrimary }]}>
+                ✏️ Edit
+              </Text>
+              <ChevronRight size={13} stroke={colors.onPrimary} />
+            </TouchableOpacity>
+          )}
           <TouchableOpacity
             style={[styles.actionBtn, { backgroundColor: colors.primary }]}
             onPress={onOpenDetails}

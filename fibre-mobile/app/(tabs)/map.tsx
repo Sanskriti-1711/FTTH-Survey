@@ -18,18 +18,13 @@ import { useSurveyStore } from '../../lib/stores/survey';
 import { getDemoAllFeatures, DEMO_GEOJSON_FEATURES, DEMO_FEATURES, DEMO_LAYERS } from '../../lib/stores/demo-data';
 import { recalculateDependentProperties } from '../../lib/utils/spatial';
 import {
-  splitLineAtPoint,
-  mergeLines,
-  createLineString,
-  findNearestVertex,
-  updateVertex,
   createGeoJSONFeature,
   createPointFeature,
-  insertVertexAtPoint,
-  deleteVertex,
 } from '../../lib/utils/geometry-operations';
 import GeometryEditor from '../../lib/components/GeometryEditor';
-import type { GeometryMode } from '../../lib/components/GeometryEditor';
+import type { GeometryMode, EditingFeature } from '../../lib/components/GeometryEditor';
+import NewPointForm from '../../lib/components/NewPointForm';
+import type { NewPointFormData } from '../../lib/components/NewPointForm';
 import { Card, Badge } from '../../components/ui/Card';
 import { StatusBadge } from '../../components/ui/StatusBadge';
 import MapLibreMap, { BASEMAPS } from '../../lib/components/MapLibreMap';
@@ -244,21 +239,21 @@ export default function MapScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [dragMode, setDragMode] = useState(false);
 
-  // ── Phase 2: Geometry Editor State ───────────────────────────────────
+  // ── Geometry Editor State (simplified: select, add_point, delete_feature only) ──
+  // ── Geometry Editor State (simplified: select, add_point only) ──
   const [geoMode, setGeoMode] = useState<GeometryMode>('select');
-  const [mergeSelection, setMergeSelection] = useState<[string | null, string | null]>([null, null]);
-  const [drawPoints, setDrawPoints] = useState<[number, number][]>([]);
-  const [vertexEdit, setVertexEdit] = useState<{ featureId: string; layerId: string; vertexIdx: number } | null>(null);
   const [geomBusy, setGeomBusy] = useState(false);
+
+  // ── Editing mode state (viewing → editing flow) ──────────────────────
+  const [editingFeature, setEditingFeature] = useState<EditingFeature | null>(null);
 
   // ── Add Point state ────────────────────────────────────────────────
   const [addPointTargetLayer, setAddPointTargetLayer] = useState<string>('');
   // addPointLayers is computed below from allPanelLayers
   // Auto-select first point layer when entering add_point mode (see useEffect below)
 
-  // ── Draw layer picker state ─────────────────────────────────────────
-  const [drawTargetLayer, setDrawTargetLayer] = useState<string>('');
-  // drawLineLayers is computed below from allPanelLayers
+  // ── New Point Form state — shows editable fields after adding a point ─
+  const [newPointForm, setNewPointForm] = useState<NewPointFormData | null>(null);
 
   // ── Undo Stack for drag + geometry operations ─────────────────────────
   // Single-feature entries track old/new coordinates.
@@ -466,17 +461,50 @@ export default function MapScreen() {
   } = useProjectStore();
   const hasImportedData = Object.keys(projectGeojsons).length > 0;
 
-  // ── Auto-fetch GeoJSON from backend when a real project is active but empty ──
+  // ── SECURITY FALLBACK: Auto-fetch GeoJSON from backend when a real project is active but empty ──
+  // With a 15-second timeout that falls back to demo data if the fetch fails or hangs.
+  const fetchAttemptedRef = useRef(false);
+  const fetchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
     if (
       storeActiveProject &&
       !storeActiveProject.id.startsWith('demo-') &&
       !storeActiveProject.id.startsWith('imported-') &&
-      !hasImportedData
+      !hasImportedData &&
+      !fetchAttemptedRef.current
     ) {
+      fetchAttemptedRef.current = true;
       console.log('[Map] Active project found but GeoJSON empty — fetching from backend');
-      fetchProjectGeojsons(storeActiveProject.id);
+      
+      // Set a safety timeout: if data doesn't load in 15s, show demo data
+      fetchTimeoutRef.current = setTimeout(() => {
+        console.log('[Map] ⚠️ Project data fetch timed out — falling back to demo data');
+        // Reset the state so activeGeojson uses demo data instead of empty
+        useProjectStore.getState().setActiveProject(null);
+        fetchAttemptedRef.current = false;
+      }, 15000);
+      
+      fetchProjectGeojsons(storeActiveProject.id).catch((err) => {
+        console.log('[Map] ⚠️ Project data fetch failed — falling back to demo data:', err);
+        if (fetchTimeoutRef.current) clearTimeout(fetchTimeoutRef.current);
+        useProjectStore.getState().setActiveProject(null);
+        fetchAttemptedRef.current = false;
+      });
     }
+    
+    // Clear timeout if data loads successfully
+    if (hasImportedData && fetchTimeoutRef.current) {
+      clearTimeout(fetchTimeoutRef.current);
+      fetchTimeoutRef.current = null;
+    }
+    
+    return () => {
+      if (fetchTimeoutRef.current) {
+        clearTimeout(fetchTimeoutRef.current);
+        fetchTimeoutRef.current = null;
+      }
+    };
   }, [storeActiveProject?.id, hasImportedData]);
 
   // Merge: always show demo data + prefix imported data with 'imp-'
@@ -736,12 +764,8 @@ export default function MapScreen() {
       .map((l) => ({ id: l.id, name: l.name }));
   }, [allPanelLayers]);
 
-  // ── Compute line layers for Draw mode layer picker ─────────────────
-  const drawLineLayers = useMemo(() => {
-    return allPanelLayers
-      .filter((l) => l.geometryType === 'LineString')
-      .map((l) => ({ id: l.id, name: l.name }));
-  }, [allPanelLayers]);
+  // Line layer editing (Split, Merge, Draw, Vertices) removed by user request.
+  // Custom rules for lines & polygons will be added later.
 
   // Auto-select first point layer when entering add_point mode
   useEffect(() => {
@@ -749,13 +773,6 @@ export default function MapScreen() {
       setAddPointTargetLayer(addPointLayers[0].id);
     }
   }, [geoMode, addPointLayers]);
-
-  // Auto-select first line layer when entering draw_bypass mode
-  useEffect(() => {
-    if (geoMode === 'draw_bypass' && !drawTargetLayer && drawLineLayers.length > 0) {
-      setDrawTargetLayer(drawLineLayers[0].id);
-    }
-  }, [geoMode, drawLineLayers]);
 
   // ── Calculate auto-zoom center from imported features ────────────────
   const flyToCenter = useMemo(() => {
@@ -942,35 +959,28 @@ export default function MapScreen() {
 
   // ── Handle GeoJSON changes from GeometryEditor ──────────────────────────
   const onGeometryChange = useCallback(
-    (layerId: string, action: 'split' | 'merge' | 'create' | 'vertex_update',
+    (layerId: string, action: 'create',
       updatedFeatures: any[], description: string) => {
       setGeomBusy(true);
 
       // ── Push snapshot-based undo entry BEFORE applying changes ─────
-      // This captures the layer's current state so Ctrl+Z can restore it.
-      // For single-feature coordinate ops (drag, vertex move) the caller
-      // (handleFeatureDragEnd / handleVertexDragEnd) pushes its own fine-grained
-      // undo entries — skip snapshot for those to avoid double-undo entries.
-      if (action !== 'vertex_update') {
-        const prevFeatures = activeGeojsonRef.current[layerId];
-        if (prevFeatures && prevFeatures.length > 0) {
-          // Deep-clone the features to freeze the pre-edit state
-          const snapshot: GeoJSONFeature[] = JSON.parse(JSON.stringify(prevFeatures));
-          pushUndo({
-            featureId: '',  // Unused — snapshot restore path ignores featureId
+      const prevFeatures = activeGeojsonRef.current[layerId];
+      if (prevFeatures && prevFeatures.length > 0) {
+        const snapshot: GeoJSONFeature[] = JSON.parse(JSON.stringify(prevFeatures));
+        pushUndo({
+          featureId: '',
+          layerId,
+          oldLng: 0,
+          oldLat: 0,
+          newLng: 0,
+          newLat: 0,
+          timestamp: Date.now(),
+          layerSnapshot: {
             layerId,
-            oldLng: 0,
-            oldLat: 0,
-            newLng: 0,
-            newLat: 0,
-            timestamp: Date.now(),
-            layerSnapshot: {
-              layerId,
-              previousFeatures: snapshot,
-              description: `Before: ${description}`,
-            },
-          });
-        }
+            previousFeatures: snapshot,
+            description: `Before: ${description}`,
+          },
+        });
       }
 
       // Update the active GeoJSON
@@ -1007,287 +1017,29 @@ export default function MapScreen() {
     [setGeomBusy, setLocalDemoGeojson, pushUndo],
   );
 
-  // ── Phase 2: Geometry Mode Handler ────────────────────────────────────
-  const handleGeometryAction = useCallback(
-    (featureId: string, layerId: string, lng: number, lat: number, mode: GeometryMode) => {
-      const geojson = activeGeojsonRef.current;
-      const features = geojson[layerId];
-      if (!features) return;
-
-      if (mode === 'split') {
-        // ── Split line at clicked point ────────────────────────────────
-        const feature = features.find((f) =>
-          (f.properties as any)?.id === featureId || (f.properties as any)?._id === featureId
-        );
-        if (!feature || (feature.geometry?.type !== 'LineString' && feature.geometry?.type !== 'MultiLineString')) {
-          return;
-        }
-
-        const coords = feature.geometry.coordinates as [number, number][];
-        const result = splitLineAtPoint(coords, lng, lat);
-        if (!result) return;
-
-        // Create two new features from the split
-        const props = { ...(feature.properties ?? {}) };
-        const baseName = (props.name as string) ?? 'Trench';
-        const featA = createGeoJSONFeature(result.coordsA, layerId, {
-          ...props,
-          name: `${baseName} (A)`,
-          split_from: featureId,
-        });
-        const featB = createGeoJSONFeature(result.coordsB, layerId, {
-          ...props,
-          name: `${baseName} (B)`,
-          split_from: featureId,
-        });
-
-        // Remove original, add two new features
-        const updated = features
-          .filter((f) => (f.properties as any)?.id !== featureId && (f.properties as any)?._id !== featureId)
-          .concat([featA, featB]);
-
-        onGeometryChange(layerId, 'split', updated,
-          `Split "${baseName}" into 2 segments (${result.coordsA.length} + ${result.coordsB.length} vertices)`);
-      } else if (mode === 'merge') {
-        // ── Merge two lines ────────────────────────────────────────────
-        const [firstId, secondId] = mergeSelection;
-        if (!firstId) {
-          // Select first feature
-          setMergeSelection([featureId, null]);
-          return;
-        }
-        if (featureId === firstId) {
-          // Tapped same feature — deselect
-          setMergeSelection([null, null]);
-          return;
-        }
-
-        // Find both features
-        const featA = features.find((f) =>
-          (f.properties as any)?.id === firstId || (f.properties as any)?._id === firstId
-        );
-        const featB = features.find((f) =>
-          (f.properties as any)?.id === featureId || (f.properties as any)?._id === featureId
-        );
-        if (!featA || !featB) return;
-        if (featA.geometry?.type !== 'LineString' || featB.geometry?.type !== 'LineString') return;
-
-        const coordsA = featA.geometry.coordinates as [number, number][];
-        const coordsB = featB.geometry.coordinates as [number, number][];
-        const merged = mergeLines(coordsA, coordsB);
-        if (!merged) return;
-
-        // Create merged feature
-        const propsA = { ...(featA.properties ?? {}) };
-        const mergedFeature = createGeoJSONFeature(merged.merged, layerId, {
-          ...propsA,
-          name: `${propsA.name ?? 'Trench'} (Merged)`,
-          merged_from: [firstId, featureId].join(','),
-          merge_dist_m: Math.round(merged.distM),
-        });
-
-        const updated = features
-          .filter((f) => {
-            const id = (f.properties as any)?.id || (f.properties as any)?._id;
-            return id !== firstId && id !== featureId;
-          })
-          .concat([mergedFeature]);
-
-        setMergeSelection([null, null]);
-        onGeometryChange(layerId, 'merge', updated,
-          `Merged 2 segments into one (endpoint dist: ${Math.round(merged.distM)}m)`);
-      } else if (mode === 'edit_vertices') {
-        // ── Find the feature ───────────────────────────────────────────
-        const feature = features.find((f) =>
-          (f.properties as any)?.id === featureId || (f.properties as any)?._id === featureId
-        );
-        if (!feature || feature.geometry?.type !== 'LineString') return;
-
-        const coords = feature.geometry.coordinates as [number, number][];
-
-        // ── If a vertex is already selected on this feature, try inserting a new vertex ──
-        if (vertexEdit?.featureId === featureId && vertexEdit?.layerId === layerId) {
-          const insertResult = insertVertexAtPoint(coords, lng, lat);
-          if (insertResult) {
-            // A new vertex was inserted on the segment — update the feature
-            const updatedFeature = {
-              ...feature,
-              geometry: { ...feature.geometry, coordinates: insertResult.updated },
-            };
-            const updatedFeatures = features.map((f) => {
-              const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
-              return fid === featureId ? updatedFeature : f;
-            });
-
-            onGeometryChange(layerId, 'vertex_update', updatedFeatures,
-              `Inserted vertex #${insertResult.insertIdx + 1} at segment (now ${insertResult.updated.length} vertices)`);
-
-            // Select the new vertex so the engineer can tweak it
-            setVertexEdit({ featureId, layerId, vertexIdx: insertResult.insertIdx });
-            return;
-          }
-        }
-
-        // ── Otherwise, select the nearest vertex for dragging ────────────
-        const nearest = findNearestVertex(coords, lng, lat, 0.0005); // ~50m threshold
-        if (!nearest) {
-          // Click was too far from any vertex — select the feature anyway
-          setVertexEdit({ featureId, layerId, vertexIdx: 0 });
-          return;
-        }
-
-        setVertexEdit({ featureId, layerId, vertexIdx: nearest.idx });
-      }
-    },
-    [mergeSelection, onGeometryChange, vertexEdit],
-  );
-
-  // ── Vertex drag end handler — updates the LineString coordinate and store ──
-  const handleVertexDragEnd = useCallback(
-    (featureId: string, layerId: string, vertexIdx: number, newLng: number, newLat: number) => {
-      const geojson = activeGeojsonRef.current;
-      const features = geojson[layerId];
-      if (!features) return;
-
-      let oldLng = 0, oldLat = 0;
-      let found = false;
-      const updatedFeatures = features.map((f) => {
-        const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
-        if (fid === featureId && f.geometry?.type === 'LineString') {
-          found = true;
-          const coords = [...(f.geometry.coordinates as [number, number][])];
-          const vertex = coords[vertexIdx];
-          if (vertex) {
-            oldLng = vertex[0];
-            oldLat = vertex[1];
-            coords[vertexIdx] = [newLng, newLat];
-          }
-          return {
-            ...f,
-            geometry: {
-              ...f.geometry,
-              coordinates: coords,
-            },
-          };
-        }
-        return f;
-      });
-
-      if (!found) return;
-
-      // Push to undo stack with vertex index so undo can restore the LineString vertex
-      pushUndo({
-        featureId,
-        layerId,
-        oldLng,
-        oldLat,
-        newLng,
-        newLat,
-        vertexIdx,
-        timestamp: Date.now(),
-      });
-
-      // ── Recalculate dependent properties (length_m, etc.) ───────────────
-      const fullGeojson: Record<string, GeoJSONFeature[]> = { ...activeGeojsonRef.current };
-      fullGeojson[layerId] = updatedFeatures;
-      const recalc = recalculateDependentProperties(layerId, fullGeojson, updatedFeatures);
-
-      if (recalc.changes.length > 0) {
-        console.log(`[Vertex] Spatial recalc: ${recalc.changes.join('; ')}`);
-      }
-
-      // Update the store with the recalculated features
-      const currentHasImported = Object.keys(useProjectStore.getState().projectGeojsons).length > 0;
-
-      if (currentHasImported && layerId.startsWith(IMPORT_ID_PREFIX)) {
-        const cleanKey = layerId.slice(IMPORT_ID_PREFIX.length);
-        const current = useProjectStore.getState().projectGeojsons;
-        useProjectStore.getState().setProjectGeojsons({
-          ...current,
-          [cleanKey]: recalc.geojson[layerId] ?? updatedFeatures,
-        });
-      } else {
-        setLocalDemoGeojson((prev) => {
-          const next = { ...prev };
-          for (const [key, features] of Object.entries(recalc.geojson)) {
-            if (DEMO_GEOJSON_FEATURES[key] || key === layerId) {
-              next[key] = features;
-            }
-          }
-          return next;
-        });
-      }
-
-      // ── Fire-and-forget sync to backend (no-op in demo mode) ───────
-      const syncProjectId = useProjectStore.getState().activeProject?.id;
-      const movedFeature = updatedFeatures.find((f) => {
-        const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
-        return fid === featureId;
-      });
-      if (syncProjectId && movedFeature?.geometry) {
-        useProjectStore.getState().syncFeatureEdit(syncProjectId, featureId, {
-          geometry: movedFeature.geometry as Record<string, unknown>,
-        });
-      }
-
-      // Update vertexEdit to the same vertex (keep selection active)
-      setVertexEdit({ featureId, layerId, vertexIdx });
-
-      console.log(`[Vertex] Moved vertex ${vertexIdx} of ${featureId} to [${newLng.toFixed(6)}, ${newLat.toFixed(6)}]`);
-    },
-    [pushUndo],
-  );
-
-  // ── Delete the currently selected vertex ───────────────────────────────
-  const handleDeleteVertex = useCallback(() => {
-    if (!vertexEdit) return;
-    const { featureId, layerId, vertexIdx } = vertexEdit;
-
-    const geojson = activeGeojsonRef.current;
-    const features = geojson[layerId];
-    if (!features) return;
-
-    const feature = features.find((f) =>
-      (f.properties as any)?.id === featureId || (f.properties as any)?._id === featureId
-    );
-    if (!feature || feature.geometry?.type !== 'LineString') return;
-
-    const coords = feature.geometry.coordinates as [number, number][];
-    const updatedCoords = deleteVertex(coords, vertexIdx);
-    if (!updatedCoords) {
-      console.log(`[Vertex] Cannot delete vertex ${vertexIdx} — line must have at least 2 vertices`);
-      return;
+  // ── Start editing a feature (viewing → editing mode) ─────────────────
+  const handleStartEdit = useCallback((feature: EditingFeature) => {
+    setEditingFeature(feature);
+    // Close popup when entering editing mode
+    selectFeature(null);
+    setSelectedMapFeatureId(null);
+    setPopupScreenCoords(null);
+    // Exit add_point mode if active
+    if (geoMode !== 'select') {
+      setGeoMode('select');
     }
+    setAddPointTargetLayer('');
+    console.log(`[Edit] Editing feature "${feature.name}" (${feature.geometryType}) on layer "${feature.layerName}"`);
+  }, [selectFeature, geoMode]);
 
-    // Push to undo stack so Ctrl+Z can restore the deleted vertex
-    pushUndo({
-      featureId,
-      layerId,
-      oldLng: 0,
-      oldLat: 0,
-      newLng: 0,
-      newLat: 0,
-      fullCoords: coords, // Store all original coords for full restore
-      timestamp: Date.now(),
-    });
+  // ── Done editing (editing → viewing mode) ───────────────────────────
+  const handleDoneEditing = useCallback(() => {
+    setEditingFeature(null);
+    setDragMode(false);
+    console.log('[Edit] Done editing');
+  }, []);
 
-    const updatedFeature = {
-      ...feature,
-      geometry: { ...feature.geometry, coordinates: updatedCoords },
-    };
-    const updatedFeatures = features.map((f) => {
-      const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
-      return fid === featureId ? updatedFeature : f;
-    });
-
-    onGeometryChange(layerId, 'vertex_update', updatedFeatures,
-      `Deleted vertex #${vertexIdx + 1} (now ${updatedCoords.length} vertices)`);
-
-    // Clear vertex selection after deletion
-    setVertexEdit(null);
-  }, [vertexEdit, onGeometryChange, pushUndo]);
-
-  // ── Handle delete feature — remove from GeoJSON when tapped in delete mode ─
+  // ── Handle delete feature — remove from GeoJSON ─
   const handleDeleteFeature = useCallback(
     (featureId: string, layerId: string) => {
       const geojson = activeGeojsonRef.current;
@@ -1311,17 +1063,10 @@ export default function MapScreen() {
     [onGeometryChange, activeLayerNames],
   );
 
-  // ── Clear draw points callback ─────────────────────────────────────────
-  const handleClearDrawPoints = useCallback(() => {
-    setDrawPoints([]);
-  }, []);
-
-  // ── Handle empty map area click (for draw bypass / add point) ───────────
+  // ── Handle empty map area click (for add point) ───────────
   const handleEmptyMapClick = useCallback(
     (lng: number, lat: number) => {
-      if (geoMode === 'draw_bypass') {
-        setDrawPoints((prev) => [...prev, [lng, lat]]);
-      } else if (geoMode === 'add_point') {
+      if (geoMode === 'add_point') {
         if (!addPointTargetLayer) {
           console.warn('[AddPoint] No target layer selected — tap a layer chip first');
           return;
@@ -1334,31 +1079,63 @@ export default function MapScreen() {
         onGeometryChange(addPointTargetLayer, 'create', updatedFeatures,
           `Added new point at [${lng.toFixed(6)}, ${lat.toFixed(6)}] to "${activeLayerNames[addPointTargetLayer] ?? addPointTargetLayer}"`);
         console.log(`[AddPoint] Created ${newFeature.properties?.name ?? 'point'} at [${lng.toFixed(6)}, ${lat.toFixed(6)}]`);
+
+        // Show editable fields form for the new point
+        const featureId = (newFeature.properties?.id ?? newFeature.properties?._id ?? '') as string;
+        setNewPointForm({
+          layerId: addPointTargetLayer,
+          featureId,
+          initialValues: newFeature.properties as Record<string, unknown>,
+        });
       }
     },
     [geoMode, addPointTargetLayer, onGeometryChange, activeLayerNames],
   );
 
-  // ── Handle feature click depending on geometry mode ─────────────────────
-  const handleGeoFeatureAction = useCallback(
-    (featureId: string, layerId: string, lng: number, lat: number, mode: GeometryMode) => {
-      if (mode === 'select') {
-        // Normal feature click — handled by existing handleMapFeatureClick
-        return;
-      }
-      if (mode === 'draw_bypass') {
-        handleEmptyMapClick(lng, lat);
-        return;
-      }
-      if (mode === 'delete_feature') {
-        handleDeleteFeature(featureId, layerId);
-        return;
-      }
-      // All other geometry modes (split, merge, edit_vertices) route to handleGeometryAction
-      handleGeometryAction(featureId, layerId, lng, lat, mode);
+  // ── Save new point form data — update the feature's properties ──────
+  const handleNewPointFormSave = useCallback(
+    (featureId: string, layerId: string, properties: Record<string, unknown>) => {
+      const geojson = activeGeojsonRef.current;
+      const features = geojson[layerId];
+      if (!features) return;
+
+      const updatedFeatures = features.map((f) => {
+        const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
+        if (fid === featureId) {
+          return {
+            ...f,
+            properties: {
+              ...f.properties,
+              ...properties,
+              // Keep essential IDs
+              id: f.properties?.id ?? f.properties?._id ?? featureId,
+              _id: f.properties?.id ?? f.properties?._id ?? featureId,
+            },
+          };
+        }
+        return f;
+      });
+
+      onGeometryChange(layerId, 'create', updatedFeatures,
+        `Updated fields for new point ${featureId.slice(-8)}`);
+
+      // Close the form
+      setNewPointForm(null);
+      console.log(`[NewPointForm] Saved fields for ${featureId}`);
     },
-    [handleGeometryAction, handleEmptyMapClick, handleDeleteFeature],
+    [onGeometryChange],
   );
+
+  // ── Dismiss new point form — remove the feature from GeoJSON ────────
+  const handleNewPointFormDismiss = useCallback(() => {
+    if (!newPointForm) return;
+    const { featureId, layerId } = newPointForm;
+
+    // Delete the newly created feature
+    handleDeleteFeature(featureId, layerId);
+    setNewPointForm(null);
+    console.log('[NewPointForm] Dismissed — feature removed');
+  }, [newPointForm, handleDeleteFeature]);
 
   // ── Save notes for current feature ───────────────────────────────────────
   const handleSaveNotes = useCallback(() => {
@@ -1526,17 +1303,14 @@ export default function MapScreen() {
           <MapLibreMap
             layers={mapLayerData}
             onFeatureClick={(featureId, layerId, lngLat, screenPt) => {
-              // Route clicks through geometry mode handler when in a non-select mode
-              if (geoMode !== 'select') {
-                handleGeoFeatureAction(featureId, layerId, lngLat[0], lngLat[1], geoMode);
+              if (geoMode === 'delete_feature') {
+                handleDeleteFeature(featureId, layerId);
                 return;
               }
               handleMapFeatureClick(featureId, layerId, lngLat, screenPt);
             }}
             onEmptyAreaClick={handleEmptyMapClick}
             onFeatureDragEnd={handleFeatureDragEnd}
-            onVertexDragEnd={handleVertexDragEnd}
-            vertexDragTarget={vertexEdit}
             draggableLayerIds={draggableLayerIds}
             dragMode={dragMode}
             selectedFeatureId={selectedMapFeatureId ?? undefined}
@@ -1545,23 +1319,13 @@ export default function MapScreen() {
             flyToCenter={flyToCenter}
           />
 
-          {/* Geometry Editor */}
-          {viewMode === 'map' && (
+          {/* Geometry Editor - editing toolbar OR add_point toolbar */}
+          {viewMode === 'map' && (editingFeature !== null || geoMode !== 'select') && (
             <GeometryEditor
               mode={geoMode}
               onModeChange={(mode) => {
-                const prevMode = geoMode;
                 setGeoMode(mode);
-                // Reset any pending state on mode change
-                setMergeSelection([null, null]);
-                setDrawPoints([]);
-                setVertexEdit(null);
                 setAddPointTargetLayer('');
-                // Only reset draw layer when LEAVING draw_bypass, not on every change
-                if (prevMode === 'draw_bypass' && mode !== 'draw_bypass') {
-                  setDrawTargetLayer('');
-                }
-                // Also reset popup if any
                 if (mode !== 'select') {
                   selectFeature(null);
                   setSelectedMapFeatureId(null);
@@ -1569,21 +1333,17 @@ export default function MapScreen() {
                 }
               }}
               onGeometryChange={onGeometryChange}
-              onFeatureAction={handleGeoFeatureAction}
               onEmptyMapClick={handleEmptyMapClick}
-              onClearDrawPoints={handleClearDrawPoints}
-              onDeleteVertex={handleDeleteVertex}
               addPointLayers={addPointLayers}
-              drawLineLayers={drawLineLayers}
-              drawTargetLayer={drawTargetLayer}
-              onDrawLayerChange={setDrawTargetLayer}
               addPointTargetLayer={addPointTargetLayer}
               onAddPointLayerChange={setAddPointTargetLayer}
-              allGeojson={activeGeojsonRef.current}
-              mergeSelection={mergeSelection}
-              drawPoints={drawPoints}
-              vertexEdit={vertexEdit}
               isBusy={geomBusy}
+              // Editing mode props
+              editingFeature={editingFeature}
+              onDoneEditing={handleDoneEditing}
+              onDeleteFeature={handleDeleteFeature}
+              dragMode={dragMode}
+              onDragModeChange={setDragMode}
             />
           )}
 
@@ -1669,8 +1429,8 @@ export default function MapScreen() {
             </View>
           )}
 
-          {/* Pin-Anchored Feature Popup */}
-          {selectedFeaturePopup && (
+          {/* Pin-Anchored Feature Popup - hidden during editing mode */}
+          {selectedFeaturePopup && !editingFeature && (
             <MapFeaturePopup
               screenX={popupScreenCoords?.x ?? 160}
               screenY={popupScreenCoords?.y ?? 300}
@@ -1692,10 +1452,30 @@ export default function MapScreen() {
                 setSelectedMapFeatureId(null);
                 setPopupScreenCoords(null);
               }}
+              featureGeometryType={(resolveGeometryType(selectedFeaturePopup.layerId ?? '') as 'Point' | 'LineString' | 'Polygon')}
+              onStartEdit={() => {
+                if (!selectedFeaturePopup) return;
+                handleStartEdit({
+                  id: selectedFeaturePopup.id,
+                  layerId: selectedFeaturePopup.layerId ?? '',
+                  geometryType: resolveGeometryType(selectedFeaturePopup.layerId ?? '') as 'Point' | 'LineString' | 'Polygon',
+                  name: selectedFeaturePopup.name,
+                  layerName: selectedFeaturePopup.layerName,
+                });
+              }}
               notesDraft={notesDraft}
               onNotesChange={setNotesDraft}
               onSaveNotes={handleSaveNotes}
               hasUnsavedNotes={notesDraft !== (featureNotes[selectedFeaturePopup.id] ?? '')}
+            />
+          )}
+
+          {/* New Point Form — editable fields after adding a point */}
+          {newPointForm && (
+            <NewPointForm
+              formData={newPointForm}
+              onDismiss={handleNewPointFormDismiss}
+              onSave={handleNewPointFormSave}
             />
           )}
         </View>
@@ -1791,21 +1571,50 @@ export default function MapScreen() {
       {/* FABs - only on map view */}
       {viewMode === 'map' && (
         <View style={styles.fabs}>
-          {/* Undo button — visible when there are draggable operations to undo */}
-          {undoCount > 0 && (
-            <TouchableOpacity
-              style={[styles.fab, { backgroundColor: colors.surface }]}
-              onPress={handleUndo}
-              activeOpacity={0.7}
-            >
-              <Undo2 size={20} stroke={colors.textSecondary} />
+          {/* Undo button — always visible, shows badge count when > 0 */}
+          <TouchableOpacity
+            style={[
+              styles.fab,
+              {
+                backgroundColor: colors.surface,
+                opacity: undoCount > 0 ? 1 : 0.4,
+              },
+            ]}
+            onPress={handleUndo}
+            disabled={undoCount === 0}
+            activeOpacity={0.7}
+          >
+            <Undo2 size={20} stroke={undoCount > 0 ? colors.textSecondary : colors.textTertiary} />
+            {undoCount > 0 && (
               <View style={[styles.undoBadge, { backgroundColor: colors.primary }]}>
                 <Text style={styles.undoBadgeText}>
                   {undoCount > 99 ? '99+' : undoCount}
                 </Text>
               </View>
-            </TouchableOpacity>
-          )}
+            )}
+          </TouchableOpacity>
+          {/* Add Point FAB — prominent, toggles add_point mode */}
+          <TouchableOpacity
+            style={[styles.fab, {
+              backgroundColor: geoMode === 'add_point' ? '#EC4899' : colors.surface,
+              transform: [{ scale: geoMode === 'add_point' ? 1.1 : 1 }],
+            }]}
+            onPress={() => {
+              if (geoMode === 'add_point') {
+                setGeoMode('select');
+                setAddPointTargetLayer('');
+              } else {
+                setGeoMode('add_point');
+                // Auto-select first point layer
+                if (addPointLayers.length > 0 && !addPointTargetLayer) {
+                  setAddPointTargetLayer(addPointLayers[0].id);
+                }
+              }
+            }}
+            activeOpacity={0.8}
+          >
+            <Text style={{ fontSize: 20, color: geoMode === 'add_point' ? '#FFFFFF' : undefined }}>📍</Text>
+          </TouchableOpacity>
           <TouchableOpacity
             style={[styles.fab, { backgroundColor: colors.surface }]}
             onPress={() => setBasemapPanelVisible(!basemapPanelVisible)}
