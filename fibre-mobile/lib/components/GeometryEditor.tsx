@@ -29,11 +29,15 @@ import {
   findNearestVertex,
   updateVertex,
   createGeoJSONFeature,
+  findNearestEndpoint,
+  extendLineString,
+  approximateLength,
+  EndpointGridIndex,
 } from '../utils/geometry-operations';
 
 // ── Types ────────────────────────────────────────────────────────────────
 
-export type GeometryMode = 'select' | 'split' | 'merge' | 'draw_bypass' | 'edit_vertices';
+export type GeometryMode = 'select' | 'split' | 'merge' | 'draw_bypass' | 'edit_vertices' | 'add_point' | 'delete_feature';
 
 interface GeometryEditorProps {
   /** Currently active mode */
@@ -59,6 +63,20 @@ interface GeometryEditorProps {
   onEmptyMapClick: (lng: number, lat: number) => void;
   /** Called when the user clears draw points */
   onClearDrawPoints?: () => void;
+  /** Called when the user deletes the currently selected vertex */
+  onDeleteVertex?: () => void;
+  /** Point layers available for adding new features */
+  addPointLayers?: { id: string; name: string }[];
+  /** Currently selected add-point target layer ID */
+  addPointTargetLayer?: string;
+  /** Called when user selects a target layer for add_point mode */
+  onAddPointLayerChange?: (layerId: string) => void;
+  /** Line layers available for drawing new segments */
+  drawLineLayers?: { id: string; name: string }[];
+  /** Currently selected draw target layer ID */
+  drawTargetLayer?: string;
+  /** Called when user selects a target layer for draw_bypass mode */
+  onDrawLayerChange?: (layerId: string) => void;
   /** Current GeoJSON features keyed by layer ID */
   allGeojson: Record<string, GeoJSONFeature[]>;
   /** Currently selected feature IDs for merge (first, second) */
@@ -88,6 +106,8 @@ const MODES: ModeDef[] = [
   { id: 'merge', label: 'Merge', icon: '🔗', description: 'Tap two lines to merge them into one', color: '#8B5CF6', cursor: 'pointer' },
   { id: 'draw_bypass', label: 'Draw', icon: '✏️', description: 'Click points to draw a new bypass line', color: '#10B981', cursor: 'crosshair' },
   { id: 'edit_vertices', label: 'Vertices', icon: '🔷', description: 'Tap line then drag its vertices', color: '#3B82F6', cursor: 'grab' },
+  { id: 'add_point', label: 'Add Point', icon: '📍', description: 'Tap map to add a new point feature (premise, PDP, etc.)', color: '#EC4899', cursor: 'crosshair' },
+  { id: 'delete_feature', label: 'Delete', icon: '🗑️', description: 'Tap any feature to remove it from the survey', color: '#EF4444', cursor: 'pointer' },
 ];
 
 // ── Component ────────────────────────────────────────────────────────────
@@ -98,6 +118,13 @@ export default function GeometryEditor({
   onFeatureAction,
   onEmptyMapClick,
   onClearDrawPoints,
+  onDeleteVertex,
+  addPointLayers = [],
+  addPointTargetLayer,
+  onAddPointLayerChange,
+  drawLineLayers = [],
+  drawTargetLayer,
+  onDrawLayerChange,
   onGeometryChange,
   allGeojson,
   mergeSelection = [null, null],
@@ -245,6 +272,8 @@ export default function GeometryEditor({
               {mode === 'merge' && '🔗'}
               {mode === 'draw_bypass' && '✏️'}
               {mode === 'edit_vertices' && '🔷'}
+              {mode === 'add_point' && '📍'}
+              {mode === 'delete_feature' && '🗑️'}
               {mode === 'select' && '👆'}
             </Text>
             <Text style={[styles.instructionText, { color: colors.textSecondary }]}>
@@ -256,14 +285,22 @@ export default function GeometryEditor({
               )}
               {mode === 'draw_bypass' && (
                 drawPoints.length === 0
-                  ? 'Tap on the map to place the first vertex of your bypass line.'
-                  : `Tap to add point #${drawPoints.length + 1}. Double-tap or tap "Finish" to create the line.`
+                  ? (drawTargetLayer
+                      ? 'Tap on the map to place the first vertex. Endpoints snap to existing features.'
+                      : 'Select a draw layer below, then tap the map to start drawing.')
+                  : `Tap to add point #${drawPoints.length + 1}. Snap markers guide each end to existing lines.`
               )}
               {mode === 'edit_vertices' && (
                 vertexEdit
-                  ? `Dragging vertex #${(vertexEdit.vertexIdx ?? 0) + 1} — move your cursor to adjust the line`
+                  ? `Vertex #${(vertexEdit.vertexIdx ?? 0) + 1} selected — drag to move it, or tap a segment to add a vertex.`
                   : 'Tap a line to see its vertices, then drag to adjust.'
               )}
+              {mode === 'add_point' && (
+                addPointTargetLayer
+                  ? `Tap on the map to place a new ${addPointLayers.find(l => l.id === addPointTargetLayer)?.name ?? 'point'}.`
+                  : 'Select a target layer below, then tap the map to add a point.'
+              )}
+              {mode === 'delete_feature' && 'Tap any feature to permanently remove it from this project. This action cannot be undone — use with caution.'}
               {mode === 'select' && 'Choose a geometry tool above to start editing.'}
             </Text>
           </View>
@@ -274,15 +311,165 @@ export default function GeometryEditor({
               <TouchableOpacity
                 style={[styles.actionBtn, { backgroundColor: '#10B981' }]}
                 onPress={() => {
-                  const coords = createLineString(drawPoints);
-                  if (coords) {
-                    const feature = createGeoJSONFeature(coords, 'trenches', {
-                      name: `Bypass #${Date.now() % 10000}`,
-                      construction_type: 'new_trench',
-                      survey_notes: 'New bypass drawn on map',
-                    });
-                    onGeometryChange('trenches', 'create', [feature], `Created bypass trench with ${coords.length} vertices`);
+                  if (!drawTargetLayer) {
+                    console.warn('[Draw] No target layer selected');
+                    return;
                   }
+                  const rawCoords = createLineString(drawPoints);
+                  if (!rawCoords) return;
+
+                  // ── Snap first and last points to nearest existing endpoints ──
+                  // Build a spatial index ONCE and reuse for both queries (O(1) each)
+                  const targetFeatures = allGeojson[drawTargetLayer] ?? [];
+                  const snapIndex =
+                    targetFeatures.length > 20
+                      ? new EndpointGridIndex(targetFeatures)
+                      : undefined;
+                  const firstSnap = findNearestEndpoint(rawCoords[0], targetFeatures, 10, snapIndex);
+                  const lastSnap = findNearestEndpoint(rawCoords[rawCoords.length - 1], targetFeatures, 10, snapIndex);
+
+                  const snappedCoords: [number, number][] = rawCoords.map((c) => [...c] as [number, number]);
+                  if (firstSnap) {
+                    snappedCoords[0] = [firstSnap.coord[0], firstSnap.coord[1]];
+                  }
+                  if (lastSnap) {
+                    snappedCoords[snappedCoords.length - 1] = [lastSnap.coord[0], lastSnap.coord[1]];
+                  }
+
+                  // ── Helper: find a feature by its ID in the target layer ──
+                  const findFeature = (fid: string) =>
+                    targetFeatures.find((f) => {
+                      const id = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
+                      return id === fid;
+                    });
+
+                  // ── 4-Case Merge-on-Snap decision ────────────────────────
+                  const caseBothDifferent = firstSnap && lastSnap && firstSnap.featureId !== lastSnap.featureId;
+                  const caseBothSame = firstSnap && lastSnap && firstSnap.featureId === lastSnap.featureId;
+                  const caseOneSnap = (firstSnap && !lastSnap) || (!firstSnap && lastSnap);
+                  const caseNoSnap = !firstSnap && !lastSnap;
+
+                  if (caseBothDifferent) {
+                    // ── Case A: Connect two different existing features ──
+                    const featA = findFeature(firstSnap!.featureId);
+                    const featB = findFeature(lastSnap!.featureId);
+                    if (featA && featB && featA.geometry?.type === 'LineString' && featB.geometry?.type === 'LineString') {
+                      let coordsA = featA.geometry.coordinates as [number, number][];
+                      let coordsB = featB.geometry.coordinates as [number, number][];
+                      // Reverse existingA if new segment snapped to its START (so snapped end comes last)
+                      if (firstSnap!.whichEnd === 'start') {
+                        coordsA = [...coordsA].reverse() as [number, number][];
+                      }
+                      // Reverse existingB if new segment snapped to its END (so snapped end comes first)
+                      if (lastSnap!.whichEnd === 'end') {
+                        coordsB = [...coordsB].reverse() as [number, number][];
+                      }
+                      const merged = extendLineString(coordsA, snappedCoords, 'connect', coordsB);
+                      if (merged) {
+                        const mergedFeat = createGeoJSONFeature(merged, drawTargetLayer, {
+                          ...(featA.properties ?? {}),
+                          name: `${(featA.properties as any)?.name ?? 'Feat'} + Draw`,
+                          merged_from: [firstSnap!.featureId, lastSnap!.featureId].join(','),
+                          drawn_segment_length_m: Math.round(approximateLength(snappedCoords)),
+                          total_length_m: Math.round(approximateLength(merged)),
+                          survey_notes: `Connected ${(featA.properties as any)?.name ?? 'A'} + drawn segment + ${(featB.properties as any)?.name ?? 'B'}`,
+                        });
+                        const updated = targetFeatures
+                          .filter((f) => {
+                            const id = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
+                            return id !== firstSnap!.featureId && id !== lastSnap!.featureId;
+                          })
+                          .concat([mergedFeat]);
+                        onGeometryChange(drawTargetLayer, 'merge', updated,
+                          `Connected "${(featA.properties as any)?.name ?? 'A'}" → drawn segment → "${(featB.properties as any)?.name ?? 'B'}" (merged into 1 line)`);
+                        return;
+                      }
+                      console.warn('[Draw] extendLineString connect returned null — falling back to standalone');
+                    }
+                    // Fall through to standalone if merge fails
+                  }
+
+                  if (caseBothSame) {
+                    // ── Case B: Both ends snap to the same feature — extend it ──
+                    // Guard: if both ends snap to the IDENTICAL endpoint, fall through to standalone
+                    if (firstSnap!.coord[0] === lastSnap!.coord[0] && firstSnap!.coord[1] === lastSnap!.coord[1]) {
+                      console.warn('[Draw] bothSame but same endpoint — falling back to standalone');
+                    } else {
+                      const feat = findFeature(firstSnap!.featureId);
+                      if (feat && feat.geometry?.type === 'LineString') {
+                        const existingCoords = feat.geometry.coordinates as [number, number][];
+                        const distToExistingStart = approximateLength([snappedCoords[0], existingCoords[0]]);
+                        const distToExistingEnd = approximateLength([snappedCoords[0], existingCoords[existingCoords.length - 1]]);
+                        const mode = distToExistingStart < distToExistingEnd ? 'prepend' : 'append';
+                        const merged = extendLineString(existingCoords, snappedCoords, mode);
+                        if (merged) {
+                          const updatedFeat = {
+                            ...feat,
+                            geometry: { ...feat.geometry, coordinates: merged },
+                            properties: {
+                              ...(feat.properties ?? {}),
+                              extended_by_draw: true,
+                              survey_notes: `Extended via drawn segment (now ${merged.length} vertices)`,
+                              length_m: Math.round(approximateLength(merged)),
+                            },
+                          };
+                          const updated = targetFeatures.map((f) => {
+                            const id = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
+                            return id === firstSnap!.featureId ? updatedFeat : f;
+                          });
+                          onGeometryChange(drawTargetLayer, 'merge', updated,
+                            `Extended "${(feat.properties as any)?.name ?? 'feature'}" with drawn segment (${snappedCoords.length} pts, now ${merged.length} vertices)`);
+                          return;
+                        }
+                        console.warn('[Draw] extendLineString append/prepend returned null (bothSame case) — falling back to standalone');
+                      }
+                    }
+                    // Fall through to standalone
+                  }
+
+                  if (caseOneSnap) {
+                    // ── Case C: One end snaps to an existing feature — extend it ──
+                    const snap = firstSnap ?? lastSnap!;
+                    const snapEnd = firstSnap?.whichEnd ?? lastSnap?.whichEnd ?? 'end';
+                    const feat = findFeature(snap.featureId);
+                    if (feat && feat.geometry?.type === 'LineString') {
+                      const existingCoords = feat.geometry.coordinates as [number, number][];
+                      // Determine mode: if snapping to start of existing, prepend; if to end, append
+                      const mode: 'append' | 'prepend' = snapEnd === 'end' ? 'append' : 'prepend';
+                      const merged = extendLineString(existingCoords, snappedCoords, mode);
+                      if (merged) {
+                        const updatedFeat = {
+                          ...feat,
+                          geometry: { ...feat.geometry, coordinates: merged },
+                          properties: {
+                            ...(feat.properties ?? {}),
+                            extended_by_draw: true,
+                            survey_notes: `Extended via drawn segment (now ${merged.length} vertices)`,
+                            length_m: Math.round(approximateLength(merged)),
+                          },
+                        };
+                        const updated = targetFeatures.map((f) => {
+                          const id = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
+                          return id === snap.featureId ? updatedFeat : f;
+                        });
+                        onGeometryChange(drawTargetLayer, 'merge', updated,
+                          `Extended "${(feat.properties as any)?.name ?? 'feature'}" with drawn segment (${mode === 'append' ? 'append' : 'prepend'}, ${snappedCoords.length} pts)`);
+                        return;
+                      }
+                      console.warn('[Draw] extendLineString returned null (oneSnap case) — falling back to standalone');
+                    }
+                    // Fall through to standalone
+                  }
+
+                  // ── Case D: No snaps — create standalone feature ──────────
+                  const standalone = createGeoJSONFeature(snappedCoords, drawTargetLayer, {
+                    name: `Draw #${Date.now() % 10000}`,
+                    survey_notes: `Drawn segment (${snappedCoords.length} vertices) — standalone`,
+                    drawn_into_layer: drawTargetLayer,
+                    standalone: true,
+                  });
+                  onGeometryChange(drawTargetLayer, 'create', [...targetFeatures, standalone],
+                    `Created standalone segment in "${drawLineLayers.find(l => l.id === drawTargetLayer)?.name ?? drawTargetLayer}" (${snappedCoords.length} vertices)`);
                 }}
                 activeOpacity={0.8}
               >
@@ -295,6 +482,83 @@ export default function GeometryEditor({
               >
                 <Text style={styles.actionBtnText}>✕ Clear</Text>
               </TouchableOpacity>
+            </View>
+          )}
+
+          {/* Vertex edit action buttons */}
+          {mode === 'edit_vertices' && vertexEdit && (
+            <View style={styles.drawActions}>
+              <TouchableOpacity
+                style={[styles.actionBtn, { backgroundColor: '#EF4444' }]}
+                onPress={() => onDeleteVertex?.()}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.actionBtnText}>✕ Delete Vertex #{vertexEdit.vertexIdx + 1}</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {/* Add point: layer picker */}
+          {mode === 'add_point' && (
+            <View style={styles.addPointLayerPicker}>
+              <Text style={[styles.pickerLabel, { color: colors.textSecondary }]}>Target layer:</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+                {addPointLayers.map((layer) => (
+                  <TouchableOpacity
+                    key={layer.id}
+                    style={[
+                      styles.layerChip,
+                      {
+                        backgroundColor: addPointTargetLayer === layer.id ? '#EC4899' + '25' : colors.surface,
+                        borderColor: addPointTargetLayer === layer.id ? '#EC4899' : colors.outline,
+                      },
+                    ]}
+                    onPress={() => onAddPointLayerChange?.(layer.id)}
+                    activeOpacity={0.7}
+                  >
+                    <Text
+                      style={[
+                        styles.layerChipText,
+                        { color: addPointTargetLayer === layer.id ? '#EC4899' : colors.textPrimary },
+                      ]}
+                    >
+                      {layer.name}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+          )}
+
+          {/* Draw: layer picker */}
+          {mode === 'draw_bypass' && (
+            <View style={styles.addPointLayerPicker}>
+              <Text style={[styles.pickerLabel, { color: colors.textSecondary }]}>Draw into layer:</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+                {drawLineLayers.map((layer) => (
+                  <TouchableOpacity
+                    key={layer.id}
+                    style={[
+                      styles.layerChip,
+                      {
+                        backgroundColor: drawTargetLayer === layer.id ? '#10B981' + '25' : colors.surface,
+                        borderColor: drawTargetLayer === layer.id ? '#10B981' : colors.outline,
+                      },
+                    ]}
+                    onPress={() => onDrawLayerChange?.(layer.id)}
+                    activeOpacity={0.7}
+                  >
+                    <Text
+                      style={[
+                        styles.layerChipText,
+                        { color: drawTargetLayer === layer.id ? '#10B981' : colors.textPrimary },
+                      ]}
+                    >
+                      {layer.name}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
             </View>
           )}
 
@@ -423,5 +687,22 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     textAlign: 'center',
+  },
+  addPointLayerPicker: {
+    gap: 6,
+  },
+  pickerLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  layerChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: Radius.full,
+    borderWidth: 1.5,
+  },
+  layerChipText: {
+    fontSize: 12,
+    fontWeight: '600',
   },
 });

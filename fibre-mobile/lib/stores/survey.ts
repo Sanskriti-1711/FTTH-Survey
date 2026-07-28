@@ -50,7 +50,21 @@ interface SurveyState {
   evidence: FieldEvidenceData[];
   changes: SurveyChangeData[];
   statuses: SurveyStatusData[];
-  syncQueue: BackendSyncQueueItem[];
+  syncQueue: BackendSyncQueueItem[];      /** Track point move history: compositeKey → { hldCoords (original HLD, never changes), surveyCoords (current position), layerId } */
+  surveyPointGeometries: Record<string, { hldCoords: [number, number]; surveyCoords: [number, number]; layerId: string }>;
+  /** Record a point move: updates the GeoJSON point position AND creates a SurveyChange audit trail.
+   * @param dbFeatureUuid - The REAL database Feature UUID (sent to backend as feature ForeignKey)
+   * @param compositeKey - `${layerId}:${featureId}` for local state tracking
+   */
+  recordPointMove: (
+    dbFeatureUuid: string,
+    compositeKey: string,
+    layerId: string,
+    oldLng: number,
+    oldLat: number,
+    newLng: number,
+    newLat: number
+  ) => void;
 
   fetchGPSTraces: () => Promise<void>;
   createGPSTrace: (data: { project?: string }) => Promise<GPSTrace>;
@@ -101,6 +115,7 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
   changes: [],
   statuses: [],
   syncQueue: [],
+  surveyPointGeometries: {},
 
   fetchLayers: async (projectId) => {
     const { demoMode } = useAuthStore.getState();
@@ -389,6 +404,89 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
     }
     const result = await surveyApi.createFieldEvidence(data);
     set((s) => ({ evidence: [result, ...s.evidence] }));
+  },
+
+  // ── Point Move Recording (Sprint 6) ──────────────────────────────────
+  /**
+   * Record a point drag as a SurveyChange — NEVER mutates HLD data.
+   * Stores old→new coordinates for rendering a synthetic "Survey Points" layer.
+   *
+   * @param dbFeatureUuid — The REAL database Feature UUID (sent as `feature` ForeignKey)
+   * @param compositeKey — `${layerId}:${dbFeatureUuid}` for local state tracking
+   */
+  recordPointMove: (
+    dbFeatureUuid: string,
+    compositeKey: string,
+    layerId: string,
+    oldLng: number,
+    oldLat: number,
+    newLng: number,
+    newLat: number
+  ) => {
+    const { demoMode } = useAuthStore.getState();
+
+    // ── Track point move history: HLD original (first move) + current survey position ──
+    // IMPORTANT: Check isFirstMove BEFORE set() since zustand sets are synchronous
+    const isFirstMove = !get().surveyPointGeometries[compositeKey];
+
+    set((s) => ({
+      surveyPointGeometries: {
+        ...s.surveyPointGeometries,
+        [compositeKey]: {
+          // HLD original: set on first move, preserved forever
+          hldCoords: isFirstMove ? [oldLng, oldLat] : (s.surveyPointGeometries[compositeKey]?.hldCoords ?? [oldLng, oldLat]),
+          // Current surveyed position: always updated to latest
+          surveyCoords: [newLng, newLat],
+          layerId,
+        },
+      },
+    }));
+
+    // The oldLng/oldLat represent the "previous position":
+    // - First move: HLD original position
+    // - Subsequent moves: previous survey position (GeoJSON was already updated)
+    const reason = isFirstMove
+      ? `Moved from HLD planned position to surveyed location`
+      : `Re-adjusted survey position`;
+
+    // Create a SurveyChange record (local-first, sync later)
+    if (demoMode) {
+      const mock: SurveyChangeData = {
+        id: `demo-change-${Date.now()}`,
+        engineer: 'demo-user',
+        feature: dbFeatureUuid,  // Use real DB UUID (even in demo, this is just a string)
+        field_name: 'geometry',
+        old_value: [oldLng, oldLat],
+        new_value: [newLng, newLat],
+        reason,
+        latitude: newLat,
+        longitude: newLng,
+        created_at: new Date().toISOString(),
+      };
+      set((s) => ({ changes: [mock, ...s.changes] }));
+      console.log(
+        `[Survey] ${isFirstMove ? 'FIRST' : 'RE-ADJUST'} move for ${dbFeatureUuid}: [${oldLng.toFixed(6)},${oldLat.toFixed(6)}] → [${newLng.toFixed(6)},${newLat.toFixed(6)}]`
+      );
+      return;
+    }
+
+    // Non-demo: save to backend (fire-and-forget)
+    const saveToBackend = async () => {
+      try {
+        await get().saveChange({
+          feature: dbFeatureUuid,  // REAL DB UUID — backend ForeignKey validation passes
+          field_name: 'geometry',
+          old_value: [oldLng, oldLat],
+          new_value: [newLng, newLat],
+          reason,
+          latitude: newLat,
+          longitude: newLng,
+        });
+      } catch (err) {
+        console.warn('[Survey] Failed to sync point move to backend:', err);
+      }
+    };
+    setTimeout(saveToBackend, 0);
   },
 
   // ── Changes ────────────────────────────────────────────────────────────

@@ -1375,8 +1375,7 @@ function WebMapView({
     } catch {}
   }, [dragMode, status]);
 
-  // Main drag effect: register mousedown per-layer, global mousemove/mouseup once
-  // Supports both point dragging AND vertex dragging.
+  // ── Point drag effect (guarded by dragMode) ────────────────────────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !onFeatureDragEnd || !dragMode || status !== 'ready') return;
@@ -1384,7 +1383,6 @@ function WebMapView({
     const canvas = map.getCanvas();
     const cleanupFns: (() => void)[] = [];
 
-    // ── Global move/up handlers (registered once) ──────────────────────
     const containerToLngLat = (e: any) => {
       if (e.lngLat) return e.lngLat;
       try {
@@ -1399,7 +1397,6 @@ function WebMapView({
       const lngLat = containerToLngLat(e);
       if (!lngLat) return;
 
-      // Calculate and display drag distance
       if (dragOriginRef.current) {
         const dist = haversineDistance(
           dragOriginRef.current.lng,
@@ -1414,43 +1411,12 @@ function WebMapView({
       if (!src?._data?.features) return;
       try {
         const features = [...src._data.features];
-
-        if (ds.vertexIdx !== undefined && ds.parentSourceId) {
-          // ── Vertex drag: update vertex marker AND parent line coord ──
-          // Update the vertex marker position
-          if (features[ds.featureIndex]?.geometry?.type === 'Point') {
-            features[ds.featureIndex] = {
-              ...features[ds.featureIndex],
-              geometry: { ...features[ds.featureIndex].geometry, coordinates: [lngLat.lng, lngLat.lat] },
-            };
-          }
+        if (features[ds.featureIndex]?.geometry?.type === 'Point') {
+          features[ds.featureIndex] = {
+            ...features[ds.featureIndex],
+            geometry: { ...features[ds.featureIndex].geometry, coordinates: [lngLat.lng, lngLat.lat] },
+          };
           src.setData({ type: 'FeatureCollection', features });
-
-          // Update the parent LineString's coordinate at the vertex index
-          try {
-            const parentSrc = map.getSource(ds.parentSourceId) as any;
-            if (parentSrc?._data?.features) {
-              const parentFeatures = [...parentSrc._data.features];
-              const parentFeat = parentFeatures.find(
-                (f: any) => (f.properties?._id === ds.featureId || f.properties?.id === ds.featureId)
-              );
-              if (parentFeat?.geometry?.type === 'LineString') {
-                const coords = [...parentFeat.geometry.coordinates];
-                coords[ds.vertexIdx] = [lngLat.lng, lngLat.lat];
-                parentFeat.geometry = { ...parentFeat.geometry, coordinates: coords };
-                parentSrc.setData({ type: 'FeatureCollection', features: parentFeatures });
-              }
-            }
-          } catch {}
-        } else {
-          // ── Normal point drag ────────────────────────────────────────
-          if (features[ds.featureIndex]?.geometry?.type === 'Point') {
-            features[ds.featureIndex] = {
-              ...features[ds.featureIndex],
-              geometry: { ...features[ds.featureIndex].geometry, coordinates: [lngLat.lng, lngLat.lat] },
-            };
-            src.setData({ type: 'FeatureCollection', features });
-          }
         }
       } catch {}
     };
@@ -1458,70 +1424,30 @@ function WebMapView({
     const cancelDrag = () => {
       const ds = dragStateRef.current;
       if (!ds?.active) return;
-      // Restore original coords on cancel (snap-back)
       if (ds.originalLng !== undefined) {
         try {
-          if (ds.vertexIdx !== undefined && ds.parentSourceId) {
-            // Restore vertex marker
-            const src = map.getSource(ds.sourceId) as any;
-            if (src?._data?.features) {
-              const features = [...src._data.features];
-              if (features[ds.featureIndex]?.geometry?.type === 'Point') {
-                features[ds.featureIndex] = {
-                  ...features[ds.featureIndex],
-                  geometry: { ...features[ds.featureIndex].geometry, coordinates: [ds.originalLng, ds.originalLat] },
-                };
-                src.setData({ type: 'FeatureCollection', features });
-              }
-            }
-            // Restore parent line
-            const parentSrc = map.getSource(ds.parentSourceId) as any;
-            if (parentSrc?._data?.features) {
-              const parentFeatures = [...parentSrc._data.features];
-              const parentFeat = parentFeatures.find(
-                (f: any) => (f.properties?._id === ds.featureId || f.properties?.id === ds.featureId)
-              );
-              if (parentFeat?.geometry?.type === 'LineString') {
-                const coords = [...parentFeat.geometry.coordinates];
-                coords[ds.vertexIdx] = [ds.originalLng, ds.originalLat];
-                parentFeat.geometry = { ...parentFeat.geometry, coordinates: coords };
-                parentSrc.setData({ type: 'FeatureCollection', features: parentFeatures });
-              }
-            }
-          } else {
-            const src = map.getSource(ds.sourceId) as any;
-            if (src?._data?.features) {
-              const features = [...src._data.features];
-              if (features[ds.featureIndex]?.geometry?.type === 'Point') {
-                features[ds.featureIndex] = {
-                  ...features[ds.featureIndex],
-                  geometry: { ...features[ds.featureIndex].geometry, coordinates: [ds.originalLng, ds.originalLat] },
-                };
-                src.setData({ type: 'FeatureCollection', features });
-              }
+          const src = map.getSource(ds.sourceId) as any;
+          if (src?._data?.features) {
+            const features = [...src._data.features];
+            if (features[ds.featureIndex]?.geometry?.type === 'Point') {
+              features[ds.featureIndex] = {
+                ...features[ds.featureIndex],
+                geometry: { ...features[ds.featureIndex].geometry, coordinates: [ds.originalLng, ds.originalLat] },
+              };
+              src.setData({ type: 'FeatureCollection', features });
             }
           }
         } catch {}
       }
-      try { map.getCanvas().style.cursor = dragMode ? 'grab' : ''; } catch {}
+      try { map.getCanvas().style.cursor = 'grab'; } catch {}
+      try { if (map.getLayer(`ml-lyr-${ds.layerId}-dragging`)) map.removeLayer(`ml-lyr-${ds.layerId}-dragging`); } catch {}
+      // Remove origin marker
       try {
-        const dragLayerId = ds?.vertexIdx !== undefined
-          ? `ml-vert-hl-${ds.layerId}-${ds.featureId}`
-          : `ml-lyr-${ds.layerId}-dragging`;
-        if (map.getLayer(dragLayerId)) map.removeLayer(dragLayerId);
+        const origLayerId = `ml-orig-${ds.sourceId}`;
+        const origSourceId = `${ds.sourceId}-origin`;
+        if (map.getLayer(origLayerId)) map.removeLayer(origLayerId);
+        if (map.getSource(origSourceId)) map.removeSource(origSourceId);
       } catch {}
-
-      // Remove origin marker layer
-      try {
-        if (ds) {
-          const origLayerId = `ml-orig-${ds.sourceId}`;
-          const origSourceId = `${ds.sourceId}-origin`;
-          if (map.getLayer(origLayerId)) map.removeLayer(origLayerId);
-          if (map.getSource(origSourceId)) map.removeSource(origSourceId);
-        }
-      } catch {}
-
-      // Reset distance tracking
       setDragDistance(null);
       dragOriginRef.current = null;
       dragStateRef.current = null;
@@ -1531,31 +1457,19 @@ function WebMapView({
       const ds = dragStateRef.current;
       if (!ds?.active) return;
       const lngLat = containerToLngLat(e);
-      const wasVertexDrag = ds.vertexIdx !== undefined;
-      const vertexIdx = ds.vertexIdx;
-      const parentSourceId = ds.parentSourceId;
-
-      // Reset drag distance before cancel
       setDragDistance(null);
       dragOriginRef.current = null;
       cancelDrag();
-
       if (lngLat && ds) {
         const px = (e as any).point ?? map.project([lngLat.lng, lngLat.lat]);
         const pixelDx = Math.abs((px?.x ?? 0) - ds.startPoint.x);
         const pixelDy = Math.abs((px?.y ?? 0) - ds.startPoint.y);
         if (pixelDx > 8 || pixelDy > 8) {
-          if (wasVertexDrag && vertexIdx !== undefined && onVertexDragEndRef.current) {
-            // Fire vertex drag end
-            onVertexDragEndRef.current(ds.featureId, ds.layerId, vertexIdx, lngLat.lng, lngLat.lat);
-          } else {
-            onFeatureDragEnd(ds.featureId, ds.layerId, lngLat.lng, lngLat.lat);
-          }
+          onFeatureDragEnd(ds.featureId, ds.layerId, lngLat.lng, lngLat.lat);
         }
       }
     };
 
-    // Register global move/up ONCE
     canvas.addEventListener('mousemove', onDragMove);
     canvas.addEventListener('mouseup', onDragEnd);
     canvas.addEventListener('mouseleave', cancelDrag);
@@ -1565,7 +1479,6 @@ function WebMapView({
       canvas.removeEventListener('mouseleave', cancelDrag);
     });
 
-    // ── Per-layer mousedown handlers ──────────────────────────────────
     for (const layerData of layers) {
       if (!layerData.visible || layerData.features.length === 0) continue;
       if (layerData.geometryType !== 'Point') continue;
@@ -1579,7 +1492,6 @@ function WebMapView({
       const onDragStart = (e: any) => {
         if (!dragMode) return;
         e.preventDefault();
-
         const feature = e.features?.[0];
         if (!feature) return;
         const props = feature.properties;
@@ -1587,7 +1499,6 @@ function WebMapView({
         const lid = props?._layer_id as string | undefined;
         if (!fid || !lid) return;
 
-        // Find the feature index in the source data
         let featureIndex = -1;
         try {
           const src = map.getSource(sourceId) as any;
@@ -1600,8 +1511,6 @@ function WebMapView({
         if (featureIndex < 0) return;
 
         map.getCanvas().style.cursor = 'grabbing';
-
-        // Store the original position for distance tracking
         dragOriginRef.current = { lng: e.lngLat.lng, lat: e.lngLat.lat };
         setDragDistance(null);
 
@@ -1616,64 +1525,28 @@ function WebMapView({
           startPoint: e.point ? { x: e.point.x, y: e.point.y } : { x: 0, y: 0 },
         };
 
-        // Create a temporary drag highlight ring
         if (!map.getLayer(`${layerId}-dragging`)) {
           try {
             map.addLayer({
               id: `${layerId}-dragging`,
-              type: 'circle',
-              source: sourceId,
-              paint: {
-                'circle-radius': 14,
-                'circle-color': 'transparent',
-                'circle-stroke-width': 3,
-                'circle-stroke-color': '#0D5CFF',
-                'circle-stroke-opacity': 0.7,
-              },
+              type: 'circle', source: sourceId,
+              paint: { 'circle-radius': 14, 'circle-color': 'transparent', 'circle-stroke-width': 3, 'circle-stroke-color': '#0D5CFF', 'circle-stroke-opacity': 0.7 },
             });
           } catch {}
         }
 
-        // Add/update an origin position marker at the original location
         const origLayerId = `ml-orig-${sourceId}`;
         const origSourceId = `${sourceId}-origin`;
         try {
           if (!map.getSource(origSourceId)) {
             map.addSource(origSourceId, {
               type: 'geojson',
-              data: {
-                type: 'FeatureCollection',
-                features: [{
-                  type: 'Feature',
-                  geometry: { type: 'Point', coordinates: [e.lngLat.lng, e.lngLat.lat] },
-                  properties: {},
-                }],
-              },
-            });
-          } else {
-            // Update existing source with new origin coordinates
-            map.getSource(origSourceId).setData({
-              type: 'FeatureCollection',
-              features: [{
-                type: 'Feature',
-                geometry: { type: 'Point', coordinates: [e.lngLat.lng, e.lngLat.lat] },
-                properties: {},
-              }],
+              data: { type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: [e.lngLat.lng, e.lngLat.lat] }, properties: {} }] },
             });
           }
           if (!map.getLayer(origLayerId)) {
-            map.addLayer({
-              id: origLayerId,
-              type: 'circle',
-              source: origSourceId,
-              paint: {
-                'circle-radius': 10,
-                'circle-color': 'rgba(255, 255, 255, 0.5)',
-                'circle-stroke-width': 2,
-                'circle-stroke-color': '#ff6b6b',
-                'circle-stroke-opacity': 0.8,
-                'circle-opacity': 0.3,
-              },
+            map.addLayer({ id: origLayerId, type: 'circle', source: origSourceId,
+              paint: { 'circle-radius': 10, 'circle-color': 'rgba(255, 255, 255, 0.5)', 'circle-stroke-width': 2, 'circle-stroke-color': '#ff6b6b', 'circle-stroke-opacity': 0.8, 'circle-opacity': 0.3 },
             });
           }
         } catch {}
@@ -1681,31 +1554,154 @@ function WebMapView({
 
       try {
         map.on('mousedown', handleLayer, onDragStart);
-        cleanupFns.push(() => {
-          try { map.off('mousedown', handleLayer, onDragStart); } catch {}
-        });
+        cleanupFns.push(() => { try { map.off('mousedown', handleLayer, onDragStart); } catch {} });
       } catch {}
     }
 
-    // ── Vertex drag mousedown handler ─────────────────────────────────
-    // Attach to the invisible drag handle layer for vertices
-    if (vertexDragTargetRef.current) {
-      const vt = vertexDragTargetRef.current;
-      const vertDragLayerId = `ml-vert-drag-${vt.layerId}-${vt.featureId}`;
-      const vertSourceId = `ml-vert-src-${vt.layerId}-${vt.featureId}`;
-      const parentSourceId = `ml-src-${vt.layerId}`;
+    return () => { for (const fn of cleanupFns) try { fn(); } catch {} };
+  }, [layers, status, dragMode, draggableLayerIds, onFeatureDragEnd]);
 
-      const onVertexDragStart = (e: any) => {
-        if (!dragMode) return;
-        e.preventDefault();
+  // ── Vertex drag effect (runs independently of dragMode) ────────────────
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !onVertexDragEndRef.current || !vertexDragTargetRef.current || status !== 'ready') return;
 
-        const feature = e.features?.[0];
-        if (!feature) return;
-        const props = feature.properties;
-        const fid = props?._id as string | undefined;
-        const vIdx = props?._vertex_idx as number | undefined;
-        const isVertex = props?._is_vertex === true;
-        if (!fid || vIdx === undefined || !isVertex) return;
+    const vt = vertexDragTargetRef.current;
+    const vertDragLayerId = `ml-vert-drag-${vt.layerId}-${vt.featureId}`;
+    const vertSourceId = `ml-vert-src-${vt.layerId}-${vt.featureId}`;
+    const parentSourceId = `ml-src-${vt.layerId}`;
+    const canvas = map.getCanvas();
+    const cleanupFns: (() => void)[] = [];
+
+    const containerToLngLat = (e: any) => {
+      if (e.lngLat) return e.lngLat;
+      try {
+        const rect = map.getContainer().getBoundingClientRect();
+        return map.unproject([e.clientX - rect.left, e.clientY - rect.top]);
+      } catch { return null; }
+    };
+
+    const onDragMove = (e: any) => {
+      const ds = dragStateRef.current;
+      if (!ds?.active || ds.vertexIdx === undefined) return;
+      const lngLat = containerToLngLat(e);
+      if (!lngLat) return;
+
+      if (dragOriginRef.current) {
+        const dist = haversineDistance(
+          dragOriginRef.current.lng, dragOriginRef.current.lat,
+          lngLat.lng, lngLat.lat
+        );
+        setDragDistance(Math.round(dist));
+      }
+
+      const src = map.getSource(ds.sourceId) as any;
+      if (!src?._data?.features) return;
+      try {
+        const features = [...src._data.features];
+        if (features[ds.featureIndex]?.geometry?.type === 'Point') {
+          features[ds.featureIndex] = {
+            ...features[ds.featureIndex],
+            geometry: { ...features[ds.featureIndex].geometry, coordinates: [lngLat.lng, lngLat.lat] },
+          };
+        }
+        src.setData({ type: 'FeatureCollection', features });
+
+        // Update the parent LineString's coordinate at the vertex index
+        try {
+          const parentSrc = map.getSource(ds.parentSourceId!) as any;
+          if (parentSrc?._data?.features) {
+            const parentFeatures = [...parentSrc._data.features];
+            const parentFeat = parentFeatures.find(
+              (f: any) => (f.properties?._id === ds.featureId || f.properties?.id === ds.featureId)
+            );
+            if (parentFeat?.geometry?.type === 'LineString') {
+              const coords = [...parentFeat.geometry.coordinates];
+              coords[ds.vertexIdx] = [lngLat.lng, lngLat.lat];
+              parentFeat.geometry = { ...parentFeat.geometry, coordinates: coords };
+              parentSrc.setData({ type: 'FeatureCollection', features: parentFeatures });
+            }
+          }
+        } catch {}
+      } catch {}
+    };
+
+    const cancelDrag = () => {
+      const ds = dragStateRef.current;
+      if (!ds?.active || ds.vertexIdx === undefined) return;
+      try {
+        const src = map.getSource(ds.sourceId) as any;
+        if (src?._data?.features) {
+          const features = [...src._data.features];
+          if (features[ds.featureIndex]?.geometry?.type === 'Point') {
+            features[ds.featureIndex] = {
+              ...features[ds.featureIndex],
+              geometry: { ...features[ds.featureIndex].geometry, coordinates: [ds.originalLng, ds.originalLat] },
+            };
+            src.setData({ type: 'FeatureCollection', features });
+          }
+        }
+        // Restore parent line
+        const parentSrc = map.getSource(ds.parentSourceId!) as any;
+        if (parentSrc?._data?.features) {
+          const parentFeatures = [...parentSrc._data.features];
+          const parentFeat = parentFeatures.find(
+            (f: any) => (f.properties?._id === ds.featureId || f.properties?.id === ds.featureId)
+          );
+          if (parentFeat?.geometry?.type === 'LineString') {
+            const coords = [...parentFeat.geometry.coordinates];
+            coords[ds.vertexIdx] = [ds.originalLng, ds.originalLat];
+            parentFeat.geometry = { ...parentFeat.geometry, coordinates: coords };
+            parentSrc.setData({ type: 'FeatureCollection', features: parentFeatures });
+          }
+        }
+      } catch {}
+      try { map.getCanvas().style.cursor = ''; } catch {}
+      try {
+        const hlId = `ml-vert-hl-${ds.layerId}-${ds.featureId}`;
+        if (map.getLayer(hlId)) map.removeLayer(hlId);
+      } catch {}
+      setDragDistance(null);
+      dragOriginRef.current = null;
+      dragStateRef.current = null;
+    };
+
+    const onDragEnd = (e: any) => {
+      const ds = dragStateRef.current;
+      if (!ds?.active || ds.vertexIdx === undefined) return;
+      const lngLat = containerToLngLat(e);
+      const vertexIdx = ds.vertexIdx;
+      setDragDistance(null);
+      dragOriginRef.current = null;
+      cancelDrag();
+      if (lngLat && ds) {
+        const px = (e as any).point ?? map.project([lngLat.lng, lngLat.lat]);
+        const pixelDx = Math.abs((px?.x ?? 0) - ds.startPoint.x);
+        const pixelDy = Math.abs((px?.y ?? 0) - ds.startPoint.y);
+        if ((pixelDx > 8 || pixelDy > 8) && onVertexDragEndRef.current) {
+          onVertexDragEndRef.current(ds.featureId, ds.layerId, vertexIdx, lngLat.lng, lngLat.lat);
+        }
+      }
+    };
+
+    canvas.addEventListener('mousemove', onDragMove);
+    canvas.addEventListener('mouseup', onDragEnd);
+    canvas.addEventListener('mouseleave', cancelDrag);
+    cleanupFns.push(() => {
+      canvas.removeEventListener('mousemove', onDragMove);
+      canvas.removeEventListener('mouseup', onDragEnd);
+      canvas.removeEventListener('mouseleave', cancelDrag);
+    });
+
+    const onVertexDragStart = (e: any) => {
+      e.preventDefault();
+      const feature = e.features?.[0];
+      if (!feature) return;
+      const props = feature.properties;
+      const fid = props?._id as string | undefined;
+      const vIdx = props?._vertex_idx as number | undefined;
+      const isVertex = props?._is_vertex === true;
+      if (!fid || vIdx === undefined || !isVertex) return;
 
         // Find feature index in vertex marker source
         let featureIndex = -1;
@@ -1744,13 +1740,11 @@ function WebMapView({
           });
         }
       } catch {}
-    }
 
     return () => {
-      for (const fn of cleanupFns) fn();
-      cancelDrag();
+      for (const fn of cleanupFns) try { fn(); } catch {}
     };
-  }, [layers, status, dragMode, draggableLayerIds, onFeatureDragEnd, onVertexDragEnd, vertexDragTarget]);
+  }, [status, vertexDragTarget, onVertexDragEnd]);
 
   // ── Fly-to imported center ────────────────────────────────────────────
   useEffect(() => {
