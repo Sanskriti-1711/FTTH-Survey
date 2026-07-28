@@ -24,6 +24,7 @@ import {
 } from '../../lib/utils/geometry-operations';
 import GeometryEditor from '../../lib/components/GeometryEditor';
 import type { GeometryMode, EditingFeature } from '../../lib/components/GeometryEditor';
+import LineSelectionToolbar from '../../lib/components/LineSelectionToolbar';
 import SurveyForm from '../../lib/components/SurveyForm';
 import type { SurveyFormData } from '../../lib/components/SurveyForm';
 import { Card, Badge } from '../../components/ui/Card';
@@ -259,6 +260,10 @@ export default function MapScreen() {
 
   // ── Editing mode state (viewing → editing flow) ──────────────────────
   const [editingFeature, setEditingFeature] = useState<EditingFeature | null>(null);
+
+  // ── Line Feature Selection state — shows the bottom toolbar when a line is tapped ──
+  // Only one feature can be selected at a time. Toolbar disappears when deselected.
+  const [selectedLineFeature, setSelectedLineFeature] = useState<EditingFeature | null>(null);
 
   // ── Add Point state ────────────────────────────────────────────────
   const [addPointTargetLayer, setAddPointTargetLayer] = useState<string>('');
@@ -916,20 +921,51 @@ export default function MapScreen() {
         setPopupScreenCoords(screenPoint);
       }
 
+      // ── Determine geometry type for this feature ──────────────────────
+      const geomType = resolveGeometryType(layerId);
+
       // First try to find in demo features (rich metadata)
       const found = demoFeatures.find(
         (f) => f.feature.id === featureId
       );
-      if (found) {
-        selectFeature(found.feature.id, {
-          id: found.feature.id,
-          name: String(
+      const featureName = found
+        ? String(
             found.feature.properties?.name ??
               found.feature.properties?.address ??
               found.feature.layer_name + ' #' + found.feature.id.slice(-3)
-          ),
-          layerName: found.feature.layer_name,
-          status: found.feature.status,
+          )
+        : (featureId.startsWith('demo-')
+            ? (activeLayerNames[layerId] ?? layerId.toUpperCase()) + ' #' + featureId.slice(-3)
+            : 'Feature #' + featureId.slice(0, 8));
+      const layerName = found?.feature.layer_name ?? (activeLayerNames[layerId] ?? layerId.toUpperCase());
+      const status = found?.feature.status ?? 'assigned';
+
+      // ── LINE features: show the bottom selection toolbar (no popup) ──
+      if (geomType === 'LineString') {
+        setSelectedLineFeature({
+          id: featureId,
+          layerId,
+          geometryType: 'LineString',
+          name: featureName,
+          layerName,
+        });
+        setSelectedMapFeatureId(featureId); // Highlight on map
+        // Close any open popup — lines use the toolbar instead
+        selectFeature(null);
+        setPopupScreenCoords(null);
+        return;
+      }
+
+      // ── Non-line features: show the popup as before ──────────────────
+      // Clear any previous line selection
+      setSelectedLineFeature(null);
+
+      if (found) {
+        selectFeature(found.feature.id, {
+          id: found.feature.id,
+          name: featureName,
+          layerName,
+          status,
           layerId: found.feature.layer_id,
         });
         setSelectedMapFeatureId(found.feature.id);
@@ -937,10 +973,9 @@ export default function MapScreen() {
       }
 
       // Fallback for imported/unknown features — build popup from GeoJSON
-      const layerName = activeLayerNames[layerId] ?? layerId.toUpperCase();
       selectFeature(featureId, {
         id: featureId,
-        name: featureId.startsWith('demo-') ? layerName + ' #' + featureId.slice(-3) : 'Feature #' + featureId.slice(0, 8),
+        name: featureName,
         layerName,
         status: 'assigned',
         layerId,
@@ -1112,6 +1147,9 @@ export default function MapScreen() {
   const handleDoneEditing = useCallback(() => {
     setEditingFeature(null);
     setDragMode(false);
+    // Clear line selection when exiting edit mode
+    setSelectedLineFeature(null);
+    setSelectedMapFeatureId(null);
     console.log('[Edit] Done editing');
   }, []);
 
@@ -1139,9 +1177,17 @@ export default function MapScreen() {
     [onGeometryChange, activeLayerNames],
   );
 
-  // ── Handle empty map area click (for add point) ───────────
+  // ── Deselect the currently selected line feature ──────────────────────
+  const handleLineDeselect = useCallback(() => {
+    setSelectedLineFeature(null);
+    setSelectedMapFeatureId(null);
+  }, []);
+
+  // ── Handle empty map area click (for add point / deselect) ───────────
   const handleEmptyMapClick = useCallback(
     (lng: number, lat: number) => {
+      // Clear line selection when tapping empty area
+      setSelectedLineFeature(null);
       if (geoMode === 'add_point') {
         if (!addPointTargetLayer) {
           console.warn('[AddPoint] No target layer selected — tap a layer chip first');
@@ -1168,6 +1214,13 @@ export default function MapScreen() {
     },
     [geoMode, addPointTargetLayer, onGeometryChange, activeLayerNames],
   );
+
+  // Clear line selection when geoMode changes away from select (entering add_point)
+  useEffect(() => {
+    if (geoMode !== 'select') {
+      setSelectedLineFeature(null);
+    }
+  }, [geoMode]);
 
   // ── Save new point form data — update the feature's properties ──────
   const handleSurveyFormSave = useCallback(
@@ -1506,8 +1559,18 @@ export default function MapScreen() {
             </View>
           )}
 
-          {/* Pin-Anchored Feature Popup - hidden during editing mode */}
-          {selectedFeaturePopup && !editingFeature && (
+          {/* Line Selection Toolbar — appears when a line feature is tapped */}
+          {viewMode === 'map' && selectedLineFeature && !editingFeature && (
+            <LineSelectionToolbar
+              selectedFeature={selectedLineFeature}
+              onDeselect={handleLineDeselect}
+              undoCount={undoCount}
+              onUndo={handleUndo}
+            />
+          )}
+
+          {/* Pin-Anchored Feature Popup - hidden during editing mode or line selection */}
+          {selectedFeaturePopup && !editingFeature && !selectedLineFeature && (
             <MapFeaturePopup
               screenX={popupScreenCoords?.x ?? 160}
               screenY={popupScreenCoords?.y ?? 300}
