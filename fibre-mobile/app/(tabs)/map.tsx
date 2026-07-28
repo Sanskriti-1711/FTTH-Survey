@@ -267,6 +267,14 @@ export default function MapScreen() {
   // Only one feature can be selected at a time. Toolbar disappears when deselected.
   const [selectedLineFeature, setSelectedLineFeature] = useState<EditingFeature | null>(null);
 
+  // ── Line Move Mode state ──
+  // When active, vertex handles are displayed for the selected line.
+  // tempLineCoords holds the working copy of coordinates — HLD is never touched.
+  // The user must press Save to persist changes to the survey-features store.
+  const [lineMoveMode, setLineMoveMode] = useState(false);
+  const [tempLineCoords, setTempLineCoords] = useState<[number, number][] | null>(null);
+  const [tempLineOriginal, setTempLineOriginal] = useState<[number, number][] | null>(null);
+
   // ── Add Point state ────────────────────────────────────────────────
   const [addPointTargetLayer, setAddPointTargetLayer] = useState<string>('');
   // addPointLayers is computed below from allPanelLayers
@@ -802,8 +810,35 @@ export default function MapScreen() {
       });
     }
 
-    return [...hldLayers, ...surveyLayers];
-  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, demoFeatureIdMap, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures]);
+    let allLayers = [...hldLayers, ...surveyLayers];
+
+    // ── Temporary preview layer for Move Mode ──
+    // Shows the working copy of the line being edited as an orange dashed line.
+    // This is a visual preview only — the HLD source is never touched.
+    // The survey-features store is only updated when the user presses Save.
+    if (lineMoveMode && tempLineCoords && selectedLineFeature) {
+      allLayers = [...allLayers, {
+        id: `temp-move-${selectedLineFeature.layerId}-${selectedLineFeature.id}`,
+        name: 'Move Preview',
+        geometryType: 'LineString' as const,
+        features: [{
+          type: 'Feature' as const,
+          geometry: { type: 'LineString', coordinates: tempLineCoords },
+          properties: {
+            id: `temp-move-${selectedLineFeature.id}`,
+            _id: `temp-move-${selectedLineFeature.id}`,
+            _layer_id: `temp-move-${selectedLineFeature.layerId}-${selectedLineFeature.id}`,
+            _parent_feature_id: selectedLineFeature.id,
+            _is_temp_move: true,
+          },
+        }],
+        visible: true,
+        color: SURVEY_COLOR, // Orange — matches survey styling
+      }];
+    }
+
+    return allLayers;
+  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, demoFeatureIdMap, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, tempLineCoords, selectedLineFeature];
 
   // Build visible layers: when a real project is active, show ONLY imported layers
   const visibleLayers = useMemo(() => {
@@ -1379,7 +1414,142 @@ export default function MapScreen() {
   const handleLineDeselect = useCallback(() => {
     setSelectedLineFeature(null);
     setSelectedMapFeatureId(null);
+    // Exit move mode + clear temp state
+    setLineMoveMode(false);
+    setTempLineCoords(null);
+    setTempLineOriginal(null);
   }, []);
+
+  // ── Toggle Move Mode for the selected line ────────────────────────────
+  // On activate: extract the HLD line's coordinates into tempLineCoords (working copy)
+  // On deactivate: discard temp changes (user must press Save to persist)
+  const handleToggleMove = useCallback(() => {
+    if (!selectedLineFeature) return;
+
+    if (lineMoveMode) {
+      // ── Exit Move Mode — discard temp changes ──
+      setLineMoveMode(false);
+      setTempLineCoords(null);
+      setTempLineOriginal(null);
+      console.log('[MoveMode] Exited — temp changes discarded');
+    } else {
+      // ── Enter Move Mode — extract HLD coordinates into temp copy ──
+      const { id: featureId, layerId } = selectedLineFeature;
+      const features = activeGeojsonRef.current[layerId];
+      if (!features) return;
+
+      const hldFeature = features.find((f) => {
+        const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
+        return fid === featureId;
+      });
+      if (!hldFeature?.geometry || hldFeature.geometry.type !== 'LineString') return;
+
+      const coords = hldFeature.geometry.coordinates as [number, number][];
+      const coordsCopy = coords.map(([lng, lat]) => [lng, lat] as [number, number]);
+      const originalCopy = coords.map(([lng, lat]) => [lng, lat] as [number, number]);
+
+      setTempLineCoords(coordsCopy);
+      setTempLineOriginal(originalCopy);
+      setLineMoveMode(true);
+      autoOverlayOnEdit();
+      console.log(`[MoveMode] Activated for ${featureId.slice(-8)} — ${coordsCopy.length} vertices`);
+    }
+  }, [selectedLineFeature, lineMoveMode, autoOverlayOnEdit]);
+
+  // ── Save the temporary line geometry to the survey-features store ──────
+  // Creates or updates a SurveyFeature with the modified geometry.
+  // HLD geometry is never touched.
+  const handleSaveLine = useCallback(() => {
+    if (!selectedLineFeature || !tempLineCoords || !tempLineOriginal) return;
+
+    const { id: featureId, layerId, layerName } = selectedLineFeature;
+    const surveyGeometry = { type: 'LineString', coordinates: tempLineCoords };
+
+    // Check if a SurveyFeature already exists for this HLD feature
+    const existingSurvey = getSurveyFeatureForHld(featureId);
+    const { geometry: origGeom, attributes: origAttrs } = findHldFeatureOriginal(featureId, layerId);
+
+    if (existingSurvey) {
+      // Update existing survey feature
+      pushUndo({
+        featureId,
+        layerId,
+        oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+        timestamp: Date.now(),
+        surveyUndo: {
+          surveyFeatureId: existingSurvey.id,
+          layerId,
+          previousGeometry: existingSurvey.survey_geometry,
+          previousAttributes: existingSurvey.survey_attributes,
+          previousStatus: existingSurvey.survey_status,
+          description: `Undo line move for ${featureId.slice(-8)}`,
+        },
+      });
+      updateSurveyFeature(existingSurvey.id, layerId, {
+        survey_geometry: surveyGeometry,
+        survey_status: 'modified',
+      });
+    } else {
+      // Create new survey feature
+      upsertSurveyFeature(
+        featureId, layerId, layerName,
+        surveyGeometry,
+        origAttrs ?? {},
+        origGeom, origAttrs,
+        `Moved line vertices (original: ${tempLineOriginal.length} vertices, new: ${tempLineCoords.length} vertices)`,
+      ).then((sf) => {
+        if (sf) {
+          pushUndo({
+            featureId, layerId,
+            oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+            timestamp: Date.now(),
+            surveyUndo: {
+              surveyFeatureId: sf.id, layerId,
+              previousGeometry: { type: 'LineString', coordinates: tempLineOriginal } as Record<string, unknown>,
+              previousAttributes: origAttrs as Record<string, unknown> ?? {},
+              previousStatus: 'new',
+              description: `Undo: remove survey feature for line ${featureId.slice(-8)}`,
+            },
+          });
+        }
+      });
+    }
+
+    // Clear temp state + exit move mode
+    setTempLineCoords(null);
+    setTempLineOriginal(null);
+    setLineMoveMode(false);
+    console.log(`[MoveMode] Saved line geometry for ${featureId.slice(-8)} — SurveyFeature ${existingSurvey ? 'updated' : 'created'}`);
+  }, [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature]);
+
+  // ── Check if temp line has unsaved changes ──
+  const hasUnsavedLineChanges = useMemo(() => {
+    if (!tempLineCoords || !tempLineOriginal) return false;
+    if (tempLineCoords.length !== tempLineOriginal.length) return true;
+    for (let i = 0; i < tempLineCoords.length; i++) {
+      if (tempLineCoords[i][0] !== tempLineOriginal[i][0] || tempLineCoords[i][1] !== tempLineOriginal[i][1]) {
+        return true;
+      }
+    }
+    return false;
+  }, [tempLineCoords, tempLineOriginal]);
+
+  // ── Vertex drag handler for Move Mode ──────────────────────────────────
+  // Updates the tempLineCoords working copy — does NOT touch HLD or survey store.
+  const handleVertexDragEnd = useCallback(
+    (featureId: string, layerId: string, vertexIdx: number, newLng: number, newLat: number) => {
+      setTempLineCoords((prev) => {
+        if (!prev) return prev;
+        const updated = [...prev];
+        if (vertexIdx >= 0 && vertexIdx < updated.length) {
+          updated[vertexIdx] = [newLng, newLat];
+        }
+        return updated;
+      });
+      console.log(`[MoveMode] Vertex ${vertexIdx} moved to [${newLng.toFixed(6)}, ${newLat.toFixed(6)}]`);
+    },
+    [],
+  );
 
   // ── Handle empty map area click (for add point / deselect) ───────────
   // When adding a point, we create a SurveyFeature (not an HLD feature).
@@ -1437,6 +1607,17 @@ export default function MapScreen() {
       setSelectedLineFeature(null);
     }
   }, [geoMode]);
+
+  // ── Auto-cleanup Move Mode when the selected line is deselected ──
+  // Ensures temp state is cleared regardless of how deselection happens
+  // (empty tap, close button, geoMode change, editing mode, etc.)
+  useEffect(() => {
+    if (!selectedLineFeature) {
+      setLineMoveMode(false);
+      setTempLineCoords(null);
+      setTempLineOriginal(null);
+    }
+  }, [selectedLineFeature]);
 
   // ── Save SurveyForm data — update the SurveyFeature's attributes via the store ──
   // The HLD GeoJSON is never touched. The SurveyFeature gets the engineer's edits.
@@ -1641,6 +1822,16 @@ export default function MapScreen() {
             }}
             onEmptyAreaClick={handleEmptyMapClick}
             onFeatureDragEnd={handleFeatureDragEnd}
+            onVertexDragEnd={lineMoveMode ? handleVertexDragEnd : undefined}
+            vertexDragTarget={
+              lineMoveMode && tempLineCoords && selectedLineFeature
+                ? {
+                    featureId: `temp-move-${selectedLineFeature.id}`,
+                    layerId: `temp-move-${selectedLineFeature.layerId}-${selectedLineFeature.id}`,
+                    vertexIdx: -1, // -1 = show all vertices as draggable (no single active vertex)
+                  }
+                : null
+            }
             draggableLayerIds={draggableLayerIds}
             dragMode={dragMode}
             selectedFeatureId={selectedMapFeatureId ?? undefined}
@@ -1766,6 +1957,10 @@ export default function MapScreen() {
               onDeselect={handleLineDeselect}
               undoCount={undoCount}
               onUndo={handleUndo}
+              moveMode={lineMoveMode}
+              onToggleMove={handleToggleMove}
+              onSave={handleSaveLine}
+              hasUnsavedChanges={hasUnsavedLineChanges}
             />
           )}
 

@@ -1,12 +1,14 @@
 // ── Line Selection Toolbar ──────────────────────────────────────────────────
 // Bottom toolbar that appears when a LINE feature is tapped on the map.
-// Shows 9 disabled placeholder action buttons — no editing yet.
+// Move + Save buttons are wired. Remaining 7 buttons are disabled placeholders.
 //
-// Placeholder actions (all disabled — wiring comes in a future phase):
-//   Move · Split · Draw Alternative · Delete Section · Change Type
-//   Delete Feature · Continue · Undo · Save
+// Active actions:
+//   Move — toggles Move Mode (displays draggable vertex handles)
+//   Save — persists the temporary geometry to the survey-features store
 //
-// The toolbar disappears when the user taps empty map area or closes the selection.
+// Placeholder actions (disabled — wiring comes in a future phase):
+//   Split · Draw Alternative · Delete Section · Change Type
+//   Delete Feature · Continue · Undo
 
 import React, { useEffect, useRef } from 'react';
 import {
@@ -31,24 +33,32 @@ interface LineSelectionToolbarProps {
   onDeselect: () => void;
   /** Number of undo entries available (for badge display) */
   undoCount?: number;
-  /** Called when the Undo button is tapped (placeholder for future) */
+  /** Called when the Undo button is tapped */
   onUndo?: () => void;
+  /** Whether Move Mode is currently active */
+  moveMode?: boolean;
+  /** Called when user taps the Move button */
+  onToggleMove?: () => void;
+  /** Called when user taps the Save button */
+  onSave?: () => void;
+  /** Whether there are unsaved geometry changes in Move Mode */
+  hasUnsavedChanges?: boolean;
 }
 
-// ── Placeholder action definitions ──────────────────────────────────────────
+// ── Action definitions ─────────────────────────────────────────────────────
 
-interface PlaceholderAction {
+interface ActionDef {
   id: string;
   label: string;
-  icon: string; // emoji for cross-platform simplicity
-  /** If true, this button uses a tinted "danger" style to indicate destructive intent */
+  icon: string;
   danger?: boolean;
-  /** If true, this button is a primary accent (Continue / Save) */
   accent?: boolean;
+  /** Whether this button is enabled (not a placeholder) */
+  enabled?: boolean;
 }
 
-const PLACEHOLDER_ACTIONS: PlaceholderAction[] = [
-  { id: 'move', label: 'Move', icon: '↔️' },
+const ACTIONS: ActionDef[] = [
+  { id: 'move', label: 'Move', icon: '↔️', enabled: true },
   { id: 'split', label: 'Split', icon: '✂️' },
   { id: 'draw_alt', label: 'Draw Alt', icon: '📐' },
   { id: 'del_section', label: 'Del Section', icon: '🪓', danger: true },
@@ -56,7 +66,7 @@ const PLACEHOLDER_ACTIONS: PlaceholderAction[] = [
   { id: 'del_feature', label: 'Delete', icon: '🗑️', danger: true },
   { id: 'continue', label: 'Continue', icon: '▶️', accent: true },
   { id: 'undo', label: 'Undo', icon: '↩️' },
-  { id: 'save', label: 'Save', icon: '💾', accent: true },
+  { id: 'save', label: 'Save', icon: '💾', accent: true, enabled: true },
 ];
 
 // ── Component ───────────────────────────────────────────────────────────────
@@ -66,6 +76,10 @@ export default function LineSelectionToolbar({
   onDeselect,
   undoCount = 0,
   onUndo,
+  moveMode = false,
+  onToggleMove,
+  onSave,
+  hasUnsavedChanges = false,
 }: LineSelectionToolbarProps) {
   const colors = useThemeStore((s) => s.colors);
   const slideAnim = useRef(new Animated.Value(0)).current;
@@ -90,7 +104,7 @@ export default function LineSelectionToolbar({
         styles.container,
         {
           backgroundColor: colors.surface + 'F8',
-          borderColor: colors.outline,
+          borderColor: moveMode ? '#FF8C00' : colors.outline,
           opacity: slideAnim,
           transform: [
             {
@@ -106,13 +120,15 @@ export default function LineSelectionToolbar({
       {/* ── Header: selected feature info + close button ─────────────── */}
       <View style={[styles.header, { borderBottomColor: colors.outlineLight }]}>
         <View style={styles.headerLeft}>
-          <View style={[styles.geomDot, { backgroundColor: '#F59E0B' }]} />
+          <View style={[styles.geomDot, { backgroundColor: moveMode ? '#FF8C00' : '#F59E0B' }]} />
           <View style={styles.headerInfo}>
             <Text style={[styles.headerTitle, { color: colors.textPrimary }]} numberOfLines={1}>
               {selectedFeature?.name ?? 'Selected Line'}
             </Text>
             <Text style={[styles.headerSubtitle, { color: colors.textTertiary }]} numberOfLines={1}>
               {selectedFeature?.layerName ?? 'Line Layer'} · LineString
+              {moveMode && ' · Move Mode'}
+              {moveMode && hasUnsavedChanges && ' · Unsaved'}
             </Text>
           </View>
         </View>
@@ -126,17 +142,46 @@ export default function LineSelectionToolbar({
         </TouchableOpacity>
       </View>
 
-      {/* ── Placeholder action buttons (all disabled) ─────────────────── */}
+      {/* ── Action buttons ────────────────────────────────────────────── */}
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.actionsContainer}
       >
-        {PLACEHOLDER_ACTIONS.map((action) => {
+        {ACTIONS.map((action) => {
           const isUndo = action.id === 'undo';
-          // Undo is "enabled" if there's something to undo — but still a placeholder,
-          // so we keep it disabled per requirements. Just show the badge.
+          const isMove = action.id === 'move';
+          const isSave = action.id === 'save';
           const showBadge = isUndo && undoCount > 0;
+
+          // ── Determine button state ──
+          const isEnabled = action.enabled === true;
+          const isMoveActive = isMove && moveMode;
+          const isSaveActive = isSave && hasUnsavedChanges;
+
+          // Style overrides for active states
+          let bgColor = colors.background;
+          let borderColor = colors.outlineLight;
+          let textColor = colors.textTertiary;
+          let opacity = 0.45; // disabled placeholder look
+          let iconColor = undefined;
+
+          if (isEnabled) {
+            opacity = 1;
+            textColor = colors.textSecondary;
+            if (isMoveActive) {
+              bgColor = '#FF8C00' + '20';
+              borderColor = '#FF8C00';
+              textColor = '#FF8C00';
+            } else if (isSaveActive) {
+              bgColor = colors.primary + '20';
+              borderColor = colors.primary;
+              textColor = colors.primary;
+            } else if (isSave && !hasUnsavedChanges) {
+              // Save is enabled but nothing to save — dim it
+              opacity = 0.5;
+            }
+          }
 
           return (
             <View key={action.id} style={styles.actionWrapper}>
@@ -144,30 +189,25 @@ export default function LineSelectionToolbar({
                 style={[
                   styles.actionBtn,
                   {
-                    backgroundColor: colors.background,
-                    borderColor: action.danger
-                      ? colors.outlineLight
-                      : action.accent
-                        ? colors.outlineLight
-                        : colors.outlineLight,
-                    opacity: 0.45, // Disabled look — all placeholders
+                    backgroundColor: bgColor,
+                    borderColor,
+                    opacity,
                   },
                 ]}
-                disabled
+                disabled={!isEnabled || (isSave && !hasUnsavedChanges)}
                 activeOpacity={0.7}
-                onPress={() => { /* No-op — all buttons are disabled placeholders */ }}
+                onPress={() => {
+                  if (isMove && onToggleMove) onToggleMove();
+                  else if (isSave && onSave) onSave();
+                  else if (isUndo && onUndo) onUndo();
+                }}
               >
                 <Text style={styles.actionIcon}>{action.icon}</Text>
                 <Text
-                  style={[
-                    styles.actionLabel,
-                    {
-                      color: action.danger ? colors.textTertiary : colors.textTertiary,
-                    },
-                  ]}
+                  style={[styles.actionLabel, { color: textColor }]}
                   numberOfLines={1}
                 >
-                  {action.label}
+                  {isMove && moveMode ? 'Move: ON' : action.label}
                 </Text>
               </TouchableOpacity>
 
@@ -180,10 +220,23 @@ export default function LineSelectionToolbar({
                 </View>
               )}
 
-              {/* "Soon" label */}
-              <Text style={[styles.soonLabel, { color: colors.textTertiary }]}>
-                Soon
-              </Text>
+              {/* "Soon" label for placeholder buttons only */}
+              {!isEnabled && (
+                <Text style={[styles.soonLabel, { color: colors.textTertiary }]}>
+                  Soon
+                </Text>
+              )}
+              {/* Status label for enabled buttons */}
+              {isEnabled && isMove && (
+                <Text style={[styles.soonLabel, { color: moveMode ? '#FF8C00' : colors.textTertiary }]}>
+                  {moveMode ? 'Active' : 'Tap to start'}
+                </Text>
+              )}
+              {isEnabled && isSave && (
+                <Text style={[styles.soonLabel, { color: hasUnsavedChanges ? colors.primary : colors.textTertiary }]}>
+                  {hasUnsavedChanges ? 'Unsaved' : 'No changes'}
+                </Text>
+              )}
             </View>
           );
         })}
@@ -191,7 +244,9 @@ export default function LineSelectionToolbar({
 
       {/* ── Hint text ──────────────────────────────────────────────────── */}
       <Text style={[styles.hintText, { color: colors.textTertiary }]}>
-        Tap empty area or ✕ to deselect
+        {moveMode
+          ? 'Drag vertex handles to adjust the line · Tap Save to persist · Tap Move again to cancel'
+          : 'Tap empty area or ✕ to deselect'}
       </Text>
     </Animated.View>
   );
@@ -307,7 +362,7 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
 
-  // ── "Soon" label under each button ─────────────────────────────────────
+  // ── Status/Soon label under each button ────────────────────────────────
   soonLabel: {
     fontSize: 7,
     fontWeight: '500',
