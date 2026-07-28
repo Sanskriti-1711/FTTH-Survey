@@ -24,8 +24,8 @@ import {
 } from '../../lib/utils/geometry-operations';
 import GeometryEditor from '../../lib/components/GeometryEditor';
 import type { GeometryMode, EditingFeature } from '../../lib/components/GeometryEditor';
-import NewPointForm from '../../lib/components/NewPointForm';
-import type { NewPointFormData } from '../../lib/components/NewPointForm';
+import SurveyForm from '../../lib/components/SurveyForm';
+import type { SurveyFormData } from '../../lib/components/SurveyForm';
 import { Card, Badge } from '../../components/ui/Card';
 import { StatusBadge } from '../../components/ui/StatusBadge';
 import MapLibreMap, { BASEMAPS } from '../../lib/components/MapLibreMap';
@@ -266,7 +266,7 @@ export default function MapScreen() {
   // Auto-select first point layer when entering add_point mode (see useEffect below)
 
   // ── New Point Form state — shows editable fields after adding a point ─
-  const [newPointForm, setNewPointForm] = useState<NewPointFormData | null>(null);
+  const [surveyForm, setSurveyForm] = useState<SurveyFormData | null>(null);
 
   // ── Undo Stack for drag + geometry operations ─────────────────────────
   // Single-feature entries track old/new coordinates.
@@ -1158,10 +1158,11 @@ export default function MapScreen() {
 
         // Show editable fields form for the new point
         const featureId = (newFeature.properties?.id ?? newFeature.properties?._id ?? '') as string;
-        setNewPointForm({
+        setSurveyForm({
           layerId: addPointTargetLayer,
           featureId,
           initialValues: newFeature.properties as Record<string, unknown>,
+          isNewPoint: true,
         });
       }
     },
@@ -1169,7 +1170,7 @@ export default function MapScreen() {
   );
 
   // ── Save new point form data — update the feature's properties ──────
-  const handleNewPointFormSave = useCallback(
+  const handleSurveyFormSave = useCallback(
     (featureId: string, layerId: string, properties: Record<string, unknown>) => {
       const geojson = activeGeojsonRef.current;
       const features = geojson[layerId];
@@ -1196,22 +1197,22 @@ export default function MapScreen() {
         `Updated fields for new point ${featureId.slice(-8)}`);
 
       // Close the form
-      setNewPointForm(null);
-      console.log(`[NewPointForm] Saved fields for ${featureId}`);
+      setSurveyForm(null);
+      console.log(`[SurveyForm] Saved fields for ${featureId}`);
     },
     [onGeometryChange],
   );
 
   // ── Dismiss new point form — remove the feature from GeoJSON ────────
-  const handleNewPointFormDismiss = useCallback(() => {
-    if (!newPointForm) return;
-    const { featureId, layerId } = newPointForm;
+  const handleSurveyFormDismiss = useCallback(() => {
+    if (!surveyForm) return;
+    const { featureId, layerId } = surveyForm;
 
     // Delete the newly created feature
     handleDeleteFeature(featureId, layerId);
-    setNewPointForm(null);
-    console.log('[NewPointForm] Dismissed — feature removed');
-  }, [newPointForm, handleDeleteFeature]);
+    setSurveyForm(null);
+    console.log('[SurveyForm] Dismissed — feature removed');
+  }, [surveyForm, handleDeleteFeature]);
 
   // ── Save notes for current feature ───────────────────────────────────────
   const handleSaveNotes = useCallback(() => {
@@ -1547,11 +1548,11 @@ export default function MapScreen() {
           )}
 
           {/* New Point Form — editable fields after adding a point */}
-          {newPointForm && (
-            <NewPointForm
-              formData={newPointForm}
-              onDismiss={handleNewPointFormDismiss}
-              onSave={handleNewPointFormSave}
+          {surveyForm && (
+            <SurveyForm
+              formData={surveyForm}
+              onDismiss={handleSurveyFormDismiss}
+              onSave={handleSurveyFormSave}
             />
           )}
         </View>
