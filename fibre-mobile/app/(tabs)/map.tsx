@@ -22,6 +22,7 @@ import { recalculateDependentProperties } from '../../lib/utils/spatial';
 import GeometryEditor from '../../lib/components/GeometryEditor';
 import type { GeometryMode, EditingFeature } from '../../lib/components/GeometryEditor';
 import LineSelectionToolbar from '../../lib/components/LineSelectionToolbar';
+import SurveyChangesPanel from '../../lib/components/SurveyChangesPanel';
 import SurveyForm from '../../lib/components/SurveyForm';
 import type { SurveyFormData } from '../../lib/components/SurveyForm';
 import { Card, Badge } from '../../components/ui/Card';
@@ -273,6 +274,9 @@ export default function MapScreen() {
 
   // ── New Point Form state — shows editable fields after adding a point ─
   const [surveyForm, setSurveyForm] = useState<SurveyFormData | null>(null);
+
+  // ── Survey Changes Panel state — toggle to review all engineer edits ──
+  const [surveyPanelVisible, setSurveyPanelVisible] = useState(false);
 
   // ── Undo Stack for drag + geometry operations ─────────────────────────
   // Single-feature entries track old/new coordinates.
@@ -1951,6 +1955,38 @@ export default function MapScreen() {
           >
             <Text style={{ fontSize: 20, color: geoMode === 'add_point' ? '#FFFFFF' : undefined }}>📍</Text>
           </TouchableOpacity>
+          {/* Survey Changes Panel Toggle — shows all engineer edits with status badges */}
+          <TouchableOpacity
+            style={[
+              styles.fab,
+              {
+                backgroundColor: surveyPanelVisible ? '#FF8C00' : colors.surface,
+                opacity: Object.keys(surveyFeatures).length > 0 ? 1 : 0.4,
+              },
+            ]}
+            onPress={() => setSurveyPanelVisible(!surveyPanelVisible)}
+            disabled={Object.keys(surveyFeatures).length === 0}
+            activeOpacity={0.8}
+          >
+            <Text style={{
+              fontSize: 16,
+              fontWeight: '700' as any,
+              color: surveyPanelVisible ? '#FFFFFF' : colors.textSecondary,
+            }}>
+              🟠
+            </Text>
+            {Object.keys(surveyFeatures).length > 0 && (
+              <View style={[styles.undoBadge, { backgroundColor: '#FF8C00' }]}>
+                <Text style={styles.undoBadgeText}>
+                  {(() => {
+                    let total = 0;
+                    for (const list of Object.values(surveyFeatures)) total += list.length;
+                    return total > 99 ? '99+' : total;
+                  })()}
+                </Text>
+              </View>
+            )}
+          </TouchableOpacity>
           {/* HLD/Survey Display Mode Toggle — cycles hld → survey → overlay */}
           <TouchableOpacity
             style={[styles.fab, {
@@ -1992,6 +2028,21 @@ export default function MapScreen() {
             <Crosshair size={20} stroke={followUser ? colors.primary : colors.textSecondary} />
           </TouchableOpacity>
         </View>
+      )}
+
+      {/* Survey Changes Panel — shows all engineer edits with status badges */}
+      {viewMode === 'map' && (
+        <SurveyChangesPanel
+          visible={surveyPanelVisible}
+          surveyFeatures={surveyFeatures}
+          layerNames={activeLayerNames}
+          onClose={() => setSurveyPanelVisible(false)}
+          onFeaturePress={(featureId) => {
+            // Highlight the feature on the map
+            setSelectedMapFeatureId(featureId);
+            setSurveyPanelVisible(false);
+          }}
+        />
       )}
 
       {/* Basemap Switcher Panel */}
