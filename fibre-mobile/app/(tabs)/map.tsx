@@ -838,7 +838,7 @@ export default function MapScreen() {
     }
 
     return allLayers;
-  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, demoFeatureIdMap, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, tempLineCoords, selectedLineFeature];
+  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, demoFeatureIdMap, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, tempLineCoords, selectedLineFeature]);
 
   // Build visible layers: when a real project is active, show ONLY imported layers
   const visibleLayers = useMemo(() => {
