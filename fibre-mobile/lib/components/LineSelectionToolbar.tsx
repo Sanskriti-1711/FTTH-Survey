@@ -257,7 +257,7 @@ export default function LineSelectionToolbar({
 const styles = StyleSheet.create({
   container: {
     position: 'absolute',
-    bottom: Spacing.xxl + 100, // Above the FABs
+    bottom: Spacing.xxl + 80, // Above the FABs, slightly lower
     left: Spacing.md,
     right: Spacing.md,
     borderRadius: Radius.lg,
@@ -276,37 +276,37 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   headerLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: Spacing.sm,
+    gap: 6,
     flex: 1,
   },
   geomDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
   },
   headerInfo: {
     flex: 1,
     gap: 1,
   },
   headerTitle: {
-    fontSize: 13,
+    fontSize: 11,
     fontWeight: '700',
   },
   headerSubtitle: {
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: '500',
   },
   closeBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -314,31 +314,31 @@ const styles = StyleSheet.create({
   // ── Actions scroll row ─────────────────────────────────────────────────
   actionsContainer: {
     flexDirection: 'row',
-    gap: Spacing.sm,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.md,
+    gap: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
     alignItems: 'flex-start',
   },
   actionWrapper: {
     alignItems: 'center',
-    width: 60,
+    width: 50,
   },
   actionBtn: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: Spacing.sm,
-    paddingHorizontal: Spacing.xs,
+    paddingVertical: 4,
+    paddingHorizontal: 2,
     borderRadius: Radius.md,
     borderWidth: 1.5,
-    width: 52,
-    height: 52,
-    gap: 2,
+    width: 44,
+    height: 44,
+    gap: 1,
   },
   actionIcon: {
-    fontSize: 18,
+    fontSize: 16,
   },
   actionLabel: {
-    fontSize: 9,
+    fontSize: 8,
     fontWeight: '600',
     textAlign: 'center',
   },
@@ -346,36 +346,36 @@ const styles = StyleSheet.create({
   // ── Badge ──────────────────────────────────────────────────────────────
   badge: {
     position: 'absolute',
-    top: -4,
-    right: 4,
-    minWidth: 16,
-    height: 16,
-    borderRadius: 8,
-    paddingHorizontal: 4,
+    top: -3,
+    right: 3,
+    minWidth: 14,
+    height: 14,
+    borderRadius: 7,
+    paddingHorizontal: 3,
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 10,
   },
   badgeText: {
-    fontSize: 8,
+    fontSize: 7,
     fontWeight: '700',
     color: '#FFFFFF',
   },
 
   // ── Status/Soon label under each button ────────────────────────────────
   soonLabel: {
-    fontSize: 7,
+    fontSize: 6,
     fontWeight: '500',
-    marginTop: 3,
+    marginTop: 2,
     fontStyle: 'italic',
   },
 
   // ── Hint text at bottom ────────────────────────────────────────────────
   hintText: {
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: '500',
     textAlign: 'center',
-    paddingBottom: Spacing.sm,
-    paddingTop: Spacing.xs,
+    paddingBottom: 4,
+    paddingTop: 2,
   },
 });

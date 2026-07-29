@@ -1381,6 +1381,8 @@ function WebMapView({
     vertexIdx?: number;
     /** If dragging a vertex, the parent feature's source ID */
     parentSourceId?: string;
+    /** Snapshot of full coordinate array at drag start (for rubber-band offset) */
+    initialCoords?: [number, number][];
   } | null>(null);
 
   // ── Haversine distance (metres) ────────────────────────────────────────
@@ -1653,7 +1655,36 @@ function WebMapView({
             );
             if (parentFeat?.geometry?.type === 'LineString') {
               const coords = [...parentFeat.geometry.coordinates];
-              coords[ds.vertexIdx] = [lngLat.lng, lngLat.lat];
+              const vi = ds.vertexIdx;
+
+              // ── Rubber-band segment dragging ────────────────────────
+              // Dragged vertex moves fully; adjacent vertices are pulled
+              // proportionally (decay: 0.6, 0.3, 0.15) to create a smooth
+              // rubber-band effect on the connected segments.
+              const dx = lngLat.lng - ds.originalLng;
+              const dy = lngLat.lat - ds.originalLat;
+
+              // Dragged vertex: full offset from original
+              coords[vi] = [lngLat.lng, lngLat.lat];
+
+              // Adjacent vertices: decayed offset from their original positions
+              if (ds.initialCoords) {
+                const DECAY = [0, 0.6, 0.3, 0.15];
+                for (let n = 1; n < DECAY.length; n++) {
+                  const factor = DECAY[n];
+                  const leftIdx = vi - n;
+                  if (leftIdx >= 0 && ds.initialCoords[leftIdx]) {
+                    const orig = ds.initialCoords[leftIdx];
+                    coords[leftIdx] = [orig[0] + dx * factor, orig[1] + dy * factor];
+                  }
+                  const rightIdx = vi + n;
+                  if (rightIdx < coords.length && ds.initialCoords[rightIdx]) {
+                    const orig = ds.initialCoords[rightIdx];
+                    coords[rightIdx] = [orig[0] + dx * factor, orig[1] + dy * factor];
+                  }
+                }
+              }
+
               parentFeat.geometry = { ...parentFeat.geometry, coordinates: coords };
               parentSrc.setData({ type: 'FeatureCollection', features: parentFeatures });
             }
@@ -1686,7 +1717,15 @@ function WebMapView({
           );
           if (parentFeat?.geometry?.type === 'LineString') {
             const coords = [...parentFeat.geometry.coordinates];
-            coords[ds.vertexIdx] = [ds.originalLng, ds.originalLat];
+            if (ds.initialCoords) {
+              // Restore all coordinates from snapshot (rubber-band cancel)
+              for (let i = 0; i < coords.length && i < ds.initialCoords.length; i++) {
+                coords[i] = [ds.initialCoords[i][0], ds.initialCoords[i][1]];
+              }
+            } else {
+              // Legacy: restore only the dragged vertex
+              coords[ds.vertexIdx] = [ds.originalLng, ds.originalLat];
+            }
             parentFeat.geometry = { ...parentFeat.geometry, coordinates: coords };
             parentSrc.setData({ type: 'FeatureCollection', features: parentFeatures });
           }
@@ -1764,6 +1803,22 @@ function WebMapView({
         } catch {}
         if (featureIndex < 0) return;
 
+        // ── Snapshot initial coordinate array for rubber-band decay ──
+        let initialCoords: [number, number][] | undefined;
+        try {
+          const parentSrc = map.getSource(parentSourceId) as any;
+          if (parentSrc?._data?.features) {
+            const parentFeat = parentSrc._data.features.find(
+              (f: any) => (f.properties?._id === vt.featureId || f.properties?.id === vt.featureId)
+            );
+            if (parentFeat?.geometry?.type === 'LineString') {
+              initialCoords = parentFeat.geometry.coordinates.map(
+                (c: [number, number]) => [c[0], c[1]] as [number, number]
+              );
+            }
+          }
+        } catch {}
+
         isVertexDragRef.current = true;
         map.getCanvas().style.cursor = 'grabbing';
 
@@ -1778,6 +1833,7 @@ function WebMapView({
           startPoint: e.point ? { x: e.point.x, y: e.point.y } : { x: 0, y: 0 },
           vertexIdx: vIdx,
           parentSourceId,
+          initialCoords,
         };
       };
 
