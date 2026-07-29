@@ -810,35 +810,8 @@ export default function MapScreen() {
       });
     }
 
-    let allLayers = [...hldLayers, ...surveyLayers];
-
-    // ── Temporary preview layer for Move Mode ──
-    // Shows the working copy of the line being edited as an orange dashed line.
-    // This is a visual preview only — the HLD source is never touched.
-    // The survey-features store is only updated when the user presses Save.
-    if (lineMoveMode && tempLineCoords && selectedLineFeature) {
-      allLayers = [...allLayers, {
-        id: `temp-move-${selectedLineFeature.layerId}-${selectedLineFeature.id}`,
-        name: 'Move Preview',
-        geometryType: 'LineString' as const,
-        features: [{
-          type: 'Feature' as const,
-          geometry: { type: 'LineString', coordinates: tempLineCoords },
-          properties: {
-            id: `temp-move-${selectedLineFeature.id}`,
-            _id: `temp-move-${selectedLineFeature.id}`,
-            _layer_id: `temp-move-${selectedLineFeature.layerId}-${selectedLineFeature.id}`,
-            _parent_feature_id: selectedLineFeature.id,
-            _is_temp_move: true,
-          },
-        }],
-        visible: true,
-        color: SURVEY_COLOR, // Orange — matches survey styling
-      }];
-    }
-
-    return allLayers;
-  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, demoFeatureIdMap, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, tempLineCoords, selectedLineFeature]);
+    return [...hldLayers, ...surveyLayers];
+  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, demoFeatureIdMap, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures]);
 
   // Build visible layers: when a real project is active, show ONLY imported layers
   const visibleLayers = useMemo(() => {
@@ -1018,19 +991,29 @@ export default function MapScreen() {
       const layerName = found?.feature.layer_name ?? (activeLayerNames[layerId] ?? layerId.toUpperCase());
       const status = found?.feature.status ?? 'assigned';
 
-      // ── LINE features: show the bottom selection toolbar (no popup) ──
+      // ── LINE features: show View popup first, then Edit toolbar on demand ──
       if (geomType === 'LineString') {
-        setSelectedLineFeature({
-          id: featureId,
-          layerId,
-          geometryType: 'LineString',
-          name: featureName,
-          layerName,
-        });
-        setSelectedMapFeatureId(featureId); // Highlight on map
-        // Close any open popup — lines use the toolbar instead
-        selectFeature(null);
-        setPopupScreenCoords(null);
+        // Highlight line on map
+        setSelectedMapFeatureId(featureId);
+        // Show popup with feature info + Edit button
+        if (found) {
+          selectFeature(found.feature.id, {
+            id: found.feature.id,
+            name: featureName,
+            layerName,
+            status,
+            layerId: found.feature.layer_id,
+          });
+        } else {
+          selectFeature(featureId, {
+            id: featureId,
+            name: featureName,
+            layerName,
+            status: 'assigned',
+            layerId,
+          });
+        }
+        // Close popup screen coords are set above
         return;
       }
 
@@ -1335,7 +1318,8 @@ export default function MapScreen() {
     [setGeomBusy, setLocalDemoGeojson, pushUndo],
   );
 
-  // ── Start editing a feature (viewing → editing mode) ─────────────────
+  // ── Start editing a feature (viewing → GeometryEditor editing mode) ─
+  // For Points and Polygons (non-LineString features).
   const handleStartEdit = useCallback((feature: EditingFeature) => {
     setEditingFeature(feature);
     // Close popup when entering editing mode
@@ -1349,6 +1333,16 @@ export default function MapScreen() {
     setAddPointTargetLayer('');
     console.log(`[Edit] Editing feature "${feature.name}" (${feature.geometryType}) on layer "${feature.layerName}"`);
   }, [selectFeature, geoMode]);
+
+  // ── Start editing a LINE feature from the popup (viewing → toolbar) ─
+  // Closes the popup and opens the LineSelectionToolbar.
+  const handleLineEditFromPopup = useCallback((feature: EditingFeature) => {
+    setSelectedLineFeature(feature);
+    selectFeature(null);
+    setSelectedMapFeatureId(null);
+    setPopupScreenCoords(null);
+    console.log(`[LineEdit] Opening toolbar for "${feature.name}"`);
+  }, [selectFeature]);
 
   // ── Done editing (editing → viewing mode) ───────────────────────────
   const handleDoneEditing = useCallback(() => {
@@ -1534,17 +1528,18 @@ export default function MapScreen() {
     return false;
   }, [tempLineCoords, tempLineOriginal]);
 
-  // ── Memoized vertex drag target — stable reference to prevent unnecessary effect re-fires ──
-  // Without this, the inline object literal creates a new reference on every render,
-  // causing the MapLibreMap vertex marker effect to re-fire constantly.
+  // ── Memoized vertex drag target — points directly at the HLD feature's source on the map.
+  // During vertex drag, MapLibreMap's internal handler updates the parent source
+  // (the HLD layer's GeoJSON source) in real-time, so the line moves as the user drags.
+  // The HLD React state is never mutated — only the in-map source is temporarily updated.
   const memoizedVertexTarget = useMemo(() => {
     if (!lineMoveMode || !tempLineCoords || !selectedLineFeature) return null;
     return {
-      featureId: `temp-move-${selectedLineFeature.id}`,
-      layerId: `temp-move-${selectedLineFeature.layerId}-${selectedLineFeature.id}`,
+      featureId: selectedLineFeature.id,
+      layerId: selectedLineFeature.layerId,
       vertexIdx: -1,
     };
-  }, [lineMoveMode, tempLineCoords, selectedLineFeature]);
+  }, [lineMoveMode, selectedLineFeature]);
 
   // ── Vertex drag handler for Move Mode ──────────────────────────────────
   // Updates the tempLineCoords working copy — does NOT touch HLD or survey store.
@@ -1992,16 +1987,21 @@ export default function MapScreen() {
                 setPopupScreenCoords(null);
               }}
               featureGeometryType={(resolveGeometryType(selectedFeaturePopup.layerId ?? '') as 'Point' | 'LineString' | 'Polygon')}
-              onStartEdit={() => {
-                if (!selectedFeaturePopup) return;
-                handleStartEdit({
-                  id: selectedFeaturePopup.id,
-                  layerId: selectedFeaturePopup.layerId ?? '',
-                  geometryType: resolveGeometryType(selectedFeaturePopup.layerId ?? '') as 'Point' | 'LineString' | 'Polygon',
-                  name: selectedFeaturePopup.name,
-                  layerName: selectedFeaturePopup.layerName,
-                });
-              }}
+              onStartEdit={
+                displayMode === 'hld' && selectedFeaturePopup ? (() => {
+                  const geomType = resolveGeometryType(selectedFeaturePopup.layerId ?? '') as 'Point' | 'LineString' | 'Polygon';
+                  const feature: EditingFeature = {
+                    id: selectedFeaturePopup.id,
+                    layerId: selectedFeaturePopup.layerId ?? '',
+                    geometryType: geomType,
+                    name: selectedFeaturePopup.name,
+                    layerName: selectedFeaturePopup.layerName,
+                  };
+                  return geomType === 'LineString'
+                    ? () => handleLineEditFromPopup(feature)
+                    : () => handleStartEdit(feature);
+                })() : undefined
+              }
               notesDraft={notesDraft}
               onNotesChange={setNotesDraft}
               onSaveNotes={handleSaveNotes}
