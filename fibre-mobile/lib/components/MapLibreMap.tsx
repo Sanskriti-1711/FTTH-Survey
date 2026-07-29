@@ -1343,10 +1343,17 @@ function WebMapView({
               layerData.color ?? '#0D5CFF',
             );
           }
+          console.log(`[Vertex] Markers rendered for ${vertexDragTarget.featureId.slice(-8)} on ${vertexDragTarget.layerId}`);
           return;
         }
       }
     }
+    // Feature not found in any layer — log diagnostic info
+    console.warn(
+      `[Vertex] Feature ${vertexDragTarget.featureId.slice(-8)} not found in any rendered layer ` +
+      `(layerId: ${vertexDragTarget.layerId}). Available layers: ` +
+      layersRef.current.map(l => `${l.id}(${l.features.length}feat)`).join(', ')
+    );
   }, [vertexDragTarget, status]);
 
   // Clean up vertex markers on unmount

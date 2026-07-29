@@ -1130,7 +1130,11 @@ export default function MapScreen() {
   // ── Helper: auto-switch to overlay mode when a survey edit is made ──
   // So the engineer immediately sees blue HLD + orange survey side by side.
   const autoOverlayOnEdit = useCallback(() => {
-    if (displayMode === 'hld') {
+    // When entering edit mode, always switch to overlay so both HLD and
+    // Survey layers are visible. This ensures the vertex marker effect
+    // can find the HLD feature in the rendered layers (MapLibreMap's
+    // layersRef searches rendered layers, not raw GeoJSON).
+    if (displayMode !== 'overlay') {
       setDisplayMode('overlay');
     }
   }, [displayMode, setDisplayMode]);
