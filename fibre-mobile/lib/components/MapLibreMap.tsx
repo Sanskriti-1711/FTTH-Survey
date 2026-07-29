@@ -1657,33 +1657,12 @@ function WebMapView({
               const coords = [...parentFeat.geometry.coordinates];
               const vi = ds.vertexIdx;
 
-              // ── Rubber-band segment dragging ────────────────────────
-              // Dragged vertex moves fully; adjacent vertices are pulled
-              // proportionally (decay: 0.6, 0.3, 0.15) to create a smooth
-              // rubber-band effect on the connected segments.
-              const dx = lngLat.lng - ds.originalLng;
-              const dy = lngLat.lat - ds.originalLat;
-
-              // Dragged vertex: full offset from original
+              // ── Rigid V: only the dragged vertex moves ──────────────
+              // Connected segments stay completely straight because they
+              // are lines between two fixed points. The neighboring
+              // vertices (i-1 and i+1) are NOT moved — the segments
+              // pivot naturally at those fixed pivot points.
               coords[vi] = [lngLat.lng, lngLat.lat];
-
-              // Adjacent vertices: decayed offset from their original positions
-              if (ds.initialCoords) {
-                const DECAY = [0, 0.6, 0.3, 0.15];
-                for (let n = 1; n < DECAY.length; n++) {
-                  const factor = DECAY[n];
-                  const leftIdx = vi - n;
-                  if (leftIdx >= 0 && ds.initialCoords[leftIdx]) {
-                    const orig = ds.initialCoords[leftIdx];
-                    coords[leftIdx] = [orig[0] + dx * factor, orig[1] + dy * factor];
-                  }
-                  const rightIdx = vi + n;
-                  if (rightIdx < coords.length && ds.initialCoords[rightIdx]) {
-                    const orig = ds.initialCoords[rightIdx];
-                    coords[rightIdx] = [orig[0] + dx * factor, orig[1] + dy * factor];
-                  }
-                }
-              }
 
               parentFeat.geometry = { ...parentFeat.geometry, coordinates: coords };
               parentSrc.setData({ type: 'FeatureCollection', features: parentFeatures });
