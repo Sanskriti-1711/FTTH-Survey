@@ -1046,17 +1046,49 @@ export default function MapScreen() {
     [demoFeatures, selectFeature, activeLayerNames]
   );
 
-  // ── Toggle layer visibility ─────────────────────────────────────────────
+  // ── Layer isolation state ─────────────────────────────────────────────
+  // null = show all visible layers, string = only this layer is visible
+  const [isolatedLayerId, setIsolatedLayerId] = useState<string | null>(null);
+  // Stores previous visibility state so we can restore on un-isolate
+  const preIsolationVisibilityRef = useRef<Record<string, boolean> | null>(null);
+
+  // ── Toggle layer visibility / isolate layer ────────────────────────────
+  // Single tap on a layer chip in the legend isolates that layer (all others hidden).
+  // Tapping the same layer again restores all layers to their previous visibility.
   const toggleLayerVisibility = useCallback((layerId: string) => {
-    setLayerVisibility((prev) => {
-      // If the key doesn't exist yet, treat it as visible (true) → toggle to hidden (false)
-      // If it exists as false → toggle to true, if true → toggle to false
-      const next = prev[layerId] === undefined ? false : !prev[layerId];
-      // Keep store in sync
-      useMapStore.getState().toggleLayer(layerId);
-      return { ...prev, [layerId]: next };
-    });
-  }, []);
+    if (isolatedLayerId === layerId) {
+      // ── Un-isolate: restore previous visibility state ──
+      setIsolatedLayerId(null);
+      if (preIsolationVisibilityRef.current) {
+        setLayerVisibility(preIsolationVisibilityRef.current);
+        preIsolationVisibilityRef.current = null;
+      }
+    } else if (isolatedLayerId === null) {
+      // ── First tap: isolate this layer ──
+      // Save current visibility state for later restore
+      setLayerVisibility((prev) => {
+        preIsolationVisibilityRef.current = { ...prev };
+        const next: Record<string, boolean> = {};
+        for (const key of Object.keys(prev)) {
+          next[key] = false;
+        }
+        next[layerId] = true;
+        return next;
+      });
+      setIsolatedLayerId(layerId);
+    } else {
+      // ── Switch isolation to a different layer ──
+      setLayerVisibility((prev) => {
+        const next: Record<string, boolean> = {};
+        for (const key of Object.keys(prev)) {
+          next[key] = false;
+        }
+        next[layerId] = true;
+        return next;
+      });
+      setIsolatedLayerId(layerId);
+    }
+  }, [isolatedLayerId]);
 
   // ── Helper: find an HLD feature's original geometry + attributes from active GeoJSON ──
   // Used when creating a SurveyFeature — we need to freeze the original HLD state.
@@ -1682,6 +1714,26 @@ export default function MapScreen() {
     }));
   }, [selectedFeaturePopup?.id, notesDraft]);
 
+  // ── Popup Edit handler — creates an EditingFeature from the popup data
+  // and routes to the appropriate editing mode based on geometry type.
+  // Replaces the complex IIFE pattern that caused stale closure issues.
+  const handlePopupEdit = useCallback(() => {
+    if (!selectedFeaturePopup) return;
+    const geomType = resolveGeometryType(selectedFeaturePopup.layerId ?? '') as 'Point' | 'LineString' | 'Polygon';
+    const feature: EditingFeature = {
+      id: selectedFeaturePopup.id,
+      layerId: selectedFeaturePopup.layerId ?? '',
+      geometryType: geomType,
+      name: selectedFeaturePopup.name,
+      layerName: selectedFeaturePopup.layerName,
+    };
+    if (geomType === 'LineString') {
+      handleLineEditFromPopup(feature);
+    } else {
+      handleStartEdit(feature);
+    }
+  }, [selectedFeaturePopup, handleLineEditFromPopup, handleStartEdit]);
+
   // ── View features for a specific layer — opens overlay on map ─────────────
   const handleViewLayerFeatures = useCallback((layerId: string) => {
     const layer = allPanelLayersRef.current.find((l: any) => l.id === layerId);
@@ -2006,19 +2058,7 @@ export default function MapScreen() {
               }}
               featureGeometryType={(resolveGeometryType(selectedFeaturePopup.layerId ?? '') as 'Point' | 'LineString' | 'Polygon')}
               onStartEdit={
-                (displayMode === 'hld' || displayMode === 'overlay') && selectedFeaturePopup ? (() => {
-                  const geomType = resolveGeometryType(selectedFeaturePopup.layerId ?? '') as 'Point' | 'LineString' | 'Polygon';
-                  const feature: EditingFeature = {
-                    id: selectedFeaturePopup.id,
-                    layerId: selectedFeaturePopup.layerId ?? '',
-                    geometryType: geomType,
-                    name: selectedFeaturePopup.name,
-                    layerName: selectedFeaturePopup.layerName,
-                  };
-                  return geomType === 'LineString'
-                    ? () => handleLineEditFromPopup(feature)
-                    : () => handleStartEdit(feature);
-                })() : undefined
+                (displayMode === 'hld' || displayMode === 'overlay') ? handlePopupEdit : undefined
               }
               notesDraft={notesDraft}
               onNotesChange={setNotesDraft}
@@ -2172,7 +2212,8 @@ export default function MapScreen() {
           >
             <Text style={{ fontSize: 20, color: geoMode === 'add_point' ? '#FFFFFF' : undefined }}>📍</Text>
           </TouchableOpacity>
-          {/* Survey Changes Panel Toggle — shows all engineer edits with status badges */}
+          {/* Survey Changes Panel Toggle — hidden when panel is open to avoid overlapping the close button */}
+          {!surveyPanelVisible && (
           <TouchableOpacity
             style={[
               styles.fab,
@@ -2204,6 +2245,7 @@ export default function MapScreen() {
               </View>
             )}
           </TouchableOpacity>
+          )}
           {/* HLD/Survey Display Mode Toggle — cycles hld → survey → overlay */}
           <TouchableOpacity
             style={[styles.fab, {
