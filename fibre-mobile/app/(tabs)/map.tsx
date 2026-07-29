@@ -1534,6 +1534,18 @@ export default function MapScreen() {
     return false;
   }, [tempLineCoords, tempLineOriginal]);
 
+  // ── Memoized vertex drag target — stable reference to prevent unnecessary effect re-fires ──
+  // Without this, the inline object literal creates a new reference on every render,
+  // causing the MapLibreMap vertex marker effect to re-fire constantly.
+  const memoizedVertexTarget = useMemo(() => {
+    if (!lineMoveMode || !tempLineCoords || !selectedLineFeature) return null;
+    return {
+      featureId: `temp-move-${selectedLineFeature.id}`,
+      layerId: `temp-move-${selectedLineFeature.layerId}-${selectedLineFeature.id}`,
+      vertexIdx: -1,
+    };
+  }, [lineMoveMode, tempLineCoords, selectedLineFeature]);
+
   // ── Vertex drag handler for Move Mode ──────────────────────────────────
   // Updates the tempLineCoords working copy — does NOT touch HLD or survey store.
   const handleVertexDragEnd = useCallback(
@@ -1822,16 +1834,8 @@ export default function MapScreen() {
             }}
             onEmptyAreaClick={handleEmptyMapClick}
             onFeatureDragEnd={handleFeatureDragEnd}
-            onVertexDragEnd={lineMoveMode ? handleVertexDragEnd : undefined}
-            vertexDragTarget={
-              lineMoveMode && tempLineCoords && selectedLineFeature
-                ? {
-                    featureId: `temp-move-${selectedLineFeature.id}`,
-                    layerId: `temp-move-${selectedLineFeature.layerId}-${selectedLineFeature.id}`,
-                    vertexIdx: -1, // -1 = show all vertices as draggable (no single active vertex)
-                  }
-                : null
-            }
+            onVertexDragEnd={lineMoveMode && tempLineCoords ? handleVertexDragEnd : undefined}
+            vertexDragTarget={memoizedVertexTarget}
             draggableLayerIds={draggableLayerIds}
             dragMode={dragMode}
             selectedFeatureId={selectedMapFeatureId ?? undefined}
