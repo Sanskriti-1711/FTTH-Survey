@@ -1432,11 +1432,29 @@ export default function MapScreen() {
       const features = activeGeojsonRef.current[layerId];
       if (!features) return;
 
-      const hldFeature = features.find((f) => {
+      // Try direct ID match first
+      let hldFeature = features.find((f) => {
         const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
         return fid === featureId;
       });
-      if (!hldFeature?.geometry || hldFeature.geometry.type !== 'LineString') return;
+
+      // Fallback: match by index in the layer's feature ID map
+      // This handles cases where the map feature's _id (from buildMapLayerData)
+      // differs from the original GeoJSON feature's .id (in activeGeojsonRef).
+      if (!hldFeature) {
+        const idMap = (hasImportedData ? importFeatureIdMap : demoFeatureIdMap)?.[layerId];
+        if (idMap) {
+          const idx = idMap.indexOf(featureId);
+          if (idx >= 0 && idx < features.length) {
+            hldFeature = features[idx];
+          }
+        }
+      }
+
+      if (!hldFeature?.geometry || hldFeature.geometry.type !== 'LineString') {
+        console.warn(`[MoveMode] Could not find HLD feature ${featureId.slice(-8)} in ${layerId} — ${features.length} features in layer`);
+        return;
+      }
 
       const coords = hldFeature.geometry.coordinates as [number, number][];
       const coordsCopy = coords.map(([lng, lat]) => [lng, lat] as [number, number]);
@@ -1448,7 +1466,7 @@ export default function MapScreen() {
       autoOverlayOnEdit();
       console.log(`[MoveMode] Activated for ${featureId.slice(-8)} — ${coordsCopy.length} vertices`);
     }
-  }, [selectedLineFeature, lineMoveMode, autoOverlayOnEdit]);
+  }, [selectedLineFeature, lineMoveMode, autoOverlayOnEdit, hasImportedData, importFeatureIdMap, demoFeatureIdMap]);
 
   // ── Save the temporary line geometry to the survey-features store ──────
   // Creates or updates a SurveyFeature with the modified geometry.
@@ -1988,7 +2006,7 @@ export default function MapScreen() {
               }}
               featureGeometryType={(resolveGeometryType(selectedFeaturePopup.layerId ?? '') as 'Point' | 'LineString' | 'Polygon')}
               onStartEdit={
-                displayMode === 'hld' && selectedFeaturePopup ? (() => {
+                (displayMode === 'hld' || displayMode === 'overlay') && selectedFeaturePopup ? (() => {
                   const geomType = resolveGeometryType(selectedFeaturePopup.layerId ?? '') as 'Point' | 'LineString' | 'Polygon';
                   const feature: EditingFeature = {
                     id: selectedFeaturePopup.id,
