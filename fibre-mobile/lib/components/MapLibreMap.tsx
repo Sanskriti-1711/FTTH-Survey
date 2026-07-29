@@ -886,6 +886,14 @@ function removeVertexMarkers(map: any): void {
   }
 }
 
+/** Approximate distance in metres between two coordinates */
+function coordDistMeters(lng1: number, lat1: number, lng2: number, lat2: number): number {
+  const avgLat = (lat1 + lat2) / 2;
+  const dx = (lng2 - lng1) * 111320 * Math.cos((avgLat * Math.PI) / 180);
+  const dy = (lat2 - lat1) * 110540;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
 /** Add vertex marker points for a LineString feature being edited */
 function addVertexMarkers(
   map: any,
@@ -897,19 +905,40 @@ function addVertexMarkers(
 ): void {
   const sourceId = `ml-vert-src-${layerId}-${featureId}`;
 
-  // Build point features for each vertex
-  const pointFeatures = coords.map(([lng, lat], i) => ({
-    type: 'Feature' as const,
-    geometry: { type: 'Point' as const, coordinates: [lng, lat] },
-    properties: {
-      _id: `vert-${layerId}-${featureId}-${i}`,
-      _layer_id: layerId,
-      _parent_feature_id: featureId,
-      _vertex_idx: i,
-      _is_vertex: true,
-      _is_active: i === activeVertexIdx,
-    },
-  }));
+  // ── Thin coordinates: only show markers for vertices ≥5m apart ──
+  // Start and end are always included. The original vertex index is
+  // preserved in _vertex_idx so dragging a marker updates the correct
+  // coordinate in tempLineCoords.
+  const MIN_VERTEX_SPACING_M = 5;
+  const thinIndices: number[] = []; // original indices that get a marker
+  for (let i = 0; i < coords.length; i++) {
+    if (thinIndices.length === 0 || i === coords.length - 1) {
+      thinIndices.push(i);
+      continue;
+    }
+    const last = coords[thinIndices[thinIndices.length - 1]];
+    const dist = coordDistMeters(last[0], last[1], coords[i][0], coords[i][1]);
+    if (dist >= MIN_VERTEX_SPACING_M) {
+      thinIndices.push(i);
+    }
+  }
+
+  // Build point features for thinned vertices — preserves original indices
+  const pointFeatures = thinIndices.map((origIdx) => {
+    const [lng, lat] = coords[origIdx];
+    return {
+      type: 'Feature' as const,
+      geometry: { type: 'Point' as const, coordinates: [lng, lat] },
+      properties: {
+        _id: `vert-${layerId}-${featureId}-${origIdx}`,
+        _layer_id: layerId,
+        _parent_feature_id: featureId,
+        _vertex_idx: origIdx,  // Use ORIGINAL index so dragging updates correct coordinate
+        _is_vertex: true,
+        _is_active: origIdx === activeVertexIdx,
+      },
+    };
+  });
 
   try {
     map.addSource(sourceId, {
