@@ -1450,7 +1450,10 @@ export default function MapScreen() {
   // On activate: extract the HLD line's coordinates into tempLineCoords (working copy)
   // On deactivate: discard temp changes (user must press Save to persist)
   const handleToggleMove = useCallback(() => {
-    if (!selectedLineFeature) return;
+    if (!selectedLineFeature) {
+      console.warn('[MoveMode] GUARD 1: no selectedLineFeature');
+      return;
+    }
 
     if (lineMoveMode) {
       // ── Exit Move Mode — discard temp changes ──
@@ -1461,8 +1464,12 @@ export default function MapScreen() {
     } else {
       // ── Enter Move Mode — extract HLD coordinates into temp copy ──
       const { id: featureId, layerId } = selectedLineFeature;
+      console.log(`[MoveMode] DEBUG: featureId=${featureId}, layerId=${layerId}, hasImported=${hasImportedData}`);
       const features = activeGeojsonRef.current[layerId];
-      if (!features) return;
+      if (!features) {
+        console.warn(`[MoveMode] GUARD 2: no features in activeGeojsonRef for layerId=${layerId}. Available keys: ${Object.keys(activeGeojsonRef.current).join(', ')}`);
+        return;
+      }
 
       // Try direct ID match first
       let hldFeature = features.find((f) => {
@@ -1475,16 +1482,20 @@ export default function MapScreen() {
       // differs from the original GeoJSON feature's .id (in activeGeojsonRef).
       if (!hldFeature) {
         const idMap = (hasImportedData ? importFeatureIdMap : demoFeatureIdMap)?.[layerId];
+        const idMapSize = idMap?.length ?? 0;
+        console.log(`[MoveMode] DEBUG: direct match failed, trying fallback. idMap=${!!idMap}, idMapSize=${idMapSize}, features.length=${features.length}`);
         if (idMap) {
           const idx = idMap.indexOf(featureId);
+          console.log(`[MoveMode] DEBUG: fallback idx=${idx}`);
           if (idx >= 0 && idx < features.length) {
             hldFeature = features[idx];
+            console.log(`[MoveMode] DEBUG: fallback found feature, geomType=${hldFeature?.geometry?.type}`);
           }
         }
       }
 
       if (!hldFeature?.geometry || hldFeature.geometry.type !== 'LineString') {
-        console.warn(`[MoveMode] Could not find HLD feature ${featureId.slice(-8)} in ${layerId} — ${features.length} features in layer`);
+        console.warn(`[MoveMode] GUARD 3: hldFeature not found. fallback=${!!hldFeature}, geom=${hldFeature?.geometry?.type}, featureId=${featureId.slice(-12)}`);
         return;
       }
 
