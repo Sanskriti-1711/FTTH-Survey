@@ -37,6 +37,7 @@ import {
   Move,
   ClipboardList,
 } from 'lucide-react-native';
+import { useSurveyFeaturesStore } from '../../lib/stores/survey-features';
 import type { Feature, GeoJSONFeature } from '../../lib/utils/types';
 
 // ── Feature Detail Screen ─────────────────────────────────────────────────
@@ -90,7 +91,16 @@ export default function FeatureDetailScreen() {
             setMeasurements({});
             setNotes('');
           } else {
-            showToast('Failed to load feature details', 'error');
+            // Try survey features store
+            const surveyFound = findSurveyFeature(featureId as string);
+            if (surveyFound) {
+              setFeature(surveyFound.feature);
+              setGeojson(surveyFound.geojson);
+              setMeasurements({});
+              setNotes('');
+            } else {
+              showToast('Failed to load feature details', 'error');
+            }
           }
         }
       } else {
@@ -102,7 +112,16 @@ export default function FeatureDetailScreen() {
           setMeasurements({});
           setNotes('');
         } else {
-          setLoading(false);
+          // Try survey features store
+          const surveyFound = findSurveyFeature(featureId as string);
+          if (surveyFound) {
+            setFeature(surveyFound.feature);
+            setGeojson(surveyFound.geojson);
+            setMeasurements({});
+            setNotes('');
+          } else {
+            setLoading(false);
+          }
         }
       }
     } catch {
@@ -164,6 +183,38 @@ export default function FeatureDetailScreen() {
       }
     }
 
+    return null;
+  }
+
+  /** Look up a survey feature by ID in the survey-features store */
+  function findSurveyFeature(
+    fid: string,
+  ): { feature: Feature; geojson: GeoJSONFeature } | null {
+    const { surveyFeatures } = useSurveyFeaturesStore.getState();
+    for (const [layerId, sfList] of Object.entries(surveyFeatures)) {
+      const sf = sfList.find((s) => s.id === fid);
+      if (sf) {
+        const feat: Feature = {
+          id: sf.id,
+          layer_name: `Survey: ${sf.layer_name || layerId.toUpperCase()}`,
+          layer_id: sf.layer_id,
+          properties: (sf.survey_attributes as Record<string, unknown>) ?? {},
+          field_schema: null,
+          field_measurements: null,
+          comparison_notes: '',
+          status: (sf.survey_status === 'new' || sf.survey_status === 'modified' ? 'assigned' : 'under_review') as 'assigned' | 'under_review',
+          photo_url: null,
+          created_at: sf.created_at,
+          updated_at: sf.updated_at,
+        };
+        const gf: GeoJSONFeature = {
+          type: 'Feature',
+          geometry: sf.survey_geometry as { type: string; coordinates: unknown[] },
+          properties: feat.properties,
+        };
+        return { feature: feat, geojson: gf };
+      }
+    }
     return null;
   }
 

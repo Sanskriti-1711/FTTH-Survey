@@ -975,21 +975,36 @@ export default function MapScreen() {
       // ── Determine geometry type for this feature ──────────────────────
       const geomType = resolveGeometryType(layerId);
 
+      // ── Detect survey features (orange markers) via 'survey-' prefix ─
+      const isSurveyFeature = layerId.startsWith('survey-');
+
       // First try to find in demo features (rich metadata)
-      const found = demoFeatures.find(
+      const found = isSurveyFeature ? undefined : demoFeatures.find(
         (f) => f.feature.id === featureId
       );
-      const featureName = found
-        ? String(
-            found.feature.properties?.name ??
-              found.feature.properties?.address ??
-              found.feature.layer_name + ' #' + found.feature.id.slice(-3)
-          )
-        : (featureId.startsWith('demo-')
-            ? (activeLayerNames[layerId] ?? layerId.toUpperCase()) + ' #' + featureId.slice(-3)
-            : 'Feature #' + featureId.slice(0, 8));
-      const layerName = found?.feature.layer_name ?? (activeLayerNames[layerId] ?? layerId.toUpperCase());
-      const status = found?.feature.status ?? 'assigned';
+
+      let featureName: string;
+      let layerName: string;
+      let popupLayerId = layerId;
+      if (isSurveyFeature) {
+        const baseLayerId = layerId.replace('survey-', '');
+        const baseName = activeLayerNames[baseLayerId] ?? baseLayerId.replace('imp-', '').toUpperCase();
+        featureName = `Survey: ${baseName} #${featureId.slice(-4)}`;
+        layerName = `Survey: ${baseName}`;
+        popupLayerId = baseLayerId;
+      } else {
+        featureName = found
+          ? String(
+              found.feature.properties?.name ??
+                found.feature.properties?.address ??
+                found.feature.layer_name + ' #' + found.feature.id.slice(-3)
+            )
+          : (featureId.startsWith('demo-')
+              ? (activeLayerNames[layerId] ?? layerId.toUpperCase()) + ' #' + featureId.slice(-3)
+              : 'Feature #' + featureId.slice(0, 8));
+        layerName = found?.feature.layer_name ?? (activeLayerNames[layerId] ?? layerId.toUpperCase());
+      }
+      const status = isSurveyFeature ? 'modified' : (found?.feature.status ?? 'assigned');
 
       // ── LINE features: show View popup first, then Edit toolbar on demand ──
       if (geomType === 'LineString') {
@@ -1009,8 +1024,8 @@ export default function MapScreen() {
             id: featureId,
             name: featureName,
             layerName,
-            status: 'assigned',
-            layerId,
+            status,
+            layerId: popupLayerId,
           });
         }
         // Close popup screen coords are set above
@@ -1038,8 +1053,8 @@ export default function MapScreen() {
         id: featureId,
         name: featureName,
         layerName,
-        status: 'assigned',
-        layerId,
+        status,
+        layerId: popupLayerId,
       });
       setSelectedMapFeatureId(featureId);
     },
@@ -2069,7 +2084,7 @@ export default function MapScreen() {
               }}
               featureGeometryType={(resolveGeometryType(selectedFeaturePopup.layerId ?? '') as 'Point' | 'LineString' | 'Polygon')}
               onStartEdit={
-                (displayMode === 'hld' || displayMode === 'overlay') ? handlePopupEdit : undefined
+                (displayMode === 'hld' || displayMode === 'overlay' || selectedFeaturePopup?.layerId?.startsWith('survey-')) ? handlePopupEdit : undefined
               }
               notesDraft={notesDraft}
               onNotesChange={setNotesDraft}
