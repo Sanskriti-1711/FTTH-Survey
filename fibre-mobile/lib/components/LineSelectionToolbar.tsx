@@ -259,7 +259,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     bottom: Spacing.xxl + 80, // Above the FABs, slightly lower
     left: Spacing.md,
-    right: Spacing.md,
+    right: Spacing.md + 64, // Leave room for FAB column on the right (48px button + margin)
     borderRadius: Radius.lg,
     borderWidth: 1.5,
     overflow: 'hidden',
