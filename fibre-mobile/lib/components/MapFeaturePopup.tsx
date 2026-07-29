@@ -54,9 +54,6 @@ export interface FeaturePopupProps {
 // ── Arrow pointer size ────────────────────────────────────────────────────
 const ARROW_SIZE = 10;
 
-/** Space reserved on the right edge for FAB buttons + padding (48px button + 16px margin + 16px buffer) */
-const RIGHT_CONTROLS_OFFSET = 80;
-
 /** Popup width as a fraction of screen width, clamped between 200–260 */
 function getPopupWidth(screenWidth: number): number {
   return Math.max(200, Math.min(260, Math.round(screenWidth * 0.65)));
@@ -172,9 +169,8 @@ export default function MapFeaturePopup({
   const displayProps = showAllProps ? sortedProperties : sortedProperties.slice(0, 6);
 
   // Compute position — popup appears ABOVE the pin (screenY), centered horizontally
-  // RIGHT_CONTROLS_OFFSET prevents overlap with FAB column on the right edge
   const estimationHeight = Math.min(properties.length * 22 + 200, 380);
-  const popupLeft = Math.max(12, Math.min(screenX - popupWidth / 2, screenW - popupWidth - RIGHT_CONTROLS_OFFSET));
+  const popupLeft = Math.max(12, Math.min(screenX - popupWidth / 2, screenW - popupWidth - 12));
   const popupTop = Math.max(8, screenY - estimationHeight - ARROW_SIZE - 4);
 
   // Status color
