@@ -18,7 +18,7 @@ import { useSurveyStore } from '../../lib/stores/survey';
 import { useSurveyFeaturesStore, SURVEY_COLOR } from '../../lib/stores/survey-features';
 import { getDemoAllFeatures, DEMO_GEOJSON_FEATURES, DEMO_FEATURES, DEMO_LAYERS } from '../../lib/stores/demo-data';
 import { recalculateDependentProperties } from '../../lib/utils/spatial';
-import { insertVertexAtPoint } from '../../lib/utils/geometry-operations';
+// Geometry operation utilities removed — all edits now route through survey-features store
 import GeometryEditor from '../../lib/components/GeometryEditor';
 import type { GeometryMode, EditingFeature } from '../../lib/components/GeometryEditor';
 import LineSelectionToolbar from '../../lib/components/LineSelectionToolbar';
@@ -274,10 +274,6 @@ export default function MapScreen() {
   const [lineMoveMode, setLineMoveMode] = useState(false);
   const [tempLineCoords, setTempLineCoords] = useState<[number, number][] | null>(null);
   const [tempLineOriginal, setTempLineOriginal] = useState<[number, number][] | null>(null);
-
-  // ── Add Vertex Mode state ────────────────────────────────────────────
-  // When active, the next click on the selected line segment inserts a new vertex.
-  const [addVertexMode, setAddVertexMode] = useState(false);
 
   // ── Add Point state ────────────────────────────────────────────────
   const [addPointTargetLayer, setAddPointTargetLayer] = useState<string>('');
@@ -1422,8 +1418,6 @@ export default function MapScreen() {
     setLineMoveMode(false);
     setTempLineCoords(null);
     setTempLineOriginal(null);
-    // Exit add vertex mode
-    setAddVertexMode(false);
   }, []);
 
   // ── Toggle Move Mode for the selected line ────────────────────────────
@@ -1461,53 +1455,6 @@ export default function MapScreen() {
       console.log(`[MoveMode] Activated for ${featureId.slice(-8)} — ${coordsCopy.length} vertices`);
     }
   }, [selectedLineFeature, lineMoveMode, autoOverlayOnEdit]);
-
-  // ── Toggle Add Vertex Mode — user taps a line segment to insert a new vertex ──
-  // On activate: enter add-vertex mode (next click on a segment inserts a vertex).
-  // On deactivate: exit without inserting.
-  const handleToggleAddVertex = useCallback(() => {
-    if (!selectedLineFeature) return;
-    setAddVertexMode((prev) => !prev);
-    if (!addVertexMode) {
-      console.log('[AddVertex] Mode activated — tap a line segment to insert a new vertex');
-    }
-  }, [selectedLineFeature, addVertexMode]);
-
-  // ── Handle line click in Add Vertex Mode — insert a new vertex at the click point ──
-  // Called from onFeatureClick when addVertexMode is true.
-  const handleAddVertexClick = useCallback((featureId: string, layerId: string, lng: number, lat: number) => {
-    if (!selectedLineFeature) return;
-
-    // Get the current line coordinates (from tempLineCoords if in move mode, else from HLD)
-    let coords = tempLineCoords;
-    if (!coords) {
-      const features = activeGeojsonRef.current[layerId];
-      if (!features) return;
-      const hldFeature = features.find((f) => {
-        const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
-        return fid === featureId;
-      });
-      if (!hldFeature?.geometry || hldFeature.geometry.type !== 'LineString') return;
-      coords = hldFeature.geometry.coordinates as [number, number][];
-    }
-
-    // Insert vertex at the click point
-    const result = insertVertexAtPoint(coords, lng, lat);
-    if (!result) {
-      console.log('[AddVertex] Click was too close to an existing vertex — no insertion');
-      return;
-    }
-
-    // Update tempLineCoords with the new vertex
-    const originalCopy = coords.map(([cl, cn]) => [cl, cn] as [number, number]);
-    setTempLineOriginal(originalCopy);
-    setTempLineCoords(result.updated);
-    setLineMoveMode(true);
-    setAddVertexMode(false);
-    autoOverlayOnEdit();
-
-    console.log(`[AddVertex] Inserted vertex at idx ${result.insertIdx + 1} (now ${result.updated.length} vertices) — switched to Move Mode`);
-  }, [selectedLineFeature, tempLineCoords, autoOverlayOnEdit]);
 
   // ── Save the temporary line geometry to the survey-features store ──────
   // Creates or updates a SurveyFeature with the modified geometry.
@@ -1574,16 +1521,6 @@ export default function MapScreen() {
     setLineMoveMode(false);
     console.log(`[MoveMode] Saved line geometry for ${featureId.slice(-8)} — SurveyFeature ${existingSurvey ? 'updated' : 'created'}`);
   }, [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature]);
-
-  // ── Memoized vertex drag target — stable reference to prevent unnecessary effect re-fires ──
-  const memoizedVertexTarget = useMemo(() => {
-    if (!lineMoveMode || !tempLineCoords || !selectedLineFeature) return null;
-    return {
-      featureId: `temp-move-${selectedLineFeature.id}`,
-      layerId: `temp-move-${selectedLineFeature.layerId}-${selectedLineFeature.id}`,
-      vertexIdx: -1, // -1 = show all vertices as draggable (no single active vertex)
-    };
-  }, [lineMoveMode, tempLineCoords, selectedLineFeature]);
 
   // ── Check if temp line has unsaved changes ──
   const hasUnsavedLineChanges = useMemo(() => {
@@ -1671,7 +1608,7 @@ export default function MapScreen() {
     }
   }, [geoMode]);
 
-  // ── Auto-cleanup Move Mode & Add Vertex when the selected line is deselected ──
+  // ── Auto-cleanup Move Mode when the selected line is deselected ──
   // Ensures temp state is cleared regardless of how deselection happens
   // (empty tap, close button, geoMode change, editing mode, etc.)
   useEffect(() => {
@@ -1679,7 +1616,6 @@ export default function MapScreen() {
       setLineMoveMode(false);
       setTempLineCoords(null);
       setTempLineOriginal(null);
-      setAddVertexMode(false);
     }
   }, [selectedLineFeature]);
 
@@ -1878,11 +1814,6 @@ export default function MapScreen() {
           <MapLibreMap
             layers={mapLayerData}
             onFeatureClick={(featureId, layerId, lngLat, screenPt) => {
-              // ── Add Vertex Mode: intercept clicks on line segments ──
-              if (addVertexMode && selectedLineFeature && featureId === selectedLineFeature.id) {
-                handleAddVertexClick(featureId, layerId, lngLat[0], lngLat[1]);
-                return;
-              }
               if (geoMode === 'delete_feature') {
                 handleDeleteFeature(featureId, layerId);
                 return;
@@ -1891,11 +1822,14 @@ export default function MapScreen() {
             }}
             onEmptyAreaClick={handleEmptyMapClick}
             onFeatureDragEnd={handleFeatureDragEnd}
-            onVertexDragEnd={lineMoveMode && tempLineCoords ? handleVertexDragEnd : undefined}
-            vertexDragTarget={memoizedVertexTarget}
-            manualVertexCoords={
+            onVertexDragEnd={lineMoveMode ? handleVertexDragEnd : undefined}
+            vertexDragTarget={
               lineMoveMode && tempLineCoords && selectedLineFeature
-                ? { coords: tempLineCoords, color: SURVEY_COLOR }
+                ? {
+                    featureId: `temp-move-${selectedLineFeature.id}`,
+                    layerId: `temp-move-${selectedLineFeature.layerId}-${selectedLineFeature.id}`,
+                    vertexIdx: -1, // -1 = show all vertices as draggable (no single active vertex)
+                  }
                 : null
             }
             draggableLayerIds={draggableLayerIds}
@@ -2025,8 +1959,6 @@ export default function MapScreen() {
               onUndo={handleUndo}
               moveMode={lineMoveMode}
               onToggleMove={handleToggleMove}
-              onToggleAddVertex={handleToggleAddVertex}
-              addVertexMode={addVertexMode}
               onSave={handleSaveLine}
               hasUnsavedChanges={hasUnsavedLineChanges}
             />

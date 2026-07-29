@@ -39,10 +39,6 @@ interface LineSelectionToolbarProps {
   moveMode?: boolean;
   /** Called when user taps the Move button */
   onToggleMove?: () => void;
-  /** Called when user taps the Add Vertex button */
-  onToggleAddVertex?: () => void;
-  /** Whether Add Vertex Mode is currently active */
-  addVertexMode?: boolean;
   /** Called when user taps the Save button */
   onSave?: () => void;
   /** Whether there are unsaved geometry changes in Move Mode */
@@ -63,7 +59,6 @@ interface ActionDef {
 
 const ACTIONS: ActionDef[] = [
   { id: 'move', label: 'Move', icon: '↔️', enabled: true },
-  { id: 'add_vertex', label: 'Add Vertex', icon: '➕', enabled: true },
   { id: 'split', label: 'Split', icon: '✂️' },
   { id: 'draw_alt', label: 'Draw Alt', icon: '📐' },
   { id: 'del_section', label: 'Del Section', icon: '🪓', danger: true },
@@ -83,8 +78,6 @@ export default function LineSelectionToolbar({
   onUndo,
   moveMode = false,
   onToggleMove,
-  onToggleAddVertex,
-  addVertexMode = false,
   onSave,
   hasUnsavedChanges = false,
 }: LineSelectionToolbarProps) {
@@ -134,7 +127,6 @@ export default function LineSelectionToolbar({
             </Text>
             <Text style={[styles.headerSubtitle, { color: colors.textTertiary }]} numberOfLines={1}>
               {selectedFeature?.layerName ?? 'Line Layer'} · LineString
-              {addVertexMode && ' · Tap segment to add vertex'}
               {moveMode && ' · Move Mode'}
               {moveMode && hasUnsavedChanges && ' · Unsaved'}
             </Text>
@@ -159,14 +151,12 @@ export default function LineSelectionToolbar({
         {ACTIONS.map((action) => {
           const isUndo = action.id === 'undo';
           const isMove = action.id === 'move';
-          const isAddVertex = action.id === 'add_vertex';
           const isSave = action.id === 'save';
           const showBadge = isUndo && undoCount > 0;
 
           // ── Determine button state ──
           const isEnabled = action.enabled === true;
           const isMoveActive = isMove && moveMode;
-          const isVertexActive = isAddVertex && addVertexMode;
           const isSaveActive = isSave && hasUnsavedChanges;
 
           // Style overrides for active states
@@ -174,6 +164,7 @@ export default function LineSelectionToolbar({
           let borderColor = colors.outlineLight;
           let textColor = colors.textTertiary;
           let opacity = 0.45; // disabled placeholder look
+          let iconColor = undefined;
 
           if (isEnabled) {
             opacity = 1;
@@ -182,15 +173,12 @@ export default function LineSelectionToolbar({
               bgColor = '#FF8C00' + '20';
               borderColor = '#FF8C00';
               textColor = '#FF8C00';
-            } else if (isVertexActive) {
-              bgColor = '#22C55E' + '20';
-              borderColor = '#22C55E';
-              textColor = '#22C55E';
             } else if (isSaveActive) {
               bgColor = colors.primary + '20';
               borderColor = colors.primary;
               textColor = colors.primary;
             } else if (isSave && !hasUnsavedChanges) {
+              // Save is enabled but nothing to save — dim it
               opacity = 0.5;
             }
           }
@@ -206,11 +194,10 @@ export default function LineSelectionToolbar({
                     opacity,
                   },
                 ]}
-                disabled={!isEnabled || (isSave && !hasUnsavedChanges) || (moveMode && !isSave && !isMove && !isUndo)}
+                disabled={!isEnabled || (isSave && !hasUnsavedChanges)}
                 activeOpacity={0.7}
                 onPress={() => {
                   if (isMove && onToggleMove) onToggleMove();
-                  else if (isAddVertex && onToggleAddVertex) onToggleAddVertex();
                   else if (isSave && onSave) onSave();
                   else if (isUndo && onUndo) onUndo();
                 }}
@@ -220,7 +207,7 @@ export default function LineSelectionToolbar({
                   style={[styles.actionLabel, { color: textColor }]}
                   numberOfLines={1}
                 >
-                  {isMove && moveMode ? 'Move: ON' : isAddVertex && addVertexMode ? 'Vertex: ON' : action.label}
+                  {isMove && moveMode ? 'Move: ON' : action.label}
                 </Text>
               </TouchableOpacity>
 

@@ -61,9 +61,6 @@ interface MapLibreMapProps {
   onVertexDragEnd?: (featureId: string, layerId: string, vertexIdx: number, newLng: number, newLat: number) => void;
   /** When set, renders draggable vertex markers for the target feature's LineString vertices. */
   vertexDragTarget?: { featureId: string; layerId: string; vertexIdx: number } | null;
-  /** Direct coords bypass — when set, renders vertex markers at these coordinates without searching layersRef.
-   *  Used by Move Mode to render vertex markers on the temp preview layer without relying on layersRef lookup. */
-  manualVertexCoords?: { coords: [number, number][]; color: string } | null;
   /** Set of layer IDs whose point features can be dragged */
   draggableLayerIds?: Set<string>;
   /** Whether point dragging is enabled */
@@ -1288,11 +1285,8 @@ function WebMapView({
   onVertexDragEndRef.current = onVertexDragEnd;
   const vertexDragTargetRef = useRef(vertexDragTarget);
   vertexDragTargetRef.current = vertexDragTarget;
-  const manualVertexCoordsRef = useRef(manualVertexCoords);
-  manualVertexCoordsRef.current = manualVertexCoords;
 
-  // Effect: render/update vertex markers when vertexDragTarget or manualVertexCoords changes
-  // manualVertexCoords bypasses the layersRef search — used by Move Mode for direct coords.
+  // Effect: render/update vertex markers when vertexDragTarget changes
   useEffect(() => {
     const map = mapRef.current;
     if (!map || status !== 'ready') return;
@@ -1302,20 +1296,7 @@ function WebMapView({
 
     if (!vertexDragTarget) return;
 
-    // ── DIRECT COORDS PATH: When manualVertexCoords is set, use those coords directly ──
-    if (manualVertexCoords) {
-      addVertexMarkers(
-        map,
-        vertexDragTarget.featureId,
-        vertexDragTarget.layerId,
-        manualVertexCoords.coords,
-        vertexDragTarget.vertexIdx,
-        manualVertexCoords.color,
-      );
-      return;
-    }
-
-    // ── LEGACY PATH: Find the target feature's coordinates in layersRef ──
+    // Find the target feature's coordinates
     for (const layerData of layersRef.current) {
       if (layerData.id !== vertexDragTarget.layerId) continue;
       for (const feat of layerData.features) {
@@ -1337,10 +1318,7 @@ function WebMapView({
         }
       }
     }
-  }, [vertexDragTarget, status, manualVertexCoords]);
-
-  // Note: In-place marker updates during vertex drags are handled by the vertex drag
-  // effect below (lines ~1580-1700). No additional update effect needed here.
+  }, [vertexDragTarget, status]);
 
   // Clean up vertex markers on unmount
   useEffect(() => {
