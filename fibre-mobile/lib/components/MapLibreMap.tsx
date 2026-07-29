@@ -909,7 +909,7 @@ function addVertexMarkers(
   // Start and end are always included. The original vertex index is
   // preserved in _vertex_idx so dragging a marker updates the correct
   // coordinate in tempLineCoords.
-  const MIN_VERTEX_SPACING_M = 5;
+  const MIN_VERTEX_SPACING_M = 10;
   const thinIndices: number[] = []; // original indices that get a marker
   for (let i = 0; i < coords.length; i++) {
     if (thinIndices.length === 0 || i === coords.length - 1) {
@@ -1709,7 +1709,20 @@ function WebMapView({
       const vertexIdx = ds.vertexIdx;
       setDragDistance(null);
       dragOriginRef.current = null;
-      cancelDrag();
+
+      // ── Keep the last drag position in the map sources ────────────
+      // Do NOT call cancelDrag() here — that would restore the original
+      // coordinates, snapping the line back AFTER the user released the
+      // mouse. Instead, just clean up the drag state and cursor. The
+      // parent LineString source already has the final position from
+      // the last onDragMove event.
+      try { map.getCanvas().style.cursor = ''; } catch {}
+      try {
+        const hlId = `ml-vert-hl-${ds.layerId}-${ds.featureId}`;
+        if (map.getLayer(hlId)) map.removeLayer(hlId);
+      } catch {}
+      dragStateRef.current = null;
+
       if (lngLat && ds) {
         const px = (e as any).point ?? map.project([lngLat.lng, lngLat.lat]);
         const pixelDx = Math.abs((px?.x ?? 0) - ds.startPoint.x);
