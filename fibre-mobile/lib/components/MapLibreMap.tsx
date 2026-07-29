@@ -61,6 +61,10 @@ interface MapLibreMapProps {
   onVertexDragEnd?: (featureId: string, layerId: string, vertexIdx: number, newLng: number, newLat: number) => void;
   /** When set, renders draggable vertex markers for the target feature's LineString vertices. */
   vertexDragTarget?: { featureId: string; layerId: string; vertexIdx: number } | null;
+  /** Set of vertex indices that are currently selected (highlighted for multi-vertex segment drag). */
+  selectedVertexIndices?: Set<number>;
+  /** Called when vertex selection changes (toggled by clicking vertex markers). */
+  onVertexSelectionChange?: (indices: Set<number>) => void;
   /** Set of layer IDs whose point features can be dragged */
   draggableLayerIds?: Set<string>;
   /** Whether point dragging is enabled */
@@ -868,7 +872,7 @@ function loadMapLibreJS(): Promise<void> {
 
 /** Remove all vertex marker layers and sources from the map */
 function removeVertexMarkers(map: any): void {
-  const vertexPrefixes = ['ml-vert-src-', 'ml-vert-lyr-', 'ml-vert-hl-', 'ml-vert-drag-'];
+  const vertexPrefixes = ['ml-vert-src-', 'ml-vert-lyr-', 'ml-vert-hl-', 'ml-vert-sel-', 'ml-vert-drag-'];
   const style = map.getStyle();
   if (style?.layers) {
     for (const layer of [...style.layers]) {
@@ -902,6 +906,7 @@ function addVertexMarkers(
   coords: [number, number][],
   activeVertexIdx: number,
   color: string,
+  selectedIndices?: Set<number>,
 ): void {
   const sourceId = `ml-vert-src-${layerId}-${featureId}`;
 
@@ -936,6 +941,7 @@ function addVertexMarkers(
         _vertex_idx: origIdx,  // Use ORIGINAL index so dragging updates correct coordinate
         _is_vertex: true,
         _is_active: origIdx === activeVertexIdx,
+        _is_selected: selectedIndices ? selectedIndices.has(origIdx) : false,
       },
     };
   });
@@ -972,6 +978,22 @@ function addVertexMarkers(
         'circle-stroke-width': 3,
         'circle-stroke-color': '#0D5CFF',
         'circle-stroke-opacity': 0.8,
+      },
+    });
+
+    // Selected vertex highlight (filled blue — for multi-select segment drag)
+    map.addLayer({
+      id: `ml-vert-sel-${layerId}-${featureId}`,
+      type: 'circle',
+      source: sourceId,
+      filter: ['==', ['get', '_is_selected'], true],
+      paint: {
+        'circle-radius': 7,
+        'circle-color': '#0D5CFF',
+        'circle-opacity': 0.7,
+        'circle-stroke-width': 2,
+        'circle-stroke-color': '#FFFFFF',
+        'circle-stroke-opacity': 0.9,
       },
     });
 
@@ -1260,6 +1282,9 @@ function WebMapView({
         return;
       }
 
+      // Skip vertex markers — handled by the vertex selection click handler
+      if (features?.some((f: any) => f.properties?._is_vertex)) return;
+
       for (const feature of features) {
         const props = feature.properties as Record<string, unknown> | null;
         if (!props) continue;
@@ -1314,6 +1339,10 @@ function WebMapView({
   onVertexDragEndRef.current = onVertexDragEnd;
   const vertexDragTargetRef = useRef(vertexDragTarget);
   vertexDragTargetRef.current = vertexDragTarget;
+  const onVertexSelectionChangeRef = useRef(onVertexSelectionChange);
+  onVertexSelectionChangeRef.current = onVertexSelectionChange;
+  const selectedVertexIndicesRef = useRef(selectedVertexIndices);
+  selectedVertexIndicesRef.current = selectedVertexIndices;
 
   // Effect: render/update vertex markers when vertexDragTarget changes
   useEffect(() => {
@@ -1341,6 +1370,7 @@ function WebMapView({
               coords,
               vertexDragTarget.vertexIdx,
               layerData.color ?? '#0D5CFF',
+              selectedVertexIndices,
             );
           }
           console.log(`[Vertex] Markers rendered for ${vertexDragTarget.featureId.slice(-8)} on ${vertexDragTarget.layerId}`);
@@ -1383,6 +1413,8 @@ function WebMapView({
     parentSourceId?: string;
     /** Snapshot of full coordinate array at drag start (for rubber-band offset) */
     initialCoords?: [number, number][];
+    /** Set of vertex indices being dragged together (multi-select segment drag) */
+    selectedIndices?: number[];
   } | null>(null);
 
   // ── Haversine distance (metres) ────────────────────────────────────────
@@ -1600,6 +1632,9 @@ function WebMapView({
   }, [layers, status, dragMode, draggableLayerIds, onFeatureDragEnd]);
 
   // ── Vertex drag effect (runs independently of dragMode) ────────────────
+  // Supports multi-vertex selection + segment drag: click vertex markers to
+  // toggle selection, then drag any selected vertex to move ALL selected
+  // vertices equally (rigid translation of the segment between them).
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !onVertexDragEndRef.current || !vertexDragTargetRef.current || status !== 'ready') return;
@@ -1619,6 +1654,50 @@ function WebMapView({
       } catch { return null; }
     };
 
+    // ── Vertex click handler — toggles multi-selection ────────────────
+    const onVertexClick = (e: any) => {
+      if (dragStateRef.current?.active) return;
+      const feature = e.features?.[0];
+      if (!feature) return;
+      const props = feature.properties;
+      const vIdx = props?._vertex_idx as number | undefined;
+      const isVertex = props?._is_vertex === true;
+      if (vIdx === undefined || !isVertex) return;
+
+      const current = selectedVertexIndicesRef.current ?? new Set<number>();
+      const next = new Set(current);
+      if (next.has(vIdx)) {
+        next.delete(vIdx);
+      } else {
+        next.add(vIdx);
+      }
+      if (onVertexSelectionChangeRef.current) {
+        onVertexSelectionChangeRef.current(next);
+      }
+      // Update the vertex source's _is_selected property immediately for visual feedback
+      try {
+        const src = map.getSource(vertSourceId) as any;
+        if (src?._data?.features) {
+          const feats = src._data.features.map((f: any) => {
+            if (f.properties?._is_vertex) {
+              const idx = f.properties._vertex_idx;
+              return {
+                ...f,
+                properties: {
+                  ...f.properties,
+                  _is_selected: next.has(idx),
+                  _is_active: idx === vIdx,
+                },
+              };
+            }
+            return f;
+          });
+          src.setData({ type: 'FeatureCollection', features: feats });
+        }
+      } catch {}
+    };
+
+    // ── Multi-vertex drag: moves ALL selected vertices by the same delta ──
     const onDragMove = (e: any) => {
       const ds = dragStateRef.current;
       if (!ds?.active || ds.vertexIdx === undefined) return;
@@ -1633,6 +1712,7 @@ function WebMapView({
         setDragDistance(Math.round(dist));
       }
 
+      // ── Update the vertex marker (the one being dragged) ────────────
       const src = map.getSource(ds.sourceId) as any;
       if (!src?._data?.features) return;
       try {
@@ -1645,7 +1725,7 @@ function WebMapView({
         }
         src.setData({ type: 'FeatureCollection', features });
 
-        // Update the parent LineString's coordinate at the vertex index
+        // ── Update the parent LineString: move ALL selected vertices ──
         try {
           const parentSrc = map.getSource(ds.parentSourceId!) as any;
           if (parentSrc?._data?.features) {
@@ -1657,12 +1737,27 @@ function WebMapView({
               const coords = [...parentFeat.geometry.coordinates];
               const vi = ds.vertexIdx;
 
-              // ── Rigid V: only the dragged vertex moves ──────────────
-              // Connected segments stay completely straight because they
-              // are lines between two fixed points. The neighboring
-              // vertices (i-1 and i+1) are NOT moved — the segments
-              // pivot naturally at those fixed pivot points.
-              coords[vi] = [lngLat.lng, lngLat.lat];
+              // Compute delta from the dragged vertex's original position
+              const deltaLng = lngLat.lng - ds.originalLng;
+              const deltaLat = lngLat.lat - ds.originalLat;
+
+              // Determine which vertices to move
+              const moveIndices = ds.selectedIndices ?? [vi];
+
+              // Move ALL selected vertices by the same delta (rigid translation)
+              if (ds.initialCoords) {
+                for (const idx of moveIndices) {
+                  if (idx >= 0 && idx < ds.initialCoords.length) {
+                    coords[idx] = [
+                      ds.initialCoords[idx][0] + deltaLng,
+                      ds.initialCoords[idx][1] + deltaLat,
+                    ];
+                  }
+                }
+              } else {
+                // Fallback: only move the dragged vertex
+                coords[vi] = [lngLat.lng, lngLat.lat];
+              }
 
               parentFeat.geometry = { ...parentFeat.geometry, coordinates: coords };
               parentSrc.setData({ type: 'FeatureCollection', features: parentFeatures });
@@ -1697,12 +1792,10 @@ function WebMapView({
           if (parentFeat?.geometry?.type === 'LineString') {
             const coords = [...parentFeat.geometry.coordinates];
             if (ds.initialCoords) {
-              // Restore all coordinates from snapshot (rubber-band cancel)
               for (let i = 0; i < coords.length && i < ds.initialCoords.length; i++) {
                 coords[i] = [ds.initialCoords[i][0], ds.initialCoords[i][1]];
               }
             } else {
-              // Legacy: restore only the dragged vertex
               coords[ds.vertexIdx] = [ds.originalLng, ds.originalLat];
             }
             parentFeat.geometry = { ...parentFeat.geometry, coordinates: coords };
@@ -1720,6 +1813,7 @@ function WebMapView({
       dragStateRef.current = null;
     };
 
+    // ── Drag end: fires callback for every moved vertex ─────────────
     const onDragEnd = (e: any) => {
       const ds = dragStateRef.current;
       if (!ds?.active || ds.vertexIdx === undefined) return;
@@ -1728,12 +1822,6 @@ function WebMapView({
       setDragDistance(null);
       dragOriginRef.current = null;
 
-      // ── Keep the last drag position in the map sources ────────────
-      // Do NOT call cancelDrag() here — that would restore the original
-      // coordinates, snapping the line back AFTER the user released the
-      // mouse. Instead, just clean up the drag state and cursor. The
-      // parent LineString source already has the final position from
-      // the last onDragMove event.
       try { map.getCanvas().style.cursor = ''; } catch {}
       try {
         const hlId = `ml-vert-hl-${ds.layerId}-${ds.featureId}`;
@@ -1741,12 +1829,29 @@ function WebMapView({
       } catch {}
       dragStateRef.current = null;
 
-      if (lngLat && ds) {
+      if (lngLat && ds && onVertexDragEndRef.current) {
         const px = (e as any).point ?? map.project([lngLat.lng, lngLat.lat]);
         const pixelDx = Math.abs((px?.x ?? 0) - ds.startPoint.x);
         const pixelDy = Math.abs((px?.y ?? 0) - ds.startPoint.y);
-        if ((pixelDx > 8 || pixelDy > 8) && onVertexDragEndRef.current) {
-          onVertexDragEndRef.current(ds.featureId, ds.layerId, vertexIdx, lngLat.lng, lngLat.lat);
+        if (pixelDx > 8 || pixelDy > 8) {
+          // Compute delta for all selected vertices
+          const deltaLng = lngLat.lng - ds.originalLng;
+          const deltaLat = lngLat.lat - ds.originalLat;
+          const moveIndices = ds.selectedIndices ?? [vertexIdx];
+
+          // Fire callback for each moved vertex
+          if (ds.initialCoords) {
+            for (const idx of moveIndices) {
+              if (idx >= 0 && idx < ds.initialCoords.length) {
+                const newLng = ds.initialCoords[idx][0] + deltaLng;
+                const newLat = ds.initialCoords[idx][1] + deltaLat;
+                onVertexDragEndRef.current(ds.featureId, ds.layerId, idx, newLng, newLat);
+              }
+            }
+          } else {
+            // Fallback: fire for single dragged vertex
+            onVertexDragEndRef.current(ds.featureId, ds.layerId, vertexIdx, lngLat.lng, lngLat.lat);
+          }
         }
       }
     };
@@ -1760,6 +1865,14 @@ function WebMapView({
       canvas.removeEventListener('mouseleave', cancelDrag);
     });
 
+    // ── Register vertex click handler for selection toggle ────────────
+    try {
+      if (map.getLayer(vertDragLayerId)) {
+        map.on('click', vertDragLayerId, onVertexClick);
+        cleanupFns.push(() => { try { map.off('click', vertDragLayerId, onVertexClick); } catch {} });
+      }
+    } catch {}
+
     const onVertexDragStart = (e: any) => {
       e.preventDefault();
       const feature = e.features?.[0];
@@ -1770,7 +1883,6 @@ function WebMapView({
       const isVertex = props?._is_vertex === true;
       if (!fid || vIdx === undefined || !isVertex) return;
 
-        // Find feature index in vertex marker source
         let featureIndex = -1;
         try {
           const src = map.getSource(vertSourceId) as any;
@@ -1782,7 +1894,7 @@ function WebMapView({
         } catch {}
         if (featureIndex < 0) return;
 
-        // ── Snapshot initial coordinate array for rubber-band decay ──
+        // ── Snapshot initial coordinate array ───────────────────────
         let initialCoords: [number, number][] | undefined;
         try {
           const parentSrc = map.getSource(parentSourceId) as any;
@@ -1797,6 +1909,16 @@ function WebMapView({
             }
           }
         } catch {}
+
+        // ── Capture selected vertex indices for multi-vertex drag ────
+        const currentSelected = selectedVertexIndicesRef.current;
+        let selectedIndices: number[] | undefined;
+        if (currentSelected && currentSelected.size > 0) {
+          // Include the dragged vertex if not already in the set
+          const set = new Set(currentSelected);
+          set.add(vIdx);
+          selectedIndices = Array.from(set).sort((a, b) => a - b);
+        }
 
         isVertexDragRef.current = true;
         map.getCanvas().style.cursor = 'grabbing';
@@ -1813,6 +1935,7 @@ function WebMapView({
           vertexIdx: vIdx,
           parentSourceId,
           initialCoords,
+          selectedIndices,
         };
       };
 
@@ -1828,7 +1951,7 @@ function WebMapView({
     return () => {
       for (const fn of cleanupFns) try { fn(); } catch {}
     };
-  }, [status, vertexDragTarget, onVertexDragEnd]);
+  }, [status, vertexDragTarget, onVertexDragEnd, selectedVertexIndices]);
 
   // ── Fly-to imported center ────────────────────────────────────────────
   useEffect(() => {

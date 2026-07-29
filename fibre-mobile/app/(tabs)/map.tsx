@@ -275,6 +275,12 @@ export default function MapScreen() {
   const [tempLineCoords, setTempLineCoords] = useState<[number, number][] | null>(null);
   const [tempLineOriginal, setTempLineOriginal] = useState<[number, number][] | null>(null);
 
+  // ── Multi-select vertex indices for segment drag ───────────────────────
+  const [selectedVertexIndices, setSelectedVertexIndices] = useState<Set<number>>(new Set());
+  const handleVertexSelectionChange = useCallback((indices: Set<number>) => {
+    setSelectedVertexIndices(indices);
+  }, []);
+
   // ── Add Point state ────────────────────────────────────────────────
   const [addPointTargetLayer, setAddPointTargetLayer] = useState<string>('');
   // addPointLayers is computed below from allPanelLayers
@@ -1402,6 +1408,7 @@ export default function MapScreen() {
     // Clear line selection when exiting edit mode
     setSelectedLineFeature(null);
     setSelectedMapFeatureId(null);
+    setSelectedVertexIndices(new Set());
     console.log('[Edit] Done editing');
   }, []);
 
@@ -1463,6 +1470,7 @@ export default function MapScreen() {
     setLineMoveMode(false);
     setTempLineCoords(null);
     setTempLineOriginal(null);
+    setSelectedVertexIndices(new Set());
   }, []);
 
   // ── Toggle Move Mode for the selected line ────────────────────────────
@@ -1479,6 +1487,7 @@ export default function MapScreen() {
       setLineMoveMode(false);
       setTempLineCoords(null);
       setTempLineOriginal(null);
+      setSelectedVertexIndices(new Set());
       console.log('[MoveMode] Exited — temp changes discarded');
     } else {
       // ── Enter Move Mode — extract HLD coordinates into temp copy ──
@@ -1931,6 +1940,8 @@ export default function MapScreen() {
             onFeatureDragEnd={handleFeatureDragEnd}
             onVertexDragEnd={lineMoveMode && tempLineCoords ? handleVertexDragEnd : undefined}
             vertexDragTarget={memoizedVertexTarget}
+            selectedVertexIndices={selectedVertexIndices}
+            onVertexSelectionChange={handleVertexSelectionChange}
             draggableLayerIds={draggableLayerIds}
             dragMode={dragMode}
             selectedFeatureId={selectedMapFeatureId ?? undefined}
