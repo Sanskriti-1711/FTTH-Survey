@@ -1481,31 +1481,37 @@ export default function MapScreen() {
   const handleDeleteFeature = useCallback(
     (featureId: string, layerId: string) => {
       // Check if a SurveyFeature exists for this feature
-      const existingSurvey = getSurveyFeatureForHld(featureId);
-
-      if (existingSurvey) {
-        // ── Has an HLD original → mark as 'removed' (HLD stays on map in blue) ──
-        pushUndo({
-          featureId,
-          layerId,
-          oldLng: 0,
-          oldLat: 0,
-          newLng: 0,
-          newLat: 0,
-          timestamp: Date.now(),
-          surveyUndo: {
-            surveyFeatureId: existingSurvey.id,
+      const existingSurvey = getSurveyFeatureForHld(featureId);        if (existingSurvey) {
+          // ── Has an HLD original → mark as 'removed' (HLD stays on map in blue) ──
+          pushUndo({
+            featureId,
             layerId,
-            previousGeometry: existingSurvey.survey_geometry,
-            previousAttributes: existingSurvey.survey_attributes,
-            previousStatus: existingSurvey.survey_status,
-            description: `Undo: restore survey feature ${featureId.slice(-8)}`,
-          },
-        });
-        updateSurveyFeature(existingSurvey.id, layerId, {
-          survey_status: 'removed',
-        });
-        console.log(`[Delete] Marked SurveyFeature ${existingSurvey.id.slice(-8)} as 'removed' — HLD untouched`);
+            oldLng: 0,
+            oldLat: 0,
+            newLng: 0,
+            newLat: 0,
+            timestamp: Date.now(),
+            surveyUndo: {
+              surveyFeatureId: existingSurvey.id,
+              layerId,
+              previousGeometry: existingSurvey.survey_geometry,
+              previousAttributes: existingSurvey.survey_attributes,
+              previousStatus: existingSurvey.survey_status,
+              description: `Undo: restore survey feature ${featureId.slice(-8)}`,
+            },
+          });
+          // Update store directly so the map re-renders immediately (bypass API).
+          const store = useSurveyFeaturesStore.getState();
+          const currentLayer = store.surveyFeatures[layerId] ?? [];
+          useSurveyFeaturesStore.setState({
+            surveyFeatures: {
+              ...store.surveyFeatures,
+              [layerId]: currentLayer.map((sf) =>
+                sf.id === existingSurvey.id ? { ...sf, survey_status: 'removed' as const } : sf
+              ),
+            },
+          });
+          console.log(`[Delete] SurveyFeature ${existingSurvey.id.slice(-8)} marked 'removed' — HLD untouched`);
       } else {
         // ── No existing SurveyFeature. This is a pure HLD point being deleted.
         // Create a new SurveyFeature with status 'removed' (Logical Delete).
@@ -1527,7 +1533,17 @@ export default function MapScreen() {
               description: `Undo: restore survey feature ${directSf.id.slice(-8)}`,
             },
           });
-          updateSurveyFeature(directSf.id, baseLid, { survey_status: 'removed' });
+          // Update store DIRECTLY so the map re-renders immediately (bypass API).
+          const store = useSurveyFeaturesStore.getState();
+          const current = store.surveyFeatures[baseLid] ?? [];
+          useSurveyFeaturesStore.setState({
+            surveyFeatures: {
+              ...store.surveyFeatures,
+              [baseLid]: current.map((sf) =>
+                sf.id === directSf.id ? { ...sf, survey_status: 'removed' as const } : sf
+              ),
+            },
+          });
           console.log(`[Delete] Marked survey feature ${directSf.id.slice(-8)} as 'removed'`);
           return;
         }
