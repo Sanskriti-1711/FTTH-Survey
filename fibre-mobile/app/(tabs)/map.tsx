@@ -2289,6 +2289,7 @@ export default function MapScreen() {
               deleteSectionMode={lineToolMode === 'delete-section'}
               deleteSectionStep={deleteSectionRange ? (deleteSectionRange[0] === deleteSectionRange[1] ? 1 : 2) : 0}
               onDeleteConfirm={deleteSectionRange && deleteSectionRange[0] !== deleteSectionRange[1] ? handleDeleteSectionConfirm : undefined}
+              onDeleteFeature={handleLineDelete}
             />
           )}
 
