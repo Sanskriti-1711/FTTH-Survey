@@ -41,6 +41,14 @@ interface LineSelectionToolbarProps {
   onToggleMove?: () => void;
   /** Called when user taps the Save button */
   onSave?: () => void;
+  /** Called when user taps the Delete Section button */
+  onDeleteSection?: () => void;
+  /** Whether delete-section mode is active */
+  deleteSectionMode?: boolean;
+  /** Current step: 0=none, 1=start selected, 2=both selected */
+  deleteSectionStep?: number;
+  /** Called when user confirms (both vertices selected + re-taps button) */
+  onDeleteConfirm?: () => void;
   /** Whether there are unsaved geometry changes in Move Mode */
   hasUnsavedChanges?: boolean;
 }
@@ -61,7 +69,7 @@ const ACTIONS: ActionDef[] = [
   { id: 'move', label: 'Move', icon: '↔️', enabled: true },
   { id: 'split', label: 'Split', icon: '✂️' },
   { id: 'draw_alt', label: 'Draw Alt', icon: '📐' },
-  { id: 'del_section', label: 'Del Section', icon: '🪓', danger: true },
+  { id: 'del_section', label: 'Del Section', icon: '🪓', danger: true, enabled: true },
   { id: 'change_type', label: 'Change Type', icon: '🔄' },
   { id: 'del_feature', label: 'Delete', icon: '🗑️', danger: true },
   { id: 'continue', label: 'Continue', icon: '▶️', accent: true },
@@ -79,6 +87,10 @@ export default function LineSelectionToolbar({
   moveMode = false,
   onToggleMove,
   onSave,
+  onDeleteSection,
+  deleteSectionMode = false,
+  deleteSectionStep = 0,
+  onDeleteConfirm,
   hasUnsavedChanges = false,
 }: LineSelectionToolbarProps) {
   const colors = useThemeStore((s) => s.colors);
@@ -128,6 +140,7 @@ export default function LineSelectionToolbar({
             <Text style={[styles.headerSubtitle, { color: colors.textTertiary }]} numberOfLines={1}>
               {selectedFeature?.layerName ?? 'Line Layer'} · LineString
               {moveMode && ' · Move Mode'}
+              {deleteSectionMode && ` · Del Section ${deleteSectionStep === 0 ? '' : deleteSectionStep === 1 ? '(select end)' : '(confirm)'}`}
               {moveMode && hasUnsavedChanges && ' · Unsaved'}
             </Text>
           </View>
@@ -152,12 +165,14 @@ export default function LineSelectionToolbar({
           const isUndo = action.id === 'undo';
           const isMove = action.id === 'move';
           const isSave = action.id === 'save';
+          const isDeleteSection = action.id === 'del_section';
           const showBadge = isUndo && undoCount > 0;
 
           // ── Determine button state ──
           const isEnabled = action.enabled === true;
           const isMoveActive = isMove && moveMode;
           const isSaveActive = isSave && hasUnsavedChanges;
+          const isDeleteActive = isDeleteSection && deleteSectionMode;
 
           // Style overrides for active states
           let bgColor = colors.background;
@@ -169,7 +184,7 @@ export default function LineSelectionToolbar({
           if (isEnabled) {
             opacity = 1;
             textColor = colors.textSecondary;
-            if (isMoveActive) {
+            if (isMoveActive || isDeleteActive) {
               bgColor = '#FF8C00' + '20';
               borderColor = '#FF8C00';
               textColor = '#FF8C00';
@@ -197,8 +212,10 @@ export default function LineSelectionToolbar({
                 disabled={!isEnabled || (isSave && !hasUnsavedChanges)}
                 activeOpacity={0.7}
                 onPress={() => {
-                  if (isMove && onToggleMove) onToggleMove();
+                  if (isDeleteSection && deleteSectionStep === 2 && onDeleteConfirm) onDeleteConfirm();
+                  else if (isMove && onToggleMove) onToggleMove();
                   else if (isSave && onSave) onSave();
+                  else if (isDeleteSection && onDeleteSection) onDeleteSection();
                   else if (isUndo && onUndo) onUndo();
                 }}
               >
@@ -207,7 +224,7 @@ export default function LineSelectionToolbar({
                   style={[styles.actionLabel, { color: textColor }]}
                   numberOfLines={1}
                 >
-                  {isMove && moveMode ? 'Move: ON' : action.label}
+                  {isMove && moveMode ? 'Move: ON' : isDeleteSection && deleteSectionMode ? (deleteSectionStep === 2 ? 'Confirm' : 'Del: ON') : action.label}
                 </Text>
               </TouchableOpacity>
 
@@ -220,6 +237,11 @@ export default function LineSelectionToolbar({
                 </View>
               )}
 
+              {isEnabled && isDeleteSection && (
+                <Text style={[styles.soonLabel, { color: deleteSectionMode ? '#FF8C00' : colors.textTertiary }]}>
+                  {deleteSectionMode ? (deleteSectionStep === 1 ? 'Tap end' : deleteSectionStep === 2 ? 'Confirm' : 'Ready') : 'Tap to start'}
+                </Text>
+              )}
               {/* "Soon" label for placeholder buttons only */}
               {!isEnabled && (
                 <Text style={[styles.soonLabel, { color: colors.textTertiary }]}>
@@ -246,6 +268,10 @@ export default function LineSelectionToolbar({
       <Text style={[styles.hintText, { color: colors.textTertiary }]}>
         {moveMode
           ? 'Drag vertex handles to adjust the line · Tap Save to persist · Tap Move again to cancel'
+          : deleteSectionMode
+            ? deleteSectionStep === 0 ? 'Tap the line near a vertex to select start point'
+            : deleteSectionStep === 1 ? 'Tap the line near another vertex to select end point'
+            : 'Tap Confirm to remove the section, or ✕ to cancel'
           : 'Tap empty area or ✕ to deselect'}
       </Text>
     </Animated.View>

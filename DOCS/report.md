@@ -1,7 +1,7 @@
 # Fiber360 Mobile – Full Functional Code Scan & Architecture Report
 
 > **Generated:** July 24, 2026  
-> **Last Updated:** July 28, 2026 — Phases 1-3: HLD/Survey Separation + Contextual Editing + Enhanced SurveyForm  
+> **Last Updated:** July 30, 2026 — Phases 1-3 + Move Mode + Delete Section
 > **Scope:** Complete audit of `fibre-mobile/` — the React Native (Expo) field-survey frontend  
 > **Stack:** React Native 0.86 / Expo SDK 57 / TypeScript 6.0 / Zustand 5 / MapLibre GL
 
@@ -21,6 +21,8 @@
 - Push survey data and photos back to the backend synchronously
 - **Edit features contextually** — tap a feature → popup → Edit → contextual toolbar with only relevant tools
 - **Add new points** with a dedicated FAB → fill in all survey fields in a comprehensive form
+- **Move line vertices** — select a line, enter Move Mode, drag individual vertex handles, save as survey edit
+- **Delete line sections** — select start/end vertices on a line, remove the section between them, remaining geometry saved as survey feature
 - **Separate HLD from Survey edits** — original HLD features (blue, read-only) are never modified; engineer edits create separate Survey Features (orange, editable) that reference the original
 
 The app ships with a **demo mode** that provides full functionality without a backend.
@@ -138,9 +140,11 @@ The most feature-rich screen. Has two views: **List** and **Detail**.
 | **Basemap Switcher** | FAB opens panel with 3 presets: Streets (OpenFreeMap), Satellite (ESRI), Light (MapLibre demo) |
 | **Layer Panel** | FAB opens list of all layers with visibility toggles (eye/eye-off) |
 | **Feature Interaction** | Tap feature on map → popup with name, layer, status, "Open Details" + **Edit** button |
-| **Contextual Editing** | Tap Edit → contextual toolbar appears showing only tools relevant to the feature's geometry type (Point: Drag+Delete+Done; Line: Delete+placeholder; Polygon: Delete+placeholder). Tap Done to exit editing. |
+| **Contextual Editing** | Tap Edit → contextual toolbar appears showing only tools relevant to the feature's geometry type (Point: Drag+Delete+Done; **Line: Move+Save+Del Section+placeholder**; Polygon: Delete+placeholder). Tap Done to exit editing. |
 | **Add Point FAB** | Dedicated 📍 FAB toggles Add Point mode → tap map to create new point → SurveyForm slides up with all editable fields |
 | **Undo FAB** | Always visible ↩️ button with count badge — undo any survey edit (drag, vertex move, property change, point creation) |
+| **Line Move Mode** | Select a line → toolbar → **Move** button → vertex handles appear on the line → drag individual vertices → orange preview line updates in real-time → **Save** persists via `upsertSurveyFeature`/`updateSurveyFeature` as a `modified` survey edit. Undo supported via `pushUndo` with `surveyUndo` entries. Works on ALL LineString layers: trenches, ducts, cables, feeder_trench, distribution_trench, garden_trench, final_trenches, feeder_ducts, distribution_ducts, feeder_cable, distribution_cable (and all `imp-` prefixed imported variants). **HLD geometry is never touched.** |
+| **Delete Section** | Select a line → toolbar → **Del Section** button (🪓) → tap the line near a vertex (clicks snap to nearest vertex within ~50m threshold) → tap near a second vertex → **Confirm** button appears → removes the section between the two vertices → remaining geometry saved as a survey feature via `upsertSurveyFeature`/`updateSurveyFeature`. Uses click-to-snap approach on the existing feature click handler — **no MapLibreMap changes**, avoiding map breakage. Step indicator in toolbar ("select end" → "confirm"). Confirm button label changes to "Confirm" at step 2. HLD unchanged. Clean exit via ✕ or empty area click. |
 | **Display Mode Toggle FAB** | Cycles 🔵 (HLD only) → 🟠 (Survey only) → 🔀 (Overlay both) |
 | **List View** | Filter chips + FlatList of features with status badges, geometry type badges, key measurements, "Open Feature" button |
 | **Imported Data Merge** | Merges demo data + imported GeoJSON features (prefixed with `imp-`) with distinct colors (red/orange/pink/teal) |
@@ -512,6 +516,17 @@ Reusable component with all survey editing modules (trench, risk, hazard, eviden
 ### LayerEditor — `lib/components/LayerEditor.tsx`
 Layer schema viewer showing read-only and editable fields for a selected layer, with field type rendering (text, number, select, boolean, textarea).
 
+### LineSelectionToolbar — `lib/components/LineSelectionToolbar.tsx` *(Updated — July 2026)*
+Bottom toolbar that appears when a line feature is selected on the map:
+- **Active actions:** Move (toggles vertex drag mode with orange preview line), **Del Section** (enabled — enters vertex selection mode for section removal), Save (persists temporary geometry to survey-features store)
+- **Placeholder actions:** Split, Draw Alt, Change Type, Delete Feature, Continue (disabled, labeled "Soon")
+- **Undo** button with count badge
+- Orange highlight border when Move Mode or Delete Section mode is active
+- Delete Section step indicator: 0=ready, 1=select end, 2=confirm (re-pressing button at step 2 confirms deletion)
+- Hint text changes per active mode: Move hints for dragging, Del Section hints for vertex tap selection
+- Animated slide-up entrance with spring easing
+- Header shows feature name, layer name, geometry type, active mode indicator
+
 ### MapLegend — `lib/components/MapLegend.tsx`
 Map legend overlay showing layer colors, names, and feature counts.
 
@@ -621,7 +636,7 @@ Defines 35+ TypeScript interfaces for all API responses, store data, and survey 
 | `(tabs)/home.tsx` | ~290 | Dashboard |
 | `(tabs)/survey/_layout.tsx` | 10 | Survey stack layout |
 | `(tabs)/survey/index.tsx` | ~780 | Survey editor (largest screen) |
-| `(tabs)/map.tsx` | ~1700 | Map + list view + contextual editing + FABs + SurveyForm |
+| `(tabs)/map.tsx` | ~2350 | Map + list view + Move Mode + Delete Section + contextual editing + FABs + SurveyForm |
 | `(tabs)/camera.tsx` | ~230 | Photo capture |
 | `(tabs)/gps.tsx` | ~290 | GPS tracker |
 | `(tabs)/offline.tsx` | ~230 | Offline management |
@@ -707,7 +722,7 @@ Defines 35+ TypeScript interfaces for all API responses, store data, and survey 
 | **Gallery Truncated** | `gallery.tsx` and `gallery/[featureId].tsx` have truncated implementations |
 | **Export Screen** | `export.tsx` is partially implemented |
 | **TypeScript Strictness** | Several `as any` casts and `as unknown` type assertions throughout |
-| **Editing Not Yet Wired to Survey Store** | Drag/add-point/SurveyForm saves currently mutate HLD GeoJSON directly; routing through `useSurveyFeaturesStore.upsertSurveyFeature()` is planned for the next phase |
+| **Delete Section — not split-aware** | Deleting a middle section creates ONE survey feature with remaining vertices, which connects the two disconnected segments with a straight line. The requirement says disconnected segments should become independent Survey Features.
 
 ---
 
@@ -819,7 +834,7 @@ All endpoints verified with authenticated requests:
 
 ---
 
-## 14. Git Commit History (Phases 1-3)
+## 14. Git Commit History (Phases 1-3 + Recent)
 
 | Phase | Repo | Commit | Description |
 |-------|------|--------|-------------|
@@ -827,6 +842,8 @@ All endpoints verified with authenticated requests:
 | Phase 2 | `FTTH-Survey` | `3599011` | Frontend HLD/Survey store + dual-layer rendering |
 | Phase 3 | `FTTH-Survey` | `57ce26c` | Enhanced SurveyForm with hazard + field info sections |
 | Pre-Phase | `FTTH-Survey` | `03ceacb` | Contextual editing toolbar + NewPointForm + Undo/Add Point FABs |
+| Move Mode | `FTTH-Survey` | `c345013` | Move Mode with vertex drag + orange preview layer + save/undo via SurveyFeatures store |
+| Delete Section | `FTTH-Survey` | _(uncommitted)_ | Delete Section: click-to-snap vertex selection + section removal + survey feature creation. No MapLibreMap changes.
 
 ---
 
