@@ -276,11 +276,23 @@ export default function MapScreen() {
   const [tempLineOriginal, setTempLineOriginal] = useState<[number, number][] | null>(null);
 
   // ── Delete Section state ──────────────────────────────────────────────
-  const [lineToolMode, setLineToolMode] = useState<'delete-section' | 'continue-line' | null>(null);
+  const [lineToolMode, setLineToolMode] = useState<'delete-section' | 'continue-line' | 'draw-alternative' | 'reroute-segment' | null>(null);
   const [deleteSectionRange, setDeleteSectionRange] = useState<[number, number] | null>(null);
 
   // ── Continue Line state ──────────────────────────────────────────────
   const [continueLineAnchor, setContinueLineAnchor] = useState<number | null>(null);
+
+  // ── Draw Alternative state ──────────────────────────────────────────
+  // drawAltRange: [startIdx, endIdx] — the two vertices on the original line
+  // drawAltPoints: the new path being drawn between them
+  const [drawAltRange, setDrawAltRange] = useState<[number, number] | null>(null);
+  const [drawAltPoints, setDrawAltPoints] = useState<[number, number][] | null>(null);
+
+  // ── Reroute Segment state ────────────────────────────────────────────
+  // rerouteRange: [startIdx, endIdx] — the segment to replace
+  // reroutePoints: the new replacement path
+  const [rerouteRange, setRerouteRange] = useState<[number, number] | null>(null);
+  const [reroutePoints, setReroutePoints] = useState<[number, number][] | null>(null);
 
   // ── Add Point state ────────────────────────────────────────────────
   const [addPointTargetLayer, setAddPointTargetLayer] = useState<string>('');
@@ -872,11 +884,56 @@ export default function MapScreen() {
         visible: true,
         color: SURVEY_COLOR, // Orange
         geometryType: 'LineString' as const,
+      });      }
+
+    // ── Draw Alternative preview (orange dashes for the drawn path) ──
+    if (lineToolMode === 'draw-alternative' && drawAltPoints && drawAltPoints.length > 0 && selectedLineFeature && tempLineOriginal) {
+      const [startIdx, endIdx] = drawAltRange
+        ? [Math.min(drawAltRange[0], drawAltRange[1]), Math.max(drawAltRange[0], drawAltRange[1])]
+        : [0, 0];
+      const previewCoords: [number, number][] = [
+        tempLineOriginal[startIdx],
+        ...drawAltPoints,
+        tempLineOriginal[endIdx],
+      ];
+      previewLayers.push({
+        id: `draw-alt-preview-${selectedLineFeature.layerId}`,
+        name: `Draw Alt: ${activeLayerNames[selectedLineFeature.layerId] ?? selectedLineFeature.layerId.toUpperCase()}`,
+        features: [{
+          type: 'Feature' as const,
+          geometry: { type: 'LineString', coordinates: previewCoords },
+          properties: { id: `draw-alt-${selectedLineFeature.id}`, _id: `draw-alt-${selectedLineFeature.id}`, _is_preview: true },
+        }],
+        visible: true,
+        color: SURVEY_COLOR,
+        geometryType: 'LineString' as const,
+      });
+    }
+
+    // ── Reroute Segment preview (orange dashes for the replacement path) ──
+    if (lineToolMode === 'reroute-segment' && reroutePoints && reroutePoints.length > 0 && selectedLineFeature && tempLineOriginal) {
+      const [startIdx, endIdx] = rerouteRange
+        ? [Math.min(rerouteRange[0], rerouteRange[1]), Math.max(rerouteRange[0], rerouteRange[1])]
+        : [0, 0];
+      const before = tempLineOriginal.slice(0, startIdx + 1);  // keep startIdx as connection point
+      const after = tempLineOriginal.slice(endIdx);             // keep endIdx as connection point
+      const previewCoords: [number, number][] = [...before, ...reroutePoints, ...after];
+      previewLayers.push({
+        id: `reroute-preview-${selectedLineFeature.layerId}`,
+        name: `Reroute: ${activeLayerNames[selectedLineFeature.layerId] ?? selectedLineFeature.layerId.toUpperCase()}`,
+        features: [{
+          type: 'Feature' as const,
+          geometry: { type: 'LineString', coordinates: previewCoords },
+          properties: { id: `reroute-${selectedLineFeature.id}`, _id: `reroute-${selectedLineFeature.id}`, _is_preview: true },
+        }],
+        visible: true,
+        color: SURVEY_COLOR,
+        geometryType: 'LineString' as const,
       });
     }
 
     return [...hldLayers, ...previewLayers, ...surveyLayers];
-  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, demoFeatureIdMap, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, tempLineCoords, selectedLineFeature]);
+  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, demoFeatureIdMap, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, tempLineCoords, selectedLineFeature, lineToolMode, drawAltRange, drawAltPoints, rerouteRange, reroutePoints, tempLineOriginal]);
 
   // Build visible layers: when a real project is active, show ONLY imported layers
   const visibleLayers = useMemo(() => {
@@ -1617,6 +1674,14 @@ export default function MapScreen() {
     setLineMoveMode(false);
     setTempLineCoords(null);
     setTempLineOriginal(null);
+    // Clear all tool modes
+    setLineToolMode(null);
+    setDeleteSectionRange(null);
+    setContinueLineAnchor(null);
+    setDrawAltRange(null);
+    setDrawAltPoints(null);
+    setRerouteRange(null);
+    setReroutePoints(null);
   }, []);
 
   // ── Toggle Move Mode for the selected line ────────────────────────────
@@ -1693,22 +1758,127 @@ export default function MapScreen() {
     if (!selectedLineFeature || !tempLineCoords || !tempLineOriginal) return;
 
     const { id: featureId, layerId, layerName } = selectedLineFeature;
-    const surveyGeometry = { type: 'LineString', coordinates: tempLineCoords };
 
-    // Check if a SurveyFeature already exists for this HLD feature
+    // ── DRAW ALTERNATIVE: create a new SurveyFeature with the alternative path ──
+    if (lineToolMode === 'draw-alternative' && drawAltRange && drawAltPoints && drawAltPoints.length > 0) {
+      const [startIdx, endIdx] = [Math.min(drawAltRange[0], drawAltRange[1]), Math.max(drawAltRange[0], drawAltRange[1])];
+      // Build the alternative geometry: start vertex → drawn path → end vertex
+      const altCoords: [number, number][] = [
+        tempLineOriginal[startIdx],
+        ...drawAltPoints,
+        tempLineOriginal[endIdx],
+      ];
+      const altGeom = { type: 'LineString', coordinates: altCoords } as Record<string, unknown>;
+      // Create a new SurveyFeature with null hldFeatureId (engineer-created alternative)
+      upsertSurveyFeature(
+        null, layerId, `Alternative: ${layerName}`,
+        altGeom, {},
+        null, null,
+        `Draw Alternative from vertex ${startIdx} to ${endIdx}`,
+      ).then((sf) => {
+        if (sf) {
+          pushUndo({
+            featureId, layerId,
+            oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+            timestamp: Date.now(),
+            surveyUndo: {
+              surveyFeatureId: sf.id, layerId,
+              previousGeometry: altGeom,
+              previousAttributes: {},
+              previousStatus: 'new',
+              description: `Undo: remove alternative for ${featureId.slice(-8)}`,
+            },
+          });
+          console.log(`[DrawAlt] Created alternative SurveyFeature ${sf.id.slice(-8)}`);
+        }
+      });
+      // Clear state
+      setLineToolMode(null);
+      setDrawAltRange(null);
+      setDrawAltPoints(null);
+      setTempLineCoords(null);
+      setTempLineOriginal(null);
+      setLineMoveMode(false);
+      return;
+    }
+
+    // ── REROUTE SEGMENT: splice the replacement path into the existing geometry ──
+    if (lineToolMode === 'reroute-segment' && rerouteRange && reroutePoints && reroutePoints.length > 0) {
+      const [startIdx, endIdx] = [Math.min(rerouteRange[0], rerouteRange[1]), Math.max(rerouteRange[0], rerouteRange[1])];
+      // Replace segment between startIdx and endIdx with the reroutePoints
+      const before = tempLineOriginal.slice(0, startIdx + 1); // keep startIdx as connection point
+      const after = tempLineOriginal.slice(endIdx);            // keep endIdx as connection point
+      const splicedCoords: [number, number][] = [...before, ...reroutePoints, ...after];
+      const splicedGeom = { type: 'LineString', coordinates: splicedCoords } as Record<string, unknown>;
+
+      const existingSurvey = getSurveyFeatureForHld(featureId);
+      const { attributes: origAttrs } = findHldFeatureOriginal(featureId, layerId);
+
+      if (existingSurvey) {
+        pushUndo({
+          featureId, layerId,
+          oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+          timestamp: Date.now(),
+          surveyUndo: {
+            surveyFeatureId: existingSurvey.id, layerId,
+            previousGeometry: existingSurvey.survey_geometry,
+            previousAttributes: existingSurvey.survey_attributes,
+            previousStatus: existingSurvey.survey_status,
+            description: `Undo reroute segment for ${featureId.slice(-8)}`,
+          },
+        });
+        updateSurveyFeature(existingSurvey.id, layerId, {
+          survey_geometry: splicedGeom,
+          survey_status: 'modified',
+        });
+        console.log(`[Reroute] Updated SurveyFeature ${existingSurvey.id.slice(-8)} with spliced geometry`);
+      } else {
+        // No existing survey feature — create one
+        const { geometry: origGeom } = findHldFeatureOriginal(featureId, layerId);
+        upsertSurveyFeature(
+          featureId, layerId, layerName,
+          splicedGeom,
+          origAttrs ?? {},
+          origGeom, origAttrs,
+          `Rerouted segment (vertices ${startIdx}–${endIdx})`,
+        ).then((sf) => {
+          if (sf) {
+            pushUndo({
+              featureId, layerId,
+              oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+              timestamp: Date.now(),
+              surveyUndo: {
+                surveyFeatureId: sf.id, layerId,
+                previousGeometry: { type: 'LineString', coordinates: tempLineOriginal } as Record<string, unknown>,
+                previousAttributes: origAttrs as Record<string, unknown> ?? {},
+                previousStatus: 'new',
+                description: `Undo reroute for ${featureId.slice(-8)}`,
+              },
+            });
+          }
+        });
+      }
+
+      setLineToolMode(null);
+      setRerouteRange(null);
+      setReroutePoints(null);
+      setTempLineCoords(null);
+      setTempLineOriginal(null);
+      setLineMoveMode(false);
+      return;
+    }
+
+    // ── Default: save line move changes ──
+    const surveyGeometry = { type: 'LineString', coordinates: tempLineCoords };
     const existingSurvey = getSurveyFeatureForHld(featureId);
     const { geometry: origGeom, attributes: origAttrs } = findHldFeatureOriginal(featureId, layerId);
 
     if (existingSurvey) {
-      // Update existing survey feature
       pushUndo({
-        featureId,
-        layerId,
-        oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+        featureId, layerId, oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
         timestamp: Date.now(),
         surveyUndo: {
-          surveyFeatureId: existingSurvey.id,
-          layerId,
+          surveyFeatureId: existingSurvey.id, layerId,
           previousGeometry: existingSurvey.survey_geometry,
           previousAttributes: existingSurvey.survey_attributes,
           previousStatus: existingSurvey.survey_status,
@@ -1720,7 +1890,6 @@ export default function MapScreen() {
         survey_status: 'modified',
       });
     } else {
-      // Create new survey feature
       upsertSurveyFeature(
         featureId, layerId, layerName,
         surveyGeometry,
@@ -1730,8 +1899,7 @@ export default function MapScreen() {
       ).then((sf) => {
         if (sf) {
           pushUndo({
-            featureId, layerId,
-            oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+            featureId, layerId, oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
             timestamp: Date.now(),
             surveyUndo: {
               surveyFeatureId: sf.id, layerId,
@@ -1745,12 +1913,11 @@ export default function MapScreen() {
       });
     }
 
-    // Clear temp state + exit move mode
     setTempLineCoords(null);
     setTempLineOriginal(null);
     setLineMoveMode(false);
     console.log(`[MoveMode] Saved line geometry for ${featureId.slice(-8)} — SurveyFeature ${existingSurvey ? 'updated' : 'created'}`);
-  }, [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature]);
+  }, [selectedLineFeature, tempLineCoords, tempLineOriginal, lineToolMode, drawAltRange, drawAltPoints, rerouteRange, reroutePoints, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature]);
 
   // ── Delete Section handlers ────────────────────────────────────────────
 
@@ -1818,6 +1985,78 @@ export default function MapScreen() {
     setLineMoveMode(true);
     setLineToolMode('continue-line');
     setContinueLineAnchor(null);
+    autoOverlayOnEdit();
+  }, [selectedLineFeature, lineToolMode, hasImportedData, importFeatureIdMap, demoFeatureIdMap, autoOverlayOnEdit]);
+
+  // ── Toggle Draw Alternative mode ────────────────────────────────────────
+  // On activate: extract HLD coordinates, enter draw-alt mode, show vertex markers.
+  // On deactivate: clear all draw-alt temp state.
+  const handleDrawAltToggle = useCallback(() => {
+    if (!selectedLineFeature) return;
+    if (lineToolMode === 'draw-alternative') {
+      setLineMoveMode(false);
+      setLineToolMode(null);
+      setDrawAltRange(null);
+      setDrawAltPoints(null);
+      setTempLineCoords(null);
+      setTempLineOriginal(null);
+      return;
+    }
+    const { id: featureId, layerId } = selectedLineFeature;
+    const features = activeGeojsonRef.current[layerId];
+    if (!features) return;
+    let hldFeature = features.find((f) => {
+      const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
+      return fid === featureId;
+    });
+    if (!hldFeature) {
+      const idMap = (hasImportedData ? importFeatureIdMap : demoFeatureIdMap)?.[layerId];
+      if (idMap) { const idx = idMap.indexOf(featureId); if (idx >= 0 && idx < features.length) hldFeature = features[idx]; }
+    }
+    if (!hldFeature?.geometry || hldFeature.geometry.type !== 'LineString') return;
+    const coords = (hldFeature.geometry.coordinates as [number, number][]).map(([lng, lat]) => [lng, lat] as [number, number]);
+    setTempLineCoords(coords);
+    setTempLineOriginal(coords.map(([lng, lat]) => [lng, lat] as [number, number]));
+    setLineMoveMode(true);
+    setLineToolMode('draw-alternative');
+    setDrawAltRange(null);
+    setDrawAltPoints([]);
+    autoOverlayOnEdit();
+  }, [selectedLineFeature, lineToolMode, hasImportedData, importFeatureIdMap, demoFeatureIdMap, autoOverlayOnEdit]);
+
+  // ── Toggle Reroute Segment mode ─────────────────────────────────────────
+  // On activate: extract HLD coordinates, enter reroute mode, show vertex markers.
+  // On deactivate: clear all reroute temp state.
+  const handleRerouteToggle = useCallback(() => {
+    if (!selectedLineFeature) return;
+    if (lineToolMode === 'reroute-segment') {
+      setLineMoveMode(false);
+      setLineToolMode(null);
+      setRerouteRange(null);
+      setReroutePoints(null);
+      setTempLineCoords(null);
+      setTempLineOriginal(null);
+      return;
+    }
+    const { id: featureId, layerId } = selectedLineFeature;
+    const features = activeGeojsonRef.current[layerId];
+    if (!features) return;
+    let hldFeature = features.find((f) => {
+      const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
+      return fid === featureId;
+    });
+    if (!hldFeature) {
+      const idMap = (hasImportedData ? importFeatureIdMap : demoFeatureIdMap)?.[layerId];
+      if (idMap) { const idx = idMap.indexOf(featureId); if (idx >= 0 && idx < features.length) hldFeature = features[idx]; }
+    }
+    if (!hldFeature?.geometry || hldFeature.geometry.type !== 'LineString') return;
+    const coords = (hldFeature.geometry.coordinates as [number, number][]).map(([lng, lat]) => [lng, lat] as [number, number]);
+    setTempLineCoords(coords);
+    setTempLineOriginal(coords.map(([lng, lat]) => [lng, lat] as [number, number]));
+    setLineMoveMode(true);
+    setLineToolMode('reroute-segment');
+    setRerouteRange(null);
+    setReroutePoints([]);
     autoOverlayOnEdit();
   }, [selectedLineFeature, lineToolMode, hasImportedData, importFeatureIdMap, demoFeatureIdMap, autoOverlayOnEdit]);
 
@@ -2307,6 +2546,80 @@ export default function MapScreen() {
                   return;
                 }
               }
+
+              // ── Draw Alternative: intercept for vertex selection + path drawing ──
+              if (lineToolMode === 'draw-alternative' && selectedLineFeature && tempLineCoords) {
+                const expectedPreview = `temp-preview-${selectedLineFeature.layerId}`;
+                const isOnLine = layerId === expectedPreview ||
+                  (featureId === selectedLineFeature.id && layerId === selectedLineFeature.layerId);
+
+                if (!drawAltRange || drawAltRange[0] === drawAltRange[1]) {
+                  // ── Step 1: Select start and end vertices on the line ──
+                  if (isOnLine) {
+                    let bestIdx = 0; let bestDist = Infinity;
+                    tempLineCoords.forEach(([vlng, vlat], i) => {
+                      const d = (lngLat[0] - vlng) ** 2 + (lngLat[1] - vlat) ** 2;
+                      if (d < bestDist) { bestDist = d; bestIdx = i; }
+                    });
+                    if (bestDist <= 0.00045 ** 2) {
+                      if (!drawAltRange) {
+                        setDrawAltRange([bestIdx, bestIdx]);
+                        console.log(`[DrawAlt] Start vertex set at index ${bestIdx}`);
+                      } else if (drawAltRange[0] !== bestIdx) {
+                        setDrawAltRange([drawAltRange[0], bestIdx]);
+                        console.log(`[DrawAlt] End vertex set at index ${bestIdx} — now draw the alternative path`);
+                      }
+                    }
+                    return;
+                  }
+                } else {
+                  // ── Step 2: After start/end selected, tap on map to add points to the alternative path ──
+                  // Only intercept clicks on non-line features (point, empty area tapped through onFeatureClick)
+                  if (!isOnLine) {
+                    const [ptLng, ptLat] = lngLat;
+                    setDrawAltPoints((prev) => [...(prev ?? []), [ptLng, ptLat]]);
+                    console.log(`[DrawAlt] Added point ${(drawAltPoints?.length ?? 0) + 1} at [${ptLng.toFixed(6)}, ${ptLat.toFixed(6)}]`);
+                    return;
+                  }
+                }
+              }
+
+              // ── Reroute Segment: intercept for vertex selection + drawing replacement ──
+              if (lineToolMode === 'reroute-segment' && selectedLineFeature && tempLineCoords) {
+                const expectedPreview = `temp-preview-${selectedLineFeature.layerId}`;
+                const isOnLine = layerId === expectedPreview ||
+                  (featureId === selectedLineFeature.id && layerId === selectedLineFeature.layerId);
+
+                if (!rerouteRange || rerouteRange[0] === rerouteRange[1]) {
+                  // ── Step 1: Select start and end vertices on the line ──
+                  if (isOnLine) {
+                    let bestIdx = 0; let bestDist = Infinity;
+                    tempLineCoords.forEach(([vlng, vlat], i) => {
+                      const d = (lngLat[0] - vlng) ** 2 + (lngLat[1] - vlat) ** 2;
+                      if (d < bestDist) { bestDist = d; bestIdx = i; }
+                    });
+                    if (bestDist <= 0.00045 ** 2) {
+                      if (!rerouteRange) {
+                        setRerouteRange([bestIdx, bestIdx]);
+                        console.log(`[Reroute] Start vertex set at index ${bestIdx}`);
+                      } else if (rerouteRange[0] !== bestIdx) {
+                        setRerouteRange([rerouteRange[0], bestIdx]);
+                        console.log(`[Reroute] End vertex set at index ${bestIdx} — now draw the replacement path`);
+                      }
+                    }
+                    return;
+                  }
+                } else {
+                  // ── Step 2: After start/end selected, tap on map to add replacement points ──
+                  if (!isOnLine) {
+                    const [ptLng, ptLat] = lngLat;
+                    setReroutePoints((prev) => [...(prev ?? []), [ptLng, ptLat]]);
+                    console.log(`[Reroute] Added replacement point ${(reroutePoints?.length ?? 0) + 1} at [${ptLng.toFixed(6)}, ${ptLat.toFixed(6)}]`);
+                    return;
+                  }
+                }
+              }
+
               handleMapFeatureClick(featureId, layerId, lngLat, screenPt);
             }}
             onEmptyAreaClick={handleEmptyMapClick}
@@ -2450,6 +2763,12 @@ export default function MapScreen() {
               continueMode={lineToolMode === 'continue-line'}
               onContinue={handleContinueToggle}
               continueLineStep={continueLineAnchor === null ? 0 : tempLineCoords && tempLineCoords.length > (tempLineOriginal?.length ?? 0) ? 2 : 1}
+              onDrawAlt={handleDrawAltToggle}
+              drawAltMode={lineToolMode === 'draw-alternative'}
+              drawAltStep={drawAltRange && drawAltRange[0] !== drawAltRange[1] ? (drawAltPoints && drawAltPoints.length > 0 ? 3 : 2) : (drawAltRange ? 1 : 0)}
+              onReroute={handleRerouteToggle}
+              rerouteMode={lineToolMode === 'reroute-segment'}
+              rerouteStep={rerouteRange && rerouteRange[0] !== rerouteRange[1] ? (reroutePoints && reroutePoints.length > 0 ? 3 : 2) : (rerouteRange ? 1 : 0)}
             />
           )}
 
