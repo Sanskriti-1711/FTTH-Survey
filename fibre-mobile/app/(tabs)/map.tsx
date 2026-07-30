@@ -810,8 +810,37 @@ export default function MapScreen() {
       });
     }
 
-    return [...hldLayers, ...surveyLayers];
-  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, demoFeatureIdMap, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures]);
+    // ── Temp Move Preview layer (orange) — shown during line move mode ──
+    // Provides an orange preview of the line being edited, independent of
+    // the blue HLD layer. Vertex markers render on this preview layer's
+    // source so they follow tempLineCoords instead of original HLD coords.
+    const previewLayers: any[] = [];
+    if (lineMoveMode && tempLineCoords && selectedLineFeature) {
+      const previewFeature = {
+        type: 'Feature' as const,
+        geometry: {
+          type: 'LineString',
+          coordinates: tempLineCoords,
+        },
+        properties: {
+          id: `temp-preview-${selectedLineFeature.id}`,
+          _id: `temp-preview-${selectedLineFeature.id}`,
+          _layer_id: `temp-preview-${selectedLineFeature.layerId}`,
+          _is_preview: true,
+        },
+      };
+      previewLayers.push({
+        id: `temp-preview-${selectedLineFeature.layerId}`,
+        name: `Preview: ${activeLayerNames[selectedLineFeature.layerId] ?? selectedLineFeature.layerId.toUpperCase()}`,
+        features: [previewFeature],
+        visible: true,
+        color: SURVEY_COLOR, // Orange
+        geometryType: 'LineString' as const,
+      });
+    }
+
+    return [...hldLayers, ...previewLayers, ...surveyLayers];
+  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, demoFeatureIdMap, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, tempLineCoords, selectedLineFeature]);
 
   // Build visible layers: when a real project is active, show ONLY imported layers
   const visibleLayers = useMemo(() => {
@@ -967,6 +996,10 @@ export default function MapScreen() {
   // ── Map feature click handler ───────────────────────────────────────────
   const handleMapFeatureClick = useCallback(
     (featureId: string, layerId: string, lngLat: [number, number], screenPoint?: { x: number; y: number }) => {
+      // Skip temp preview features (shown during line move mode) —
+      // these are for visual feedback only and should not show a popup.
+      if (layerId.startsWith('temp-preview-')) return;
+
       // Store screen position for the pin-anchored popup
       if (screenPoint) {
         setPopupScreenCoords(screenPoint);
@@ -1608,18 +1641,17 @@ export default function MapScreen() {
     return false;
   }, [tempLineCoords, tempLineOriginal]);
 
-  // ── Memoized vertex drag target — points directly at the HLD feature's source on the map.
-  // During vertex drag, MapLibreMap's internal handler updates the parent source
-  // (the HLD layer's GeoJSON source) in real-time, so the line moves as the user drags.
-  // The HLD React state is never mutated — only the in-map source is temporarily updated.
+  // ── Memoized vertex drag target — points at the temp preview layer during move mode.
+  // Vertex markers render on this temp layer so they follow tempLineCoords state.
+  // The HLD layer stays untouched (blue). On Save, a SurveyFeature is created.
   const memoizedVertexTarget = useMemo(() => {
     if (!lineMoveMode || !tempLineCoords || !selectedLineFeature) return null;
     return {
-      featureId: selectedLineFeature.id,
-      layerId: selectedLineFeature.layerId,
+      featureId: `temp-preview-${selectedLineFeature.id}`,
+      layerId: `temp-preview-${selectedLineFeature.layerId}`,
       vertexIdx: -1,
     };
-  }, [lineMoveMode, selectedLineFeature]);
+  }, [lineMoveMode, tempLineCoords, selectedLineFeature]);
 
   // ── Vertex drag handler for Move Mode ──────────────────────────────────
   // Updates the tempLineCoords working copy — does NOT touch HLD or survey store.
