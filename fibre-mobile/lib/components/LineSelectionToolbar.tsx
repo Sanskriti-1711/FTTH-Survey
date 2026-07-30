@@ -59,22 +59,6 @@ interface LineSelectionToolbarProps {
   onContinue?: () => void;
   /** Current step in continue-line: 0=idle, 1=anchor set, 2=connected */
   continueLineStep?: number;
-
-  // ── Draw Alternative props ───────────────────────────────────────────
-  /** Whether Draw Alternative mode is active */
-  drawAltMode?: boolean;
-  /** Called when user taps the Draw Alt button */
-  onDrawAlt?: () => void;
-  /** Current step: 0=select start, 1=select end, 2=drawing path, 3=ready to finish */
-  drawAltStep?: number;
-
-  // ── Reroute Segment props ───────────────────────────────────────────
-  /** Whether Reroute Segment mode is active */
-  rerouteMode?: boolean;
-  /** Called when user taps the Reroute button */
-  onReroute?: () => void;
-  /** Current step: 0=select start, 1=select end, 2=drawing path, 3=ready to finish */
-  rerouteStep?: number;
 }
 
 // ── Action definitions ─────────────────────────────────────────────────────
@@ -91,11 +75,12 @@ interface ActionDef {
 
 const ACTIONS: ActionDef[] = [
   { id: 'move', label: 'Move', icon: '↔️', enabled: true },
-  { id: 'draw_alt', label: 'Draw Alt', icon: '📐', enabled: true },
-  { id: 'reroute', label: 'Reroute', icon: '🔄', enabled: true },
+  { id: 'split', label: 'Split', icon: '✂️' },
+  { id: 'draw_alt', label: 'Draw Alt', icon: '📐' },
   { id: 'del_section', label: 'Del Section', icon: '🪓', danger: true, enabled: true },
-  { id: 'continue', label: 'Continue', icon: '▶️', accent: true, enabled: true },
+  { id: 'change_type', label: 'Change Type', icon: '🔄' },
   { id: 'del_feature', label: 'Delete', icon: '🗑️', danger: true, enabled: true },
+  { id: 'continue', label: 'Continue', icon: '▶️', accent: true, enabled: true },
   { id: 'undo', label: 'Undo', icon: '↩️' },
   { id: 'save', label: 'Save', icon: '💾', accent: true, enabled: true },
 ];
@@ -119,14 +104,6 @@ export default function LineSelectionToolbar({
   continueMode = false,
   onContinue,
   continueLineStep = 0,
-
-  // ── Draw Alternative + Reroute ──
-  drawAltMode = false,
-  onDrawAlt,
-  drawAltStep = 0,
-  rerouteMode = false,
-  onReroute,
-  rerouteStep = 0,
 }: LineSelectionToolbarProps) {
   const colors = useThemeStore((s) => s.colors);
   const slideAnim = useRef(new Animated.Value(0)).current;
@@ -203,8 +180,7 @@ export default function LineSelectionToolbar({
           const isSave = action.id === 'save';
           const isDeleteSection = action.id === 'del_section';
           const isDeleteFeature = action.id === 'del_feature';
-          const isDrawAlt = action.id === 'draw_alt';
-          const isReroute = action.id === 'reroute';
+          const isContinue = action.id === 'continue';
           const showBadge = isUndo && undoCount > 0;
 
           // ── Determine button state ──
@@ -213,8 +189,6 @@ export default function LineSelectionToolbar({
           const isSaveActive = isSave && hasUnsavedChanges;
           const isDeleteActive = isDeleteSection && deleteSectionMode;
           const isContinueActive = isContinue && continueMode;
-          const isDrawAltActive = isDrawAlt && drawAltMode;
-          const isRerouteActive = isReroute && rerouteMode;
 
           // Style overrides for active states
           let bgColor = colors.background;
@@ -226,7 +200,7 @@ export default function LineSelectionToolbar({
           if (isEnabled) {
             opacity = 1;
             textColor = colors.textSecondary;
-            if (isMoveActive || isDeleteActive || isContinueActive || isDrawAltActive || isRerouteActive) {
+            if (isMoveActive || isDeleteActive || isContinueActive) {
               bgColor = '#FF8C00' + '20';
               borderColor = '#FF8C00';
               textColor = '#FF8C00';
@@ -261,8 +235,6 @@ export default function LineSelectionToolbar({
                   else if (isDeleteFeature && onDeleteFeature) onDeleteFeature();
                   else if (isUndo && onUndo) onUndo();
                   else if (isContinue && onContinue) onContinue();
-                  else if (isDrawAlt && onDrawAlt) onDrawAlt();
-                  else if (isReroute && onReroute) onReroute();
                 }}
               >
                 <Text style={styles.actionIcon}>{action.icon}</Text>
@@ -270,7 +242,7 @@ export default function LineSelectionToolbar({
                   style={[styles.actionLabel, { color: textColor }]}
                   numberOfLines={1}
                 >
-                  {isMove && moveMode ? 'Move: ON' : isDeleteSection && deleteSectionMode ? (deleteSectionStep === 2 ? 'Confirm' : 'Del: ON') : isContinue && continueMode ? 'Cont: ON' : isDrawAlt && drawAltMode ? 'Draw: ON' : isReroute && rerouteMode ? 'Route: ON' : action.label}
+                  {isMove && moveMode ? 'Move: ON' : isDeleteSection && deleteSectionMode ? (deleteSectionStep === 2 ? 'Confirm' : 'Del: ON') : isContinue && continueMode ? 'Cont: ON' : action.label}
                 </Text>
               </TouchableOpacity>
 
@@ -291,16 +263,6 @@ export default function LineSelectionToolbar({
               {isEnabled && isContinue && (
                 <Text style={[styles.soonLabel, { color: continueMode ? '#FF8C00' : colors.textTertiary }]}>
                   {continueMode ? (continueLineStep === 0 ? 'Tap vertex' : continueLineStep === 1 ? 'Tap point' : 'Connected') : 'Tap to start'}
-                </Text>
-              )}
-              {isEnabled && isDrawAlt && (
-                <Text style={[styles.soonLabel, { color: drawAltMode ? '#FF8C00' : colors.textTertiary }]}>
-                  {drawAltMode ? (drawAltStep < 2 ? 'Select both ends' : drawAltStep === 2 ? 'Tap points' : 'Finish & Save') : 'Start alternative'}
-                </Text>
-              )}
-              {isEnabled && isReroute && (
-                <Text style={[styles.soonLabel, { color: rerouteMode ? '#FF8C00' : colors.textTertiary }]}>
-                  {rerouteMode ? (rerouteStep < 2 ? 'Select both ends' : rerouteStep === 2 ? 'Draw replacement' : 'Finish & Save') : 'Select to reroute'}
                 </Text>
               )}
               {isEnabled && isDeleteFeature && (
@@ -337,14 +299,6 @@ export default function LineSelectionToolbar({
             ? deleteSectionStep === 0 ? 'Tap the line near a vertex to select start point'
             : deleteSectionStep === 1 ? 'Tap the line near another vertex to select end point'
             : 'Tap Confirm to remove the section, or ✕ to cancel'
-          : drawAltMode
-            ? drawAltStep < 2 ? 'Tap start and end vertices on the line to set the alternative segment'
-            : drawAltStep === 2 ? 'Tap the map to add points to the alternative path · Tap Save when done'
-            : 'Tap Save to create the alternative feature'
-          : rerouteMode
-            ? rerouteStep < 2 ? 'Tap start and end vertices on the line to set the segment to reroute'
-            : rerouteStep === 2 ? 'Tap the map to draw the replacement path · Tap Save when done'
-            : 'Tap Save to apply the reroute'
           : 'Tap empty area or ✕ to deselect'}
       </Text>
     </Animated.View>
