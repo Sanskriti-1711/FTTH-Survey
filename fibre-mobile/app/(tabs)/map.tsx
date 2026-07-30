@@ -2224,7 +2224,7 @@ export default function MapScreen() {
               // Editing mode props
               editingFeature={editingFeature}
               onDoneEditing={handleDoneEditing}
-              onDeleteFeature={handleLineDelete}
+              onDeleteFeature={handleDeleteFeature}
               dragMode={dragMode}
               onDragModeChange={setDragMode}
             />
