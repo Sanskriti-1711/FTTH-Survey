@@ -33,9 +33,10 @@ interface SurveyFeaturesState {
   /** Load all survey features for a project from the backend */
   fetchSurveyFeatures: (projectId: string) => Promise<void>;
 
-  /** Upsert (create-or-update) a survey feature when the engineer starts editing an HLD feature */
+  /** Upsert (create-or-update) a survey feature when the engineer starts editing an HLD feature.
+   *  Pass hldFeatureId = null for brand-new engineer-created features (e.g. Add Point). */
   upsertSurveyFeature: (
-    hldFeatureId: string,
+    hldFeatureId: string | null,
     layerId: string,
     layerName: string,
     surveyGeometry: Record<string, unknown>,
@@ -174,27 +175,49 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
     }
 
     try {
-      const result = await surveyApi.upsertSurveyFeature({
-        original_hld_feature: hldFeatureId,
-        project: activeProject.id,
-        layer_id: layerId,
-        layer_name: layerName,
-        survey_geometry: surveyGeometry,
-        survey_attributes: surveyAttributes,
-        original_geometry: originalGeometry,
-        original_attributes: originalAttributes,
-        change_reason: changeReason,
-      });
+      let result: SurveyFeatureData;
+
+      if (hldFeatureId) {
+        // ── Existing HLD feature → upsert ──
+        result = await surveyApi.upsertSurveyFeature({
+          original_hld_feature: hldFeatureId,
+          project: activeProject.id,
+          layer_id: layerId,
+          layer_name: layerName,
+          survey_geometry: surveyGeometry,
+          survey_attributes: surveyAttributes,
+          original_geometry: originalGeometry,
+          original_attributes: originalAttributes,
+          change_reason: changeReason,
+        });
+      } else {
+        // ── Brand-new engineer-created feature (no HLD parent) → create ──
+        result = await surveyApi.createSurveyFeature({
+          original_hld_feature: null,
+          project: activeProject.id,
+          layer_id: layerId,
+          layer_name: layerName,
+          original_geometry: originalGeometry ?? null,
+          original_attributes: originalAttributes ?? null,
+          survey_geometry: surveyGeometry,
+          survey_attributes: surveyAttributes ?? {},
+          survey_status: 'new',
+          version_number: 1,
+          sync_status: 'pending',
+          change_reason: changeReason ?? '',
+        });
+      }
 
       // Update local state
       set((s) => {
         const existing = s.surveyFeatures[layerId] ?? [];
-        const idx = existing.findIndex((sf) => sf.original_hld_feature === hldFeatureId);
-        if (idx >= 0) {
-          // Replace existing
-          const updated = [...existing];
-          updated[idx] = result;
-          return { surveyFeatures: { ...s.surveyFeatures, [layerId]: updated } };
+        if (hldFeatureId) {
+          const idx = existing.findIndex((sf) => sf.original_hld_feature === hldFeatureId);
+          if (idx >= 0) {
+            const updated = [...existing];
+            updated[idx] = result;
+            return { surveyFeatures: { ...s.surveyFeatures, [layerId]: updated } };
+          }
         }
         // Add new
         return {
@@ -205,7 +228,7 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
         };
       });
 
-      console.log(`[SurveyFeatures] Upserted survey feature for HLD ${hldFeatureId} → ${result.id}`);
+      console.log(`[SurveyFeatures] ${hldFeatureId ? 'Upserted' : 'Created'} survey feature → ${result.id}`);
       return result;
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to upsert survey feature';

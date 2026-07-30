@@ -1863,13 +1863,8 @@ export default function MapScreen() {
 
         // ── Create a SurveyFeature with original_hld_feature = null ──
         // (engineer-created points don't reference any HLD feature)
-        // Generate a valid UUID v4 for the backend (original_hld_feature is a UUID field)
-        const freshUuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-          const r = Math.random() * 16 | 0;
-          return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
-        });
         upsertSurveyFeature(
-          freshUuid,                    // hldFeatureId — valid UUID for backend
+          null,                        // hldFeatureId — null = new engineer-created feature
           addPointTargetLayer,         // layerId
           layerName,                   // layerName
           surveyGeometry,              // surveyGeometry
