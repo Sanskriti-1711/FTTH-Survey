@@ -49,6 +49,8 @@ interface LineSelectionToolbarProps {
   deleteSectionStep?: number;
   /** Called when user confirms (both vertices selected + re-taps button) */
   onDeleteConfirm?: () => void;
+  /** Called when user taps the Delete (logical delete) button */
+  onDeleteFeature?: () => void;
   /** Whether there are unsaved geometry changes in Move Mode */
   hasUnsavedChanges?: boolean;
 }
@@ -71,7 +73,7 @@ const ACTIONS: ActionDef[] = [
   { id: 'draw_alt', label: 'Draw Alt', icon: '📐' },
   { id: 'del_section', label: 'Del Section', icon: '🪓', danger: true, enabled: true },
   { id: 'change_type', label: 'Change Type', icon: '🔄' },
-  { id: 'del_feature', label: 'Delete', icon: '🗑️', danger: true },
+  { id: 'del_feature', label: 'Delete', icon: '🗑️', danger: true, enabled: true },
   { id: 'continue', label: 'Continue', icon: '▶️', accent: true },
   { id: 'undo', label: 'Undo', icon: '↩️' },
   { id: 'save', label: 'Save', icon: '💾', accent: true, enabled: true },
@@ -91,6 +93,7 @@ export default function LineSelectionToolbar({
   deleteSectionMode = false,
   deleteSectionStep = 0,
   onDeleteConfirm,
+  onDeleteFeature,
   hasUnsavedChanges = false,
 }: LineSelectionToolbarProps) {
   const colors = useThemeStore((s) => s.colors);
@@ -166,6 +169,7 @@ export default function LineSelectionToolbar({
           const isMove = action.id === 'move';
           const isSave = action.id === 'save';
           const isDeleteSection = action.id === 'del_section';
+          const isDeleteFeature = action.id === 'del_feature';
           const showBadge = isUndo && undoCount > 0;
 
           // ── Determine button state ──
@@ -216,6 +220,7 @@ export default function LineSelectionToolbar({
                   else if (isMove && onToggleMove) onToggleMove();
                   else if (isSave && onSave) onSave();
                   else if (isDeleteSection && onDeleteSection) onDeleteSection();
+                  else if (isDeleteFeature && onDeleteFeature) onDeleteFeature();
                   else if (isUndo && onUndo) onUndo();
                 }}
               >
@@ -242,7 +247,11 @@ export default function LineSelectionToolbar({
                   {deleteSectionMode ? (deleteSectionStep === 1 ? 'Tap end' : deleteSectionStep === 2 ? 'Confirm' : 'Ready') : 'Tap to start'}
                 </Text>
               )}
-              {/* "Soon" label for placeholder buttons only */}
+              {isEnabled && isDeleteFeature && (
+                <Text style={[styles.soonLabel, { color: colors.textTertiary }]}>
+                  Logical delete
+                </Text>
+              )}
               {!isEnabled && (
                 <Text style={[styles.soonLabel, { color: colors.textTertiary }]}>
                   Soon

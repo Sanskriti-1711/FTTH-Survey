@@ -7,6 +7,7 @@ import {
   FlatList,
   TextInput,
   ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -1442,6 +1443,36 @@ export default function MapScreen() {
     console.log('[Edit] Done editing');
   }, []);
 
+  // ── Handle logical delete of a LINE feature (via toolbar Delete button) ──
+  // Shows confirmation dialog, then calls handleDeleteFeature which marks
+  // the SurveyFeature as 'removed' — HLD is never touched.
+  const handleLineDelete = useCallback(() => {
+    if (!selectedLineFeature) return;
+    const featureName = selectedLineFeature.name ?? 'this feature';
+    Alert.alert(
+      'Remove feature from survey?',
+      `"${featureName}" will be marked as removed.\n\nThis will NOT delete the original HLD feature. The planner can later review this recommendation.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: () => {
+            handleDeleteFeature(selectedLineFeature.id, selectedLineFeature.layerId);
+            // Deselect the line after deletion
+            setSelectedLineFeature(null);
+            setSelectedMapFeatureId(null);
+            setLineMoveMode(false);
+            setTempLineCoords(null);
+            setTempLineOriginal(null);
+            setLineToolMode(null);
+            setDeleteSectionRange(null);
+          },
+        },
+      ],
+    );
+  }, [selectedLineFeature, handleDeleteFeature]);
+
   // ── Handle delete feature — mark SurveyFeature as 'removed' (HLD stays intact) ──
   // If the feature has a SurveyFeature, we set its status to 'removed' so it
   // disappears from the orange survey layer. The blue HLD feature remains untouched.
@@ -2222,6 +2253,7 @@ export default function MapScreen() {
               deleteSectionMode={lineToolMode === 'delete-section'}
               deleteSectionStep={deleteSectionRange ? (deleteSectionRange[0] === deleteSectionRange[1] ? 1 : 2) : 0}
               onDeleteConfirm={deleteSectionRange && deleteSectionRange[0] !== deleteSectionRange[1] ? handleDeleteSectionConfirm : undefined}
+              onDeleteFeature={handleLineDelete}
             />
           )}
 
