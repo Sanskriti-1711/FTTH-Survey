@@ -7,7 +7,6 @@ import {
   FlatList,
   TextInput,
   ActivityIndicator,
-  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -1472,32 +1471,6 @@ export default function MapScreen() {
     console.log('[Edit] Done editing');
   }, []);
 
-  // ── Handle logical delete of a LINE feature with confirmation dialog ──
-  // HLD is NEVER touched — only the SurveyFeature is marked as 'removed'.
-  const handleLineDelete = useCallback(() => {
-    if (!selectedLineFeature) return;
-    const name = selectedLineFeature.name ?? 'this feature';
-    Alert.alert(
-      'Delete Feature',
-      `Remove "${name}" from the survey?\n\nThis will NOT delete the original HLD feature.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: () => {
-            handleDeleteFeature(selectedLineFeature.id, selectedLineFeature.layerId);
-            setSelectedLineFeature(null);
-            setSelectedMapFeatureId(null);
-            setPopupScreenCoords(null);
-            setLineToolMode(null);
-            setDeleteSectionRange(null);
-          },
-        },
-      ],
-    );
-  }, [selectedLineFeature, handleDeleteFeature]);
-
   // ── Handle delete feature — mark SurveyFeature as 'removed' (HLD stays intact) ──
   // If the feature has a SurveyFeature, we set its status to 'removed' so it
   // disappears from the orange survey layer. The blue HLD feature remains untouched.
@@ -2195,7 +2168,7 @@ export default function MapScreen() {
               // Editing mode props
               editingFeature={editingFeature}
               onDoneEditing={handleDoneEditing}
-              onDeleteFeature={handleLineDelete}
+              onDeleteFeature={handleDeleteFeature}
               dragMode={dragMode}
               onDragModeChange={setDragMode}
             />
