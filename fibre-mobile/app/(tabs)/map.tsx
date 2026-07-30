@@ -7,7 +7,6 @@ import {
   FlatList,
   TextInput,
   ActivityIndicator,
-  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -1526,25 +1525,18 @@ export default function MapScreen() {
   // HLD is NEVER touched — only the SurveyFeature is marked as 'removed'.
   const handleLineDelete = useCallback(() => {
     if (!selectedLineFeature) return;
-    Alert.alert(
-      'Delete Feature',
-      `Remove "${selectedLineFeature.name ?? 'this feature'}" from the survey?\n\nThis will NOT delete the original HLD feature.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: () => {
-            handleDeleteFeature(selectedLineFeature.id, selectedLineFeature.layerId);
-            setSelectedLineFeature(null);
-            setSelectedMapFeatureId(null);
-            setPopupScreenCoords(null);
-            setLineToolMode(null);
-            setDeleteSectionRange(null);
-          },
-        },
-      ],
-    );
+    const name = selectedLineFeature.name ?? 'this feature';
+    // Use window.confirm on web (Alert.alert is native-only, silently fails on web)
+    const confirmed = typeof window !== 'undefined'
+      ? window.confirm(`Remove "${name}" from the survey?\n\nThis will NOT delete the original HLD feature.`)
+      : false; // native: don't auto-delete without confirmation
+    if (!confirmed) return;
+    handleDeleteFeature(selectedLineFeature.id, selectedLineFeature.layerId);
+    setSelectedLineFeature(null);
+    setSelectedMapFeatureId(null);
+    setPopupScreenCoords(null);
+    setLineToolMode(null);
+    setDeleteSectionRange(null);
   }, [selectedLineFeature, handleDeleteFeature]);
 
   // ── Deselect the currently selected line feature ──────────────────────
