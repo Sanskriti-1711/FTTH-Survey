@@ -31,7 +31,7 @@ import MapLibreMap, { BASEMAPS } from '../../lib/components/MapLibreMap';
 import MapLegend, { buildLayerGroups, DEFAULT_LAYER_GROUPS } from '../../lib/components/MapLegend';
 import MapFeaturePopup from '../../lib/components/MapFeaturePopup';
 import type { MapLayerData, BasemapStyle } from '../../lib/components/MapLibreMap';
-import type { GeoJSONFeature, LayerDisplayMode } from '../../lib/utils/types';
+import type { GeoJSONFeature, LayerDisplayMode, SurveyFeatureData } from '../../lib/utils/types';
 import { Spacing, Radius } from '../../lib/theme/colors';
 import {
   X,
@@ -348,7 +348,22 @@ export default function MapScreen() {
     if (entry.surveyUndo) {
       const { surveyFeatureId, layerId, previousGeometry, previousAttributes, previousStatus, description } = entry.surveyUndo;
       console.log(`[Undo] Restoring survey feature ${surveyFeatureId.slice(-8)}: ${description}`);
-      // Use updateSurveyFeature to restore previous state
+
+      // ── Locally-created features (prefix 'local-sf-'): directly remove from store ──
+      if (surveyFeatureId.startsWith('local-sf-')) {
+        const store = useSurveyFeaturesStore.getState();
+        const features = store.surveyFeatures[layerId] ?? [];
+        useSurveyFeaturesStore.setState({
+          surveyFeatures: {
+            ...store.surveyFeatures,
+            [layerId]: features.filter((sf) => sf.id !== surveyFeatureId),
+          },
+        });
+        console.log(`[Undo] Removed local survey feature ${surveyFeatureId.slice(-8)}`);
+        return;
+      }
+
+      // Use updateSurveyFeature to restore previous state (API-backed features)
       updateSurveyFeature(surveyFeatureId, layerId, {
         survey_geometry: previousGeometry,
         survey_attributes: previousAttributes,
@@ -1672,21 +1687,89 @@ export default function MapScreen() {
     if (!deleteSectionRange || !tempLineCoords || !tempLineOriginal || !selectedLineFeature) return;
     const [a, b] = deleteSectionRange; if (a === b) return;
     const start = Math.min(a, b), end = Math.max(a, b);
-    const remaining = tempLineCoords.filter((_, i) => i < start || i > end);
-    if (remaining.length < 2) { setLineMoveMode(false); setLineToolMode(null); setDeleteSectionRange(null); setTempLineCoords(null); setTempLineOriginal(null); return; }
+    // ── Split into disconnected segments at the deletion boundary ──
+    // Keep B and D as endpoints of the remaining segments — only delete vertices BETWEEN them
+    const before = tempLineCoords.slice(0, start + 1);
+    const after = tempLineCoords.slice(end);
+    const segments: [number, number][][] = [];
+    if (before.length >= 2) segments.push(before);
+    else if (before.length === 1) console.warn('[DeleteSection] Dropped 1-vertex before-segment — not enough points for LineString');
+    if (after.length >= 2) segments.push(after);
+    else if (after.length === 1) console.warn('[DeleteSection] Dropped 1-vertex after-segment — not enough points for LineString');
+    if (segments.length === 0) {
+      console.warn('[DeleteSection] No valid segments remain after deletion — aborting');
+      setLineMoveMode(false); setLineToolMode(null); setDeleteSectionRange(null); setTempLineCoords(null); setTempLineOriginal(null); return;
+    }
+
     const { id: featureId, layerId, layerName } = selectedLineFeature;
-    const surveyGeometry = { type: 'LineString', coordinates: remaining };
-    const existingSurvey = getSurveyFeatureForHld(featureId);
     const { geometry: origGeom, attributes: origAttrs } = findHldFeatureOriginal(featureId, layerId);
-    const reason = `Removed section (vertices ${start + 1}–${end + 1})`;
+    const reason = end > start + 1
+      ? `Removed section (vertices ${start + 2}–${end})`
+      : `Split at vertices ${start + 1}–${end + 1}`;
+
+    // ── First segment: update existing Survey Feature (or create new, tied to HLD) ──
+    const existingSurvey = getSurveyFeatureForHld(featureId);
+    const firstGeom = { type: 'LineString', coordinates: segments[0] } as Record<string, unknown>;
     if (existingSurvey) {
       pushUndo({ featureId, layerId, oldLng: 0, oldLat: 0, newLng: 0, newLat: 0, timestamp: Date.now(), surveyUndo: { surveyFeatureId: existingSurvey.id, layerId, previousGeometry: existingSurvey.survey_geometry, previousAttributes: existingSurvey.survey_attributes, previousStatus: existingSurvey.survey_status, description: `Undo section deletion for ${featureId.slice(-8)}` } });
-      updateSurveyFeature(existingSurvey.id, layerId, { survey_geometry: surveyGeometry, survey_status: 'modified' });
+      updateSurveyFeature(existingSurvey.id, layerId, { survey_geometry: firstGeom, survey_status: 'modified', change_reason: reason });
     } else {
-      upsertSurveyFeature(featureId, layerId, layerName, surveyGeometry, origAttrs ?? {}, origGeom, origAttrs, reason).then((sf) => { if (sf) { pushUndo({ featureId, layerId, oldLng: 0, oldLat: 0, newLng: 0, newLat: 0, timestamp: Date.now(), surveyUndo: { surveyFeatureId: sf.id, layerId, previousGeometry: { type: 'LineString', coordinates: tempLineOriginal } as Record<string, unknown>, previousAttributes: origAttrs as Record<string, unknown> ?? {}, previousStatus: 'new', description: `Undo: remove survey feature for ${featureId.slice(-8)}` } }); } });
+      upsertSurveyFeature(featureId, layerId, layerName, firstGeom, origAttrs ?? {}, origGeom, origAttrs, reason).then((sf) => { if (sf) { pushUndo({ featureId, layerId, oldLng: 0, oldLat: 0, newLng: 0, newLat: 0, timestamp: Date.now(), surveyUndo: { surveyFeatureId: sf.id, layerId, previousGeometry: { type: 'LineString', coordinates: tempLineOriginal } as Record<string, unknown>, previousAttributes: origAttrs as Record<string, unknown> ?? {}, previousStatus: 'new', description: `Undo: remove survey feature for ${featureId.slice(-8)}` } }); } });
+    }
+
+    // ── Additional segments: create independent Survey Features locally ──
+    // Bypass the backend API — synthetic hldFeatureId causes 500 errors.
+    for (let i = 1; i < segments.length; i++) {
+      const segGeom = { type: 'LineString', coordinates: segments[i] } as Record<string, unknown>;
+      const segHldId = `${featureId}-seg-${i + 1}-${Date.now()}`;
+      const mockSf: SurveyFeatureData = {
+        id: `local-sf-${Date.now()}-${i}`,
+        original_hld_feature: segHldId,
+        hld_feature_id: segHldId,
+        project: activeProject?.id ?? 'demo',
+        project_name: activeProject?.name ?? 'Demo',
+        engineer: 'demo-user',
+        engineer_name: 'Demo Engineer',
+        layer_id: layerId,
+        layer_name: layerName,
+        original_geometry: origGeom,
+        original_attributes: origAttrs ?? null,
+        survey_geometry: segGeom,
+        survey_attributes: origAttrs ?? {},
+        survey_status: 'new' as const,
+        version_number: 1,
+        sync_status: 'pending' as const,
+        change_reason: `${reason} (segment ${i + 1})`,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      const store = useSurveyFeaturesStore.getState();
+      useSurveyFeaturesStore.setState({
+        surveyFeatures: {
+          ...store.surveyFeatures,
+          [layerId]: [...(store.surveyFeatures[layerId] ?? []), mockSf],
+        },
+      });
+      console.log(`[DeleteSection] Created local segment ${i + 1} (${segHldId.slice(-12)}) for ${featureId.slice(-8)}`);
+
+      // ── Push undo entry so this locally-created segment can be undone ──
+      pushUndo({
+        featureId,
+        layerId,
+        oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+        timestamp: Date.now(),
+        surveyUndo: {
+          surveyFeatureId: mockSf.id,
+          layerId,
+          previousGeometry: segGeom,
+          previousAttributes: origAttrs as Record<string, unknown> ?? {},
+          previousStatus: 'removed',
+          description: `Undo: remove segment ${i + 1} for ${featureId.slice(-8)}`,
+        },
+      });
     }
     setLineMoveMode(false); setLineToolMode(null); setDeleteSectionRange(null); setTempLineCoords(null); setTempLineOriginal(null);
-  }, [deleteSectionRange, tempLineCoords, tempLineOriginal, selectedLineFeature, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature]);
+  }, [deleteSectionRange, tempLineCoords, tempLineOriginal, selectedLineFeature, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, activeProject]);
 
   // ── Check if temp line has unsaved changes ──
   const hasUnsavedLineChanges = useMemo(() => {
@@ -2028,7 +2111,7 @@ export default function MapScreen() {
                   });
                   if (bestDist <= 0.00045 ** 2) {
                     setDeleteSectionRange((prev) => {
-                      if (!prev || prev[0] === prev[1]) return [bestIdx, bestIdx];
+                      if (!prev) return [bestIdx, bestIdx];
                       return [prev[0], bestIdx];
                     });
                   }
