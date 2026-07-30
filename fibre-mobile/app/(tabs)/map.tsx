@@ -1504,21 +1504,49 @@ export default function MapScreen() {
         });
         console.log(`[Delete] Marked SurveyFeature ${existingSurvey.id.slice(-8)} as 'removed' — HLD untouched`);
       } else {
-        // ── No HLD original (engineer-created point) → delete the SurveyFeature ──
-        // Try to find it by ID directly (featureId might be the SurveyFeature ID itself)
-        const allSurveyForLayer = surveyFeatures[layerId] ?? [];
-        const sf = allSurveyForLayer.find((s) => s.id === featureId);
-        if (sf) {
-          deleteSurveyFeature(sf.id, layerId);
-          console.log(`[Delete] Deleted engineer-created SurveyFeature ${sf.id.slice(-8)}`);
-        } else {
-          // Fallback: no survey feature found — this might be an HLD-only feature
-          // (shouldn't happen in the new architecture, but handle gracefully)
-          console.warn(`[Delete] No SurveyFeature found for ${featureId} in ${layerId} — HLD is read-only, nothing to delete`);
+        // ── No existing SurveyFeature. This is a pure HLD point being deleted.
+        // Create a new SurveyFeature with status 'removed' (Logical Delete).
+        // Use null hldFeatureId → routes through createSurveyFeature (no FK validation).
+        const { geometry: origGeom, attributes: origAttrs } = findHldFeatureOriginal(featureId, layerId);
+        if (!origGeom) {
+          console.warn(`[Delete] Cannot find HLD geometry for ${featureId} — aborting`);
+          return;
         }
+        const layerName = activeLayerNames[layerId] ?? layerId.toUpperCase();
+        upsertSurveyFeature(
+          null,  // null = new engineer-created feature (avoids FK validation on imported IDs)
+          layerId,
+          layerName,
+          origGeom as Record<string, unknown>,
+          origAttrs ?? {},
+          origGeom,
+          origAttrs,
+          `Point removed from survey`,
+        ).then((createdSf) => {
+          if (createdSf) {
+            pushUndo({
+              featureId,
+              layerId,
+              oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+              timestamp: Date.now(),
+              surveyUndo: {
+                surveyFeatureId: createdSf.id,
+                layerId,
+                previousGeometry: createdSf.survey_geometry,
+                previousAttributes: createdSf.survey_attributes,
+                previousStatus: 'new',
+                description: `Undo: restore removed point ${featureId.slice(-8)}`,
+              },
+            });
+            updateSurveyFeature(createdSf.id, layerId, { survey_status: 'removed' });
+            console.log(`[Delete] Created SurveyFeature ${createdSf.id.slice(-8)} + marked 'removed' for HLD ${featureId.slice(-8)}`);
+          }
+        }).catch((err) => {
+          console.error(`[Delete] Failed to create removed survey feature:`, err);
+        });
       }
     },
-    [getSurveyFeatureForHld, surveyFeatures, updateSurveyFeature, deleteSurveyFeature, pushUndo],
+    [getSurveyFeatureForHld, surveyFeatures, updateSurveyFeature, deleteSurveyFeature, pushUndo, findHldFeatureOriginal, upsertSurveyFeature, activeLayerNames],
   );
 
   // ── Handle logical delete of a LINE feature with confirmation dialog ──
