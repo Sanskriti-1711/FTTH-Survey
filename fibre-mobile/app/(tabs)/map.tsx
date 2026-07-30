@@ -276,8 +276,11 @@ export default function MapScreen() {
   const [tempLineOriginal, setTempLineOriginal] = useState<[number, number][] | null>(null);
 
   // ── Delete Section state ──────────────────────────────────────────────
-  const [lineToolMode, setLineToolMode] = useState<'delete-section' | null>(null);
+  const [lineToolMode, setLineToolMode] = useState<'delete-section' | 'continue-line' | null>(null);
   const [deleteSectionRange, setDeleteSectionRange] = useState<[number, number] | null>(null);
+
+  // ── Continue Line state ──────────────────────────────────────────────
+  const [continueLineAnchor, setContinueLineAnchor] = useState<number | null>(null);
 
   // ── Add Point state ────────────────────────────────────────────────
   const [addPointTargetLayer, setAddPointTargetLayer] = useState<string>('');
@@ -1743,6 +1746,42 @@ export default function MapScreen() {
     autoOverlayOnEdit();
   }, [selectedLineFeature, lineToolMode, hasImportedData, importFeatureIdMap, demoFeatureIdMap, autoOverlayOnEdit]);
 
+  // ── Continue Line handler ────────────────────────────────────────────
+  // Activates vertex markers. User taps endpoint vertex, then taps a Point
+  // feature to extend the line from that endpoint to the point.
+  const handleContinueToggle = useCallback(() => {
+    if (!selectedLineFeature) return;
+    if (lineToolMode === 'continue-line') {
+      // ── Deactivate ──
+      setLineMoveMode(false);
+      setLineToolMode(null);
+      setContinueLineAnchor(null);
+      setTempLineCoords(null);
+      setTempLineOriginal(null);
+      return;
+    }
+    // ── Activate: extract HLD coordinates, show vertex markers ──
+    const { id: featureId, layerId } = selectedLineFeature;
+    const features = activeGeojsonRef.current[layerId];
+    if (!features) return;
+    let hldFeature = features.find((f) => {
+      const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
+      return fid === featureId;
+    });
+    if (!hldFeature) {
+      const idMap = (hasImportedData ? importFeatureIdMap : demoFeatureIdMap)?.[layerId];
+      if (idMap) { const idx = idMap.indexOf(featureId); if (idx >= 0 && idx < features.length) hldFeature = features[idx]; }
+    }
+    if (!hldFeature?.geometry || hldFeature.geometry.type !== 'LineString') return;
+    const coords = (hldFeature.geometry.coordinates as [number, number][]).map(([lng, lat]) => [lng, lat] as [number, number]);
+    setTempLineCoords(coords);
+    setTempLineOriginal(coords.map(([lng, lat]) => [lng, lat] as [number, number]));
+    setLineMoveMode(true);
+    setLineToolMode('continue-line');
+    setContinueLineAnchor(null);
+    autoOverlayOnEdit();
+  }, [selectedLineFeature, lineToolMode, hasImportedData, importFeatureIdMap, demoFeatureIdMap, autoOverlayOnEdit]);
+
   const handleDeleteSectionConfirm = useCallback(() => {
     if (!deleteSectionRange || !tempLineCoords || !tempLineOriginal || !selectedLineFeature) return;
     const [a, b] = deleteSectionRange; if (a === b) return;
@@ -2178,6 +2217,57 @@ export default function MapScreen() {
                   return;
                 }
               }
+
+              // ── Continue Line: intercept clicks for vertex anchor + point connection ──
+              if (lineToolMode === 'continue-line' && selectedLineFeature && tempLineCoords) {
+                const expectedPreview = `temp-preview-${selectedLineFeature.layerId}`;
+                if (continueLineAnchor === null) {
+                  // ── Step 1: Select anchor vertex ──
+                  if (layerId === expectedPreview ||
+                      (featureId === selectedLineFeature.id && layerId === selectedLineFeature.layerId)) {
+                    let bestIdx = 0; let bestDist = Infinity;
+                    tempLineCoords.forEach(([vlng, vlat], i) => {
+                      const d = (lngLat[0] - vlng) ** 2 + (lngLat[1] - vlat) ** 2;
+                      if (d < bestDist) { bestDist = d; bestIdx = i; }
+                    });
+                    if (bestDist <= 0.00045 ** 2) {
+                      setContinueLineAnchor(bestIdx);
+                      console.log(`[Continue] Anchor set at vertex ${bestIdx}`);
+                    }
+                    return;
+                  }
+                } else {
+                  // ── Step 2: Connect to a Point feature ──
+                  // Any map click on a Point layer connects to that point
+                  const clickedFeatures = activeGeojsonRef.current[layerId];
+                  if (clickedFeatures) {
+                    const clicked = clickedFeatures.find((f) => {
+                      const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
+                      return fid === featureId && f.geometry?.type === 'Point';
+                    });
+                    if (clicked?.geometry?.type === 'Point') {
+                      const [ptLng, ptLat] = clicked.geometry.coordinates as [number, number];
+                      // Extend the line: from anchor to end-of-line, then to the point
+                      const anchorCoord = tempLineCoords[continueLineAnchor];
+                      const newCoords = [...tempLineCoords];
+                      // If anchor is the last vertex, just append the point
+                      if (continueLineAnchor === newCoords.length - 1) {
+                        newCoords.push([ptLng, ptLat]);
+                      } else if (continueLineAnchor === 0) {
+                        // Anchor is first vertex — prepend (extend from start)
+                        newCoords.unshift([ptLng, ptLat]);
+                      } else {
+                        // Anchor is in the middle — extend from anchor, replacing remainder
+                        newCoords.splice(continueLineAnchor + 1);
+                        newCoords.push([ptLng, ptLat]);
+                      }
+                      setTempLineCoords(newCoords);
+                      console.log(`[Continue] Extended line from vertex ${continueLineAnchor} to [${ptLng.toFixed(6)}, ${ptLat.toFixed(6)}]`);
+                      return;
+                    }
+                  }
+                }
+              }
               handleMapFeatureClick(featureId, layerId, lngLat, screenPt);
             }}
             onEmptyAreaClick={handleEmptyMapClick}
@@ -2318,6 +2408,9 @@ export default function MapScreen() {
               deleteSectionStep={deleteSectionRange ? (deleteSectionRange[0] === deleteSectionRange[1] ? 1 : 2) : 0}
               onDeleteConfirm={deleteSectionRange && deleteSectionRange[0] !== deleteSectionRange[1] ? handleDeleteSectionConfirm : undefined}
               onDeleteFeature={handleLineDelete}
+              continueMode={lineToolMode === 'continue-line'}
+              onContinue={handleContinueToggle}
+              continueLineStep={continueLineAnchor === null ? 0 : tempLineCoords && tempLineCoords.length > (tempLineOriginal?.length ?? 0) ? 2 : 1}
             />
           )}
 
