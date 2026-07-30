@@ -808,46 +808,8 @@ export default function MapScreen() {
       : buildMapLayerData(activeGeojson, layerVisibility, activeLayerNames,
           hasImportedData ? importFeatureIdMap : demoFeatureIdMap, effectiveLayerColors);
 
-    // ── Gray out HLD features with survey_status === 'removed' ──────────────
-    // Split each HLD layer: active features stay blue, removed → separate gray layer
-    // Build a fast lookup: featureId → isRemoved
-    const removedFeatureIds = new Set<string>();
-    for (const sfList of Object.values(surveyFeatures)) {
-      for (const sf of sfList) {
-        if (sf.survey_status === 'removed' && sf.original_hld_feature) {
-          removedFeatureIds.add(sf.original_hld_feature);
-        }
-      }
-    }
-    const hldRemovedLayers: MapLayerData[] = [];
-    const processedHldLayers = hldLayers
-      .map((layer) => {
-        const active: typeof layer.features = [];
-        const removed: typeof layer.features = [];
-        for (const feat of layer.features) {
-          const fid = (feat.properties?.id ?? feat.properties?._id ?? '') as string;
-          if (removedFeatureIds.has(fid)) {
-            removed.push(feat);
-          } else {
-            active.push(feat);
-          }
-        }
-        if (removed.length > 0) {
-          hldRemovedLayers.push({
-            id: `hld-removed-${layer.id}`,
-            name: `${layer.name} (Removed)`,
-            features: removed,
-            visible: layer.visible,
-            color: '#9CA3AF', // gray
-            geometryType: layer.geometryType,
-          });
-        }
-        return { ...layer, features: active };
-      })
-      .filter((l) => l.features.length > 0); // remove empty layers
-
     // ── Survey layers (orange) — only when survey features exist ──
-    if (displayMode === 'hld') return [...processedHldLayers, ...hldRemovedLayers];
+    if (displayMode === 'hld') return hldLayers;
 
     const surveyLayers: any[] = [];
     for (const [layerId, sfList] of Object.entries(surveyFeatures)) {
@@ -910,8 +872,8 @@ export default function MapScreen() {
       });
     }
 
-    return [...processedHldLayers, ...hldRemovedLayers, ...previewLayers, ...surveyLayers];
-  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, demoFeatureIdMap, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, tempLineCoords, selectedLineFeature, getSurveyFeatureForHld]);
+    return [...hldLayers, ...previewLayers, ...surveyLayers];
+  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, demoFeatureIdMap, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, tempLineCoords, selectedLineFeature]);
 
   // Build visible layers: when a real project is active, show ONLY imported layers
   const visibleLayers = useMemo(() => {
