@@ -2016,6 +2016,25 @@ export default function MapScreen() {
                 handleDeleteFeature(featureId, layerId);
                 return;
               }
+              // ── Delete Section: intercept clicks for vertex selection ──
+              if (lineToolMode === 'delete-section' && selectedLineFeature && tempLineCoords) {
+                const expectedPreview = `temp-preview-${selectedLineFeature.layerId}`;
+                if (layerId === expectedPreview ||
+                    (featureId === selectedLineFeature.id && layerId === selectedLineFeature.layerId)) {
+                  let bestIdx = 0; let bestDist = Infinity;
+                  tempLineCoords.forEach(([vlng, vlat], i) => {
+                    const d = (lngLat[0] - vlng) ** 2 + (lngLat[1] - vlat) ** 2;
+                    if (d < bestDist) { bestDist = d; bestIdx = i; }
+                  });
+                  if (bestDist <= 0.00045 ** 2) {
+                    setDeleteSectionRange((prev) => {
+                      if (!prev || prev[0] === prev[1]) return [bestIdx, bestIdx];
+                      return [prev[0], bestIdx];
+                    });
+                  }
+                  return;
+                }
+              }
               handleMapFeatureClick(featureId, layerId, lngLat, screenPt);
             }}
             onEmptyAreaClick={handleEmptyMapClick}
