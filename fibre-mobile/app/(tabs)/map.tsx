@@ -2238,41 +2238,41 @@ export default function MapScreen() {
                   }
                 } else {
                   // ── Step 2: Connect to a Point feature ──
-                  // Any map click on a Point layer connects to that point
-                  const clickedFeatures = activeGeojsonRef.current[layerId];
-                  if (clickedFeatures) {
-                    const clicked = clickedFeatures.find((f) => {
-                      const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
-                      return fid === featureId && f.geometry?.type === 'Point';
-                    });
-                    if (clicked?.geometry?.type === 'Point') {
-                      const [ptLng, ptLat] = clicked.geometry.coordinates as [number, number];
-                      // Extend the line: from anchor to end-of-line, then to the point
-                      const anchorCoord = tempLineCoords[continueLineAnchor];
-                      const newCoords = [...tempLineCoords];
-                      // If anchor is the last vertex, just append the point
-                      if (continueLineAnchor === newCoords.length - 1) {
-                        newCoords.push([ptLng, ptLat]);
-                      } else if (continueLineAnchor === 0) {
-                        // Anchor is first vertex — prepend (extend from start)
-                        newCoords.unshift([ptLng, ptLat]);
-                      } else {
-                        // Anchor is in the middle — extend from anchor, replacing remainder
-                        newCoords.splice(continueLineAnchor + 1);
-                        newCoords.push([ptLng, ptLat]);
-                      }
-                      setTempLineCoords(newCoords);
-                      console.log(`[Continue] Extended line from vertex ${continueLineAnchor} to [${ptLng.toFixed(6)}, ${ptLat.toFixed(6)}]`);
-                      return;
-                    }
+                  // Use the click coordinates directly (lngLat from MapLibreMap).
+                  // Skip clicks on the line's own layer or non-Point features.
+                  if (layerId === expectedPreview ||
+                      (featureId === selectedLineFeature.id && layerId === selectedLineFeature.layerId)) {
+                    return; // Ignore clicks on the line itself after anchor is set
                   }
+                  // Verify the clicked layer contains Point features (skip lines/polygons)
+                  const layerFeats = activeGeojsonRef.current[layerId];
+                  const isPointLayer = layerFeats?.some((f: any) => f.geometry?.type === 'Point');
+                  if (!isPointLayer) {
+                    console.log(`[Continue] Ignored click on non-Point layer "${layerId}"`);
+                    return;
+                  }
+                  const [ptLng, ptLat] = lngLat;
+                  const newCoords = [...tempLineCoords];
+                  // Extend line: append/prepend straight segment from anchor to clicked point.
+                  // Preserves full original line geometry.
+                  if (continueLineAnchor === newCoords.length - 1) {
+                    newCoords.push([ptLng, ptLat]);
+                  } else if (continueLineAnchor === 0) {
+                    newCoords.unshift([ptLng, ptLat]);
+                  } else {
+                    newCoords.splice(continueLineAnchor + 1);
+                    newCoords.push([ptLng, ptLat]);
+                  }
+                  setTempLineCoords(newCoords);
+                  console.log(`[Continue] Connected vertex ${continueLineAnchor} to [${ptLng.toFixed(6)}, ${ptLat.toFixed(6)}]`);
+                  return;
                 }
               }
               handleMapFeatureClick(featureId, layerId, lngLat, screenPt);
             }}
             onEmptyAreaClick={handleEmptyMapClick}
             onFeatureDragEnd={handleFeatureDragEnd}
-            onVertexDragEnd={lineMoveMode && tempLineCoords ? handleVertexDragEnd : undefined}
+            onVertexDragEnd={lineMoveMode && tempLineCoords && lineToolMode !== 'continue-line' ? handleVertexDragEnd : undefined}
             vertexDragTarget={memoizedVertexTarget}
             draggableLayerIds={draggableLayerIds}
             dragMode={dragMode}
