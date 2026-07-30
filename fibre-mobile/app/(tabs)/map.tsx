@@ -1510,9 +1510,32 @@ export default function MapScreen() {
         // ── No existing SurveyFeature. This is a pure HLD point being deleted.
         // Create a new SurveyFeature with status 'removed' (Logical Delete).
         // Use null hldFeatureId → routes through createSurveyFeature (no FK validation).
+        // First: check if featureId is a SurveyFeature ID directly (survey view)
+        const baseLid = layerId.replace(/^survey-/, '');
+        const allSurveyForLayer = surveyFeatures[baseLid] ?? [];
+        const directSf = allSurveyForLayer.find((s) => s.id === featureId);
+        if (directSf) {
+          pushUndo({
+            featureId, layerId: baseLid,
+            oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+            timestamp: Date.now(),
+            surveyUndo: {
+              surveyFeatureId: directSf.id, layerId: baseLid,
+              previousGeometry: directSf.survey_geometry,
+              previousAttributes: directSf.survey_attributes,
+              previousStatus: directSf.survey_status,
+              description: `Undo: restore survey feature ${directSf.id.slice(-8)}`,
+            },
+          });
+          updateSurveyFeature(directSf.id, baseLid, { survey_status: 'removed' });
+          console.log(`[Delete] Marked survey feature ${directSf.id.slice(-8)} as 'removed'`);
+          return;
+        }
+        // Not a direct survey feature — this is a pure HLD feature.
+        // Create a new SurveyFeature with status 'removed'.
         const { geometry: origGeom, attributes: origAttrs } = findHldFeatureOriginal(featureId, layerId);
         if (!origGeom) {
-          console.warn(`[Delete] Cannot find HLD geometry for ${featureId} — aborting`);
+          console.warn(`[Delete] Cannot find HLD geometry for ${featureId} in ${layerId} — cannot create removed entry`);
           return;
         }
         const layerName = activeLayerNames[layerId] ?? layerId.toUpperCase();
@@ -1524,7 +1547,7 @@ export default function MapScreen() {
           origAttrs ?? {},
           origGeom,
           origAttrs,
-          `Point removed from survey`,
+          `Feature removed from survey`,
         ).then((createdSf) => {
           if (createdSf) {
             pushUndo({
@@ -2244,11 +2267,11 @@ export default function MapScreen() {
                       (featureId === selectedLineFeature.id && layerId === selectedLineFeature.layerId)) {
                     return; // Ignore clicks on the line itself after anchor is set
                   }
-                  // Verify the clicked layer contains Point features (skip lines/polygons)
-                  const layerFeats = activeGeojsonRef.current[layerId];
-                  const isPointLayer = layerFeats?.some((f: any) => f.geometry?.type === 'Point');
-                  if (!isPointLayer) {
-                    console.log(`[Continue] Ignored click on non-Point layer "${layerId}"`);
+                  // Verify the clicked layer is a Point layer (not LineString/Polygon).
+                  // Uses resolveGeometryType which handles all layer ID formats (demo, imported, survey-*).
+                  const geomType = resolveGeometryType(layerId.replace(/^survey-/, ''));
+                  if (geomType !== 'Point') {
+                    console.log(`[Continue] Ignored click on non-Point layer "${layerId}" (${geomType})`);
                     return;
                   }
                   const [ptLng, ptLat] = lngLat;
