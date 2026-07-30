@@ -7,7 +7,6 @@ import {
   FlatList,
   TextInput,
   ActivityIndicator,
-  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -1443,36 +1442,6 @@ export default function MapScreen() {
     console.log('[Edit] Done editing');
   }, []);
 
-  // ── Handle logical delete of a LINE feature (via toolbar Delete button) ──
-  // Shows confirmation dialog, then calls handleDeleteFeature which marks
-  // the SurveyFeature as 'removed' — HLD is never touched.
-  const handleLineDelete = useCallback(() => {
-    if (!selectedLineFeature) return;
-    const featureName = selectedLineFeature.name ?? 'this feature';
-    Alert.alert(
-      'Remove feature from survey?',
-      `"${featureName}" will be marked as removed.\n\nThis will NOT delete the original HLD feature. The planner can later review this recommendation.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Remove',
-          style: 'destructive',
-          onPress: () => {
-            handleDeleteFeature(selectedLineFeature.id, selectedLineFeature.layerId);
-            // Deselect the line after deletion
-            setSelectedLineFeature(null);
-            setSelectedMapFeatureId(null);
-            setLineMoveMode(false);
-            setTempLineCoords(null);
-            setTempLineOriginal(null);
-            setLineToolMode(null);
-            setDeleteSectionRange(null);
-          },
-        },
-      ],
-    );
-  }, [selectedLineFeature, handleDeleteFeature]);
-
   // ── Handle delete feature — mark SurveyFeature as 'removed' (HLD stays intact) ──
   // If the feature has a SurveyFeature, we set its status to 'removed' so it
   // disappears from the orange survey layer. The blue HLD feature remains untouched.
@@ -1547,7 +1516,6 @@ export default function MapScreen() {
       setLineMoveMode(false);
       setTempLineCoords(null);
       setTempLineOriginal(null);
-      // Also exit delete-section mode if active
       setLineToolMode(null);
       setDeleteSectionRange(null);
       console.log('[MoveMode] Exited — temp changes discarded');
@@ -1671,7 +1639,6 @@ export default function MapScreen() {
 
   const handleDeleteSectionToggle = useCallback(() => {
     if (!selectedLineFeature) return;
-
     if (lineToolMode === 'delete-section') {
       setLineMoveMode(false);
       setLineToolMode(null);
@@ -1680,7 +1647,6 @@ export default function MapScreen() {
       setTempLineOriginal(null);
       return;
     }
-
     const { id: featureId, layerId } = selectedLineFeature;
     const features = activeGeojsonRef.current[layerId];
     if (!features) return;
@@ -1690,15 +1656,10 @@ export default function MapScreen() {
     });
     if (!hldFeature) {
       const idMap = (hasImportedData ? importFeatureIdMap : demoFeatureIdMap)?.[layerId];
-      if (idMap) {
-        const idx = idMap.indexOf(featureId);
-        if (idx >= 0 && idx < features.length) hldFeature = features[idx];
-      }
+      if (idMap) { const idx = idMap.indexOf(featureId); if (idx >= 0 && idx < features.length) hldFeature = features[idx]; }
     }
     if (!hldFeature?.geometry || hldFeature.geometry.type !== 'LineString') return;
-    const coords = (hldFeature.geometry.coordinates as [number, number][]).map(
-      ([lng, lat]) => [lng, lat] as [number, number]
-    );
+    const coords = (hldFeature.geometry.coordinates as [number, number][]).map(([lng, lat]) => [lng, lat] as [number, number]);
     setTempLineCoords(coords);
     setTempLineOriginal(coords.map(([lng, lat]) => [lng, lat] as [number, number]));
     setLineMoveMode(true);
@@ -1709,62 +1670,22 @@ export default function MapScreen() {
 
   const handleDeleteSectionConfirm = useCallback(() => {
     if (!deleteSectionRange || !tempLineCoords || !tempLineOriginal || !selectedLineFeature) return;
-    const [a, b] = deleteSectionRange;
-    if (a === b) return;
-    const start = Math.min(a, b);
-    const end = Math.max(a, b);
+    const [a, b] = deleteSectionRange; if (a === b) return;
+    const start = Math.min(a, b), end = Math.max(a, b);
     const remaining = tempLineCoords.filter((_, i) => i < start || i > end);
-    if (remaining.length < 2) {
-      setLineMoveMode(false);
-      setLineToolMode(null);
-      setDeleteSectionRange(null);
-      setTempLineCoords(null);
-      setTempLineOriginal(null);
-      return;
-    }
+    if (remaining.length < 2) { setLineMoveMode(false); setLineToolMode(null); setDeleteSectionRange(null); setTempLineCoords(null); setTempLineOriginal(null); return; }
     const { id: featureId, layerId, layerName } = selectedLineFeature;
     const surveyGeometry = { type: 'LineString', coordinates: remaining };
     const existingSurvey = getSurveyFeatureForHld(featureId);
     const { geometry: origGeom, attributes: origAttrs } = findHldFeatureOriginal(featureId, layerId);
     const reason = `Removed section (vertices ${start + 1}–${end + 1})`;
     if (existingSurvey) {
-      pushUndo({
-        featureId, layerId, oldLng: 0, oldLat: 0, newLng: 0, newLat: 0, timestamp: Date.now(),
-        surveyUndo: {
-          surveyFeatureId: existingSurvey.id, layerId,
-          previousGeometry: existingSurvey.survey_geometry,
-          previousAttributes: existingSurvey.survey_attributes,
-          previousStatus: existingSurvey.survey_status,
-          description: `Undo section deletion for ${featureId.slice(-8)}`,
-        },
-      });
-      updateSurveyFeature(existingSurvey.id, layerId, {
-        survey_geometry: surveyGeometry, survey_status: 'modified',
-      });
+      pushUndo({ featureId, layerId, oldLng: 0, oldLat: 0, newLng: 0, newLat: 0, timestamp: Date.now(), surveyUndo: { surveyFeatureId: existingSurvey.id, layerId, previousGeometry: existingSurvey.survey_geometry, previousAttributes: existingSurvey.survey_attributes, previousStatus: existingSurvey.survey_status, description: `Undo section deletion for ${featureId.slice(-8)}` } });
+      updateSurveyFeature(existingSurvey.id, layerId, { survey_geometry: surveyGeometry, survey_status: 'modified' });
     } else {
-      upsertSurveyFeature(
-        featureId, layerId, layerName, surveyGeometry,
-        origAttrs ?? {}, origGeom, origAttrs, reason,
-      ).then((sf) => {
-        if (sf) {
-          pushUndo({
-            featureId, layerId, oldLng: 0, oldLat: 0, newLng: 0, newLat: 0, timestamp: Date.now(),
-            surveyUndo: {
-              surveyFeatureId: sf.id, layerId,
-              previousGeometry: { type: 'LineString', coordinates: tempLineOriginal } as Record<string, unknown>,
-              previousAttributes: origAttrs as Record<string, unknown> ?? {},
-              previousStatus: 'new',
-              description: `Undo: remove survey feature for ${featureId.slice(-8)}`,
-            },
-          });
-        }
-      });
+      upsertSurveyFeature(featureId, layerId, layerName, surveyGeometry, origAttrs ?? {}, origGeom, origAttrs, reason).then((sf) => { if (sf) { pushUndo({ featureId, layerId, oldLng: 0, oldLat: 0, newLng: 0, newLat: 0, timestamp: Date.now(), surveyUndo: { surveyFeatureId: sf.id, layerId, previousGeometry: { type: 'LineString', coordinates: tempLineOriginal } as Record<string, unknown>, previousAttributes: origAttrs as Record<string, unknown> ?? {}, previousStatus: 'new', description: `Undo: remove survey feature for ${featureId.slice(-8)}` } }); } });
     }
-    setLineMoveMode(false);
-    setLineToolMode(null);
-    setDeleteSectionRange(null);
-    setTempLineCoords(null);
-    setTempLineOriginal(null);
+    setLineMoveMode(false); setLineToolMode(null); setDeleteSectionRange(null); setTempLineCoords(null); setTempLineOriginal(null);
   }, [deleteSectionRange, tempLineCoords, tempLineOriginal, selectedLineFeature, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature]);
 
   // ── Check if temp line has unsaved changes ──
@@ -2095,25 +2016,6 @@ export default function MapScreen() {
                 handleDeleteFeature(featureId, layerId);
                 return;
               }
-              // ── Delete Section: intercept clicks for vertex selection ──
-              if (lineToolMode === 'delete-section' && selectedLineFeature && tempLineCoords) {
-                const expectedPreview = `temp-preview-${selectedLineFeature.layerId}`;
-                if (layerId === expectedPreview ||
-                    (featureId === selectedLineFeature.id && layerId === selectedLineFeature.layerId)) {
-                  let bestIdx = 0; let bestDist = Infinity;
-                  tempLineCoords.forEach(([vlng, vlat], i) => {
-                    const d = (lngLat[0] - vlng) ** 2 + (lngLat[1] - vlat) ** 2;
-                    if (d < bestDist) { bestDist = d; bestIdx = i; }
-                  });
-                  if (bestDist <= 0.00045 ** 2) {
-                    setDeleteSectionRange((prev) => {
-                      if (!prev || prev[0] === prev[1]) return [bestIdx, bestIdx];
-                      return [prev[0], bestIdx];
-                    });
-                  }
-                  return;
-                }
-              }
               handleMapFeatureClick(featureId, layerId, lngLat, screenPt);
             }}
             onEmptyAreaClick={handleEmptyMapClick}
@@ -2253,7 +2155,6 @@ export default function MapScreen() {
               deleteSectionMode={lineToolMode === 'delete-section'}
               deleteSectionStep={deleteSectionRange ? (deleteSectionRange[0] === deleteSectionRange[1] ? 1 : 2) : 0}
               onDeleteConfirm={deleteSectionRange && deleteSectionRange[0] !== deleteSectionRange[1] ? handleDeleteSectionConfirm : undefined}
-              onDeleteFeature={handleLineDelete}
             />
           )}
 
