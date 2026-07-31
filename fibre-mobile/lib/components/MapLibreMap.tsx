@@ -575,10 +575,11 @@ function NativeMapView({
       }
 
       if (bestMatch) {
+        const match = bestMatch as { featureId: string; layerId: string; featureIndex: number };
         dragRef.current = {
-          featureId: bestMatch.featureId,
-          layerId: bestMatch.layerId,
-          featureIndex: bestMatch.featureIndex,
+          featureId: match.featureId,
+          layerId: match.layerId,
+          featureIndex: match.featureIndex,
           startLng: pressLng,
           startLat: pressLat,
           startScreenX: 0,
@@ -1943,7 +1944,11 @@ export default function MapLibreMap(props: MapLibreMapProps) {
 const styles = StyleSheet.create({
   // ── Overlay Base ────────────────────────────────────────────────────────
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: 'rgba(247, 249, 252, 0.92)',

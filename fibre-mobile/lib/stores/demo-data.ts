@@ -745,10 +745,10 @@ function shiftFeatures(
 }
 
 function shiftGeometry(
-  geom: { type: string; coordinates: unknown },
+  geom: { type: string; coordinates: unknown[] },
   lngShift: number,
   latShift: number
-): { type: string; coordinates: unknown } {
+): { type: string; coordinates: unknown[] } {
   if (geom.type === 'Point') {
     const [lng, lat] = geom.coordinates as [number, number];
     return { type: 'Point', coordinates: [lng + lngShift, lat + latShift] };

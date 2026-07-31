@@ -36,7 +36,7 @@ import type {
 } from '../utils/types';
 
 // ── Helpers ───────────────────────────────────────────────────────────────
-function buildQuery(params: Record<string, string | number | undefined>): string {
+function buildQuery(params: object): string {
   const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== '');
   if (entries.length === 0) return '';
   return '?' + entries.map(([k, v]) => `${k}=${encodeURIComponent(v!)}`).join('&');

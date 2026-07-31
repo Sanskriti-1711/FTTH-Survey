@@ -187,8 +187,8 @@ function buildMapLayerData(
           properties: {
             ...f.properties,
             ...extraProps,  // Live geometry coords OVERRIDE any stale HLD properties
-            id: f.properties?.id ?? idList?.[i] ?? `${id}-${i}`,
-            _id: f.properties?.id ?? idList?.[i] ?? `${id}-${i}`,  // Alias for MapLibreMap click handlers
+            id: (f.properties?.id as string | undefined) ?? idList?.[i] ?? `${id}-${i}`,
+            _id: (f.properties?.id as string | undefined) ?? idList?.[i] ?? `${id}-${i}`,  // Alias for MapLibreMap click handlers
             _layer_name: layerNames[id] ?? id.toUpperCase(),
             _layer_id: id,  // Layer ID for MapLibreMap click handlers
           },
@@ -322,7 +322,7 @@ export default function MapScreen() {
       layerId: string;
       previousGeometry: Record<string, unknown>;
       previousAttributes: Record<string, unknown>;
-      previousStatus: string;
+      previousStatus: SurveyFeatureData['survey_status'];
       description: string;
     };
   };

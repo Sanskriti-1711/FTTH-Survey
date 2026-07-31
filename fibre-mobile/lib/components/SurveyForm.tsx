@@ -467,6 +467,7 @@ export default function SurveyForm({ formData, onDismiss, onSave }: SurveyFormPr
         evidence_type: 'measurement',
         description: evidenceDescription,
         weather: evidenceWeather,
+        captured_at: new Date().toISOString(),
       });
       showToast('Field evidence saved');
       setEvidenceDescription('');

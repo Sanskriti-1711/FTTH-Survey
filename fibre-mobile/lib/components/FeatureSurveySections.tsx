@@ -222,6 +222,7 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
         evidence_type: 'measurement',
         description: evidenceDescription,
         weather: evidenceWeather,
+        captured_at: new Date().toISOString(),
       });
       showToast('Field evidence saved', 'success');
       setEvidenceDescription('');

@@ -38,7 +38,7 @@ import {
   ClipboardList,
 } from 'lucide-react-native';
 import { useSurveyFeaturesStore } from '../../lib/stores/survey-features';
-import type { Feature, GeoJSONFeature } from '../../lib/utils/types';
+import type { Feature, GeoJSONFeature, FieldSchemaField } from '../../lib/utils/types';
 
 // ── Feature Detail Screen ─────────────────────────────────────────────────
 

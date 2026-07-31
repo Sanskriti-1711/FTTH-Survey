@@ -131,8 +131,9 @@ export default function MapFeaturePopup({
     if (schema) {
       const allFields = [...schema.readOnlyFields, ...schema.editableFields];
       const field = allFields.find((f) => f.key === key);
-      if (field?.options) {
-        const opt = field.options.find((o) => o.value === String(val));
+      const fieldOptions = (field as { options?: { label: string; value: string }[] } | undefined)?.options;
+      if (fieldOptions) {
+        const opt = fieldOptions.find((o) => o.value === String(val));
         if (opt) return opt.label;
       }
     }

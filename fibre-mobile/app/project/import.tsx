@@ -28,10 +28,8 @@ export default function ProjectImportScreen() {
   const [file, setFile] = useState<{ uri: string; name: string; type: string; size?: number } | null>(null);
   const [step, setStep] = useState<'select' | 'uploading' | 'done'>('select');
   const [toastVisible, setToastVisible] = useState(false);
-  const [toastMsg, setToastMsg] = useState('');
-  const [toastType, setToastType] = useState<'success' | 'error'>('error');
-
-  const showToast = (msg: string, type: 'success' | 'error' = 'error') => {
+  const [toastMsg, setToastMsg] = useState('');  const [toastType, setToastType] = useState<'success' | 'error' | 'warning'>('error');
+  const showToast = (msg: string, type: 'success' | 'error' | 'warning' = 'error') => {
     setToastMsg(msg);
     setToastType(type);
     setToastVisible(true);
