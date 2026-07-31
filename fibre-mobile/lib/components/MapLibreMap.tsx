@@ -392,9 +392,6 @@ function NativeMapView({
 
   // ── Module init ─────────────────────────────────────────────────────────
   useEffect(() => {
-    if (MapLibreGL?.setDefaultStyle) {
-      MapLibreGL.setDefaultStyle(DEFAULT_MAP_STYLE);
-    }
     if (!MapLibreGL) {
       setErrorInfo({ type: 'module', message: '@maplibre/maplibre-react-native is not available.' });
       setStatus('error');
@@ -458,7 +455,7 @@ function NativeMapView({
         dragCoordsRef.current = coords;
         setDragCoords(coords);
 
-        // Update the point in the ShapeSource data so it moves on the map
+        // Update the point in the GeoJSONSource data so it moves on the map
         setLayerShapes((prev) => {
           const current = prev[ds.layerId];
           if (!current?.features) return prev;
@@ -516,8 +513,10 @@ function NativeMapView({
     (e: any) => {
       // In drag mode, don't fire click events — drag overlay handles interaction
       if (dragMode) return;
-      if (!onFeatureClick || !e?.features) return;
-      const feature = e.features[0];
+      // v11 wraps press payloads in NativeSyntheticEvent — support both shapes
+      const features = e?.nativeEvent?.features ?? e?.features;
+      if (!onFeatureClick || !features) return;
+      const feature = features[0];
       if (!feature) return;
       const props = feature.properties || {};
       const fid = props.id || props._id;
@@ -540,10 +539,11 @@ function NativeMapView({
     (e: any) => {
       if (!dragMode || !onDragEndRef.current || !draggableLayerIds) return;
 
-      const coords = e.geometry?.coordinates;
-      if (!coords) return;
-      const pressLng = coords[0] as number;
-      const pressLat = coords[1] as number;
+      // v11 long-press exposes lngLat on nativeEvent (v10 used geometry.coordinates)
+      const lngLat = e?.nativeEvent?.lngLat ?? e?.geometry?.coordinates;
+      if (!lngLat) return;
+      const pressLng = lngLat[0] as number;
+      const pressLat = lngLat[1] as number;
 
       // Find nearest draggable point feature within 500m
       let bestDist = Infinity;
@@ -599,8 +599,8 @@ function NativeMapView({
   useEffect(() => {
     if (!cameraRef.current || !flyToCenter || status !== 'ready') return;
     try {
-      cameraRef.current?.flyTo([flyToCenter.lng, flyToCenter.lat], 1200);
-      cameraRef.current?.zoomTo(flyToCenter.zoom, 1200);
+      cameraRef.current?.flyTo({ center: [flyToCenter.lng, flyToCenter.lat], duration: 1200 });
+      cameraRef.current?.zoomTo(flyToCenter.zoom, { duration: 1200 });
     } catch {}
   }, [flyToCenter?.lng, flyToCenter?.lat, flyToCenter?.zoom, status]);
 
@@ -615,14 +615,14 @@ function NativeMapView({
           const coords = feature.geometry.coordinates;
           if (feature.geometry.type === 'Point') {
             try {
-              cameraRef.current?.flyTo([coords[0] as number, coords[1] as number], 800);
-              cameraRef.current?.zoomTo(17, 800);
+              cameraRef.current?.flyTo({ center: [coords[0] as number, coords[1] as number], duration: 800 });
+              cameraRef.current?.zoomTo(17, { duration: 800 });
             } catch {}
           } else {
             const first = (coords as unknown[][])[0] as number[];
             try {
-              cameraRef.current?.flyTo([first[0], first[1]], 800);
-              cameraRef.current?.zoomTo(17, 800);
+              cameraRef.current?.flyTo({ center: [first[0], first[1]], duration: 800 });
+              cameraRef.current?.zoomTo(17, { duration: 800 });
             } catch {}
           }
           return;
@@ -637,7 +637,7 @@ function NativeMapView({
     setStatus('loading');
     setLoadProgress(undefined);
     setErrorInfo({ type: 'unknown', message: '' });
-    // Bump mapKey to force React to unmount/remount the MapLibreGL.MapView
+    // Bump mapKey to force React to unmount/remount the MapLibreGL.Map
     setMapKey((k) => k + 1);
   }, []);
 
@@ -662,45 +662,48 @@ function NativeMapView({
 
   return (
     <View style={containerStyle}>
-      <MapLibreGL.MapView
+      <MapLibreGL.Map
         key={`map-${mapKey}`}
         ref={mapRef}
         style={{ flex: 1 }}
-        styleURL={styleUrl}
+        mapStyle={styleUrl}
+        // Android v11 stability fix: 'surface' (GLSurfaceView) is prone to
+        // native lifecycle crashes when navigating away / unmounting layers.
+        // 'texture' (TextureView) renders through the normal Android view
+        // hierarchy, avoiding the documented SurfaceView thread-lifecycle bugs.
+        androidView="texture"
         onPress={handlePress}
         onLongPress={handleLongPress}
-        scrollEnabled={!isDragging}
-        zoomEnabled={!isDragging}
-        pitchEnabled={!isDragging}
-        rotateEnabled={!isDragging}
-        onCameraChanged={(e: any) => {
-          if (e?.properties?.zoom !== undefined) {
-            zoomRef.current = e.properties.zoom;
+        dragPan={!isDragging}
+        touchZoom={!isDragging}
+        touchPitch={!isDragging}
+        touchRotate={!isDragging}
+        onRegionIsChanging={(e: any) => {
+          const zoom = e?.nativeEvent?.zoom ?? e?.properties?.zoom;
+          if (zoom !== undefined) {
+            zoomRef.current = zoom;
           }
         }}
         onDidFinishLoadingMap={() => {
           setStatus('ready');
           setLoadProgress(1);
         }}
-        onDidFailLoadingMap={(e: any) => {
-          const errorMsg = typeof e === 'string' ? e : e?.message ?? 'Unknown style load error';
+        onDidFailLoadingMap={() => {
+          // v11 passes NativeSyntheticEvent<null> here — no error payload is
+          // available, so report a generic style-load failure.
           setErrorInfo({
-            type: errorMsg.toLowerCase().includes('network') || errorMsg.toLowerCase().includes('fetch')
-              ? 'network'
-              : 'style',
-            message: errorMsg,
+            type: 'style',
+            message: 'Map style failed to load.',
           });
           setStatus('error');
         }}
-        logoEnabled={false}
-        attributionEnabled={true}
+        logo={false}
+        attribution={true}
       >
         <MapLibreGL.Camera
           ref={cameraRef}
-          defaultSettings={{
-            centerCoordinate: OAKWOOD_CENTER,
-            zoomLevel: 15,
-          }}
+          centerCoordinate={OAKWOOD_CENTER}
+          zoomLevel={15}
         />
 
         {layers.map((layerData) => {
@@ -713,14 +716,15 @@ function NativeMapView({
 
           return (
             <React.Fragment key={sourceId}>
-              <MapLibreGL.ShapeSource id={sourceId} shape={shape} onPress={handlePress}>
+              <MapLibreGL.GeoJSONSource id={sourceId} data={shape} onPress={handlePress}>
                 {geomType === 'Point' && (
                   <>
                     {/* Drag highlight ring — visible only when this layer has the dragged feature */}
                     {isDragging && dragRef.current?.layerId === layerData.id && (
-                      <MapLibreGL.CircleLayer
+                      <MapLibreGL.Layer
+                        type="circle"
                         id={`drag-hl-${layerData.id}`}
-                        sourceID={sourceId}
+                        source={sourceId}
                         filter={['==', ['get', '_id'], dragRef.current?.featureId ?? '']}
                         style={{
                           circleRadius: 16,
@@ -731,9 +735,10 @@ function NativeMapView({
                         }}
                       />
                     )}
-                    <MapLibreGL.CircleLayer
+                    <MapLibreGL.Layer
+                      type="circle"
                       id={`lyr-${layerData.id}`}
-                      sourceID={sourceId}
+                      source={sourceId}
                       style={{
                         circleRadius: isDragging && dragRef.current?.layerId === layerData.id ? 10 : 7,
                         circleColor: layerData.color,
@@ -744,9 +749,10 @@ function NativeMapView({
                   </>
                 )}
                 {geomType === 'LineString' && (
-                  <MapLibreGL.LineLayer
+                  <MapLibreGL.Layer
+                    type="line"
                     id={`lyr-${layerData.id}`}
-                    sourceID={sourceId}
+                    source={sourceId}
                     style={{
                       lineColor: layerData.color,
                       lineWidth: 3,
@@ -756,23 +762,25 @@ function NativeMapView({
                 )}
                 {geomType === 'Polygon' && (
                   <>
-                    <MapLibreGL.FillLayer
+                    <MapLibreGL.Layer
+                      type="fill"
                       id={`fill-${layerData.id}`}
-                      sourceID={sourceId}
+                      source={sourceId}
                       style={{ fillColor: layerData.color, fillOpacity: 0.25 }}
                     />
-                    <MapLibreGL.LineLayer
+                    <MapLibreGL.Layer
+                      type="line"
                       id={`out-${layerData.id}`}
-                      sourceID={sourceId}
+                      source={sourceId}
                       style={{ lineColor: layerData.color, lineWidth: 2 }}
                     />
                   </>
                 )}
-              </MapLibreGL.ShapeSource>
+              </MapLibreGL.GeoJSONSource>
             </React.Fragment>
           );
         })}
-      </MapLibreGL.MapView>
+      </MapLibreGL.Map>
 
       {/* ── Drag overlay — transparent PanResponder view that captures
             gestures during active drag. Only renders when dragging. ──────── */}
