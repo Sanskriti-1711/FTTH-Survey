@@ -26,6 +26,7 @@ fibre-mobile/web-test/
 fibre-mobile/web-undo/
 
 # ── Android ───────────────────────────────────────────────
+fibre-mobile/android/
 fibre-mobile/android/build/
 fibre-mobile/android/.gradle/
 fibre-mobile/android/local.properties
