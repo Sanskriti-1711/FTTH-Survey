@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { User } from '../utils/types';
 import { login as apiLogin, register as apiRegister } from '../api/auth';
-import { saveTokens, clearTokens, loadStoredToken, apiFetch } from '../api/client';
+import { saveTokens, clearTokens, loadStoredToken, refreshAccessToken } from '../api/client';
 
 // ── Auth Store ────────────────────────────────────────────────────────────
 
@@ -36,25 +36,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         set({ isRestoring: false });
         return;
       }
-      // Try to validate token by refreshing it (with 3s timeout)
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 3000);
-        const res = await apiFetch<{ access: string }>('/api/users/token/refresh/', {
-          method: 'POST',
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
-        if (res?.access) {
-          set({ token: res.access, isRestoring: false });
-          return;
-        }
-      } catch {
-        // Token refresh failed — clear and show login
-        await clearTokens();
-        set({ token: null, isRestoring: false });
+      // Try to validate token by refreshing it (with 3s timeout).
+      // refreshAccessToken reads the stored refresh token and sends it in the body,
+      // which Django's SimpleJWT endpoint requires (an empty POST body always 400s).
+      // NOTE: refreshAccessToken never throws — it returns null on every failure path.
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      const newAccess = await refreshAccessToken(controller.signal);
+      clearTimeout(timeout);
+      if (newAccess) {
+        set({ token: newAccess, isRestoring: false });
         return;
       }
+      // Refresh failed (e.g. refresh token expired after 1 day) — but the stored
+      // access token is valid for 7 days, so keep the session instead of logging
+      // the user out. The next 401 will re-attempt refresh via apiFetch.
       set({ token, isRestoring: false });
     } catch {
       set({ isRestoring: false });

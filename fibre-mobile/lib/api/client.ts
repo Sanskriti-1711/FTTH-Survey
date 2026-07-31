@@ -96,7 +96,7 @@ function requireOnline(): void {
   }
 }
 
-async function refreshAccessToken(): Promise<string | null> {
+export async function refreshAccessToken(signal?: AbortSignal): Promise<string | null> {
   const refresh = await getRefreshToken();
   if (!refresh) return null;
 
@@ -105,6 +105,7 @@ async function refreshAccessToken(): Promise<string | null> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refresh }),
+      ...(signal ? { signal } : {}),
     });
 
     if (!res.ok) return null;
