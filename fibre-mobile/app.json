@@ -7,14 +7,14 @@
     "icon": "./assets/icon.png",
     "scheme": "fibre360",
     "userInterfaceStyle": "automatic",
-    "splash": {
-      "image": "./assets/splash.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#0D5CFF"
-    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.fibre360.mobile",
+      "splash": {
+        "image": "./assets/splash.png",
+        "resizeMode": "contain",
+        "backgroundColor": "#0D5CFF"
+      },
       "infoPlist": {
         "NSCameraUsageDescription": "Fiber360 needs camera access to capture field photos.",
         "NSLocationWhenInUseUsageDescription": "Fiber360 needs your location to show your position on the survey map.",
@@ -24,6 +24,11 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0D5CFF"
+      },
+      "splash": {
+        "image": "./assets/splash.png",
+        "resizeMode": "contain",
         "backgroundColor": "#0D5CFF"
       },
       "package": "com.fibre360.mobile",
