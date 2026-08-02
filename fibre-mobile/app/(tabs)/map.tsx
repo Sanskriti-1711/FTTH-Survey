@@ -22,6 +22,7 @@ import { recalculateDependentProperties } from '../../lib/utils/spatial';
 import GeometryEditor from '../../lib/components/GeometryEditor';
 import type { GeometryMode, EditingFeature } from '../../lib/components/GeometryEditor';
 import LineSelectionToolbar from '../../lib/components/LineSelectionToolbar';
+import PolygonToolbar from '../../lib/components/PolygonToolbar';
 import SurveyChangesPanel from '../../lib/components/SurveyChangesPanel';
 import SurveyForm from '../../lib/components/SurveyForm';
 import type { SurveyFormData } from '../../lib/components/SurveyForm';
@@ -33,17 +34,15 @@ import MapFeaturePopup from '../../lib/components/MapFeaturePopup';
 import type { MapLayerData, BasemapStyle } from '../../lib/components/MapLibreMap';
 import type { GeoJSONFeature, LayerDisplayMode, SurveyFeatureData } from '../../lib/utils/types';
 import { Spacing, Radius } from '../../lib/theme/colors';
-import {
-  X,
-  ChevronRight,
-  MapPin,
-  List,
-  Map as MapIcon,
-  Crosshair,
-  Search,
-  Move,
-  Undo2,
-} from 'lucide-react-native';
+import X from 'lucide-react-native/icons/x';
+import ChevronRight from 'lucide-react-native/icons/chevron-right';
+import MapPin from 'lucide-react-native/icons/map-pin';
+import List from 'lucide-react-native/icons/list';
+import MapIcon from 'lucide-react-native/icons/map';
+import Crosshair from 'lucide-react-native/icons/crosshair';
+import Search from 'lucide-react-native/icons/search';
+import Move from 'lucide-react-native/icons/move';
+import Undo2 from 'lucide-react-native/icons/undo-2';
 
 // ── Layer config ──────────────────────────────────────────────────────────
 const LAYER_COLORS: Record<string, string> = {
@@ -202,11 +201,17 @@ function buildMapLayerData(
 
 // ── Resolve geometry type from layer ID ────────────────────────────────────
 function resolveGeometryType(layerId: string): string {
-  if (layerId === 'trenches' || layerId === 'ducts' || layerId === 'cables'
-    || layerId.includes('trench') || layerId.includes('duct') || layerId.includes('cable')) {
+  const normalized = layerId
+    .replace(/^survey-/, '')
+    .replace(/^imp-/, '')
+    .replace(/^temp-preview-/, '')
+    .replace(/^ml-/, '');
+
+  if (normalized === 'trenches' || normalized === 'ducts' || normalized === 'cables'
+    || normalized.includes('trench') || normalized.includes('duct') || normalized.includes('cable')) {
     return 'LineString';
   }
-  if (layerId === 'polygons') return 'Polygon';
+  if (normalized === 'polygons' || normalized.includes('polygon') || normalized.includes('service_area') || normalized.includes('zone') || normalized.includes('area')) return 'Polygon';
   return 'Point';
 }
 
@@ -266,6 +271,9 @@ export default function MapScreen() {
   // ── Line Feature Selection state — shows the bottom toolbar when a line is tapped ──
   // Only one feature can be selected at a time. Toolbar disappears when deselected.
   const [selectedLineFeature, setSelectedLineFeature] = useState<EditingFeature | null>(null);
+  const [selectedPolygonFeature, setSelectedPolygonFeature] = useState<EditingFeature | null>(null);
+  const [polygonEditCoords, setPolygonEditCoords] = useState<[number, number][] | null>(null);
+  const [polygonEditOriginal, setPolygonEditOriginal] = useState<[number, number][] | null>(null);
 
   // ── Line Move Mode state ──
   // When active, vertex handles are displayed for the selected line.
@@ -338,6 +346,14 @@ export default function MapScreen() {
     undoStackRef.current = [...undoStackRef.current.slice(-(MAX_UNDO - 1)), entry];
     setUndoCount(undoStackRef.current.length);
   }, []);
+
+  const handlePolygonUndo = useCallback(() => {
+    // For polygon editing, undo reverts polygonEditCoords to polygonEditOriginal
+    if (selectedPolygonFeature && polygonEditCoords && polygonEditOriginal) {
+      setPolygonEditCoords([...polygonEditOriginal]);
+      console.log('[PolygonUndo] Reverted polygon to original coordinates');
+    }
+  }, [selectedPolygonFeature, polygonEditCoords, polygonEditOriginal]);
 
   const handleUndo = useCallback(() => {
     const stack = undoStackRef.current;
@@ -1042,7 +1058,8 @@ export default function MapScreen() {
       }
 
       // ── Determine geometry type for this feature ──────────────────────
-      const geomType = resolveGeometryType(layerId);
+      const matchedLayer = mapLayerData.find((layer) => layer.id === layerId);
+      const geomType = (matchedLayer?.geometryType ?? resolveGeometryType(layerId)) as 'Point' | 'LineString' | 'Polygon';
 
       // ── Detect survey features (orange markers) via 'survey-' prefix ─
       const isSurveyFeature = layerId.startsWith('survey-');
@@ -1075,6 +1092,37 @@ export default function MapScreen() {
       }
       const status = isSurveyFeature ? 'modified' : (found?.feature.status ?? 'assigned');
 
+      // ── POLYGON features: open inline editing handles for the selected polygon ──
+      if (geomType === 'Polygon') {
+        setSelectedLineFeature(null);
+        setSelectedMapFeatureId(featureId);
+        if (found) {
+          selectFeature(found.feature.id, {
+            id: found.feature.id,
+            name: featureName,
+            layerName,
+            status,
+            layerId: found.feature.layer_id,
+          });
+        } else {
+          selectFeature(featureId, {
+            id: featureId,
+            name: featureName,
+            layerName,
+            status,
+            layerId: popupLayerId,
+          });
+        }
+        handlePolygonEditStart({
+          id: featureId,
+          layerId: popupLayerId,
+          geometryType: 'Polygon',
+          name: featureName,
+          layerName,
+        });
+        return;
+      }
+
       // ── LINE features: show View popup first, then Edit toolbar on demand ──
       if (geomType === 'LineString') {
         // Highlight line on map
@@ -1104,6 +1152,9 @@ export default function MapScreen() {
       // ── Non-line features: show the popup as before ──────────────────
       // Clear any previous line selection
       setSelectedLineFeature(null);
+      setSelectedPolygonFeature(null);
+      setPolygonEditCoords(null);
+      setPolygonEditOriginal(null);
 
       if (found) {
         selectFeature(found.feature.id, {
@@ -1127,7 +1178,7 @@ export default function MapScreen() {
       });
       setSelectedMapFeatureId(featureId);
     },
-    [demoFeatures, selectFeature, activeLayerNames]
+    [demoFeatures, selectFeature, activeLayerNames, mapLayerData]
   );
 
   // ── Layer isolation state ─────────────────────────────────────────────
@@ -1950,6 +2001,120 @@ export default function MapScreen() {
     [],
   );
 
+  // ── Polygon edit handlers ───────────────────────────────────────────
+  const handlePolygonEditStart = useCallback((feature: EditingFeature) => {
+    console.log(`[PolygonEdit] Starting edit for feature ${feature.id.slice(-8)} on layer ${feature.layerId}`);
+    // ── Search for the feature across all rendered layers ──
+    // The layerId from the click event may not match activeGeojsonRef keys exactly
+    // (e.g., imported features use 'imp-' prefix), so search all layers as fallback.
+    let hldFeature: GeoJSONFeature | undefined;
+    let matchedLayerId = feature.layerId;
+
+    // First: try exact layerId match
+    const exactLayers = activeGeojsonRef.current[feature.layerId];
+    if (exactLayers) {
+      hldFeature = exactLayers.find((item) => {
+        const fid = (item.properties as any)?.id ?? (item.properties as any)?._id ?? '';
+        return fid === feature.id;
+      });
+    }
+
+    // Fallback: search ALL layers in activeGeojsonRef for this feature ID
+    if (!hldFeature) {
+      for (const [layerId, layerFeatures] of Object.entries(activeGeojsonRef.current)) {
+        const found = layerFeatures.find((item) => {
+          const fid = (item.properties as any)?.id ?? (item.properties as any)?._id ?? '';
+          return fid === feature.id;
+        });
+        if (found && found.geometry?.type === 'Polygon') {
+          hldFeature = found;
+          matchedLayerId = layerId;
+          break;
+        }
+      }
+    }
+
+    if (!hldFeature) {
+      console.warn(`[PolygonEdit] Feature ${feature.id.slice(-8)} NOT found in any layer. Available keys: ${Object.keys(activeGeojsonRef.current).join(', ')}`);
+      return;
+    }
+    if (hldFeature.geometry?.type !== 'Polygon') {
+      console.warn(`[PolygonEdit] Feature is ${hldFeature.geometry?.type}, not Polygon — aborting`);
+      return;
+    }
+    console.log(`[PolygonEdit] Found feature in ${matchedLayerId}: geometry type = ${hldFeature.geometry?.type}`);
+
+    const ring = (hldFeature.geometry.coordinates as [number, number][][])[0] ?? [];
+    const coordsCopy = ring.map(([lng, lat]) => [lng, lat] as [number, number]);
+    const originalCopy = ring.map(([lng, lat]) => [lng, lat] as [number, number]);
+
+    // Use the matched layer ID (not the original feature.layerId) for correct save wiring
+    const matchedFeature = { ...feature, layerId: matchedLayerId };
+    setSelectedPolygonFeature(matchedFeature);
+    setPolygonEditCoords(coordsCopy);
+    setPolygonEditOriginal(originalCopy);
+    autoOverlayOnEdit();
+  }, [autoOverlayOnEdit]);
+
+  const handlePolygonVertexDragEnd = useCallback(
+    (featureId: string, layerId: string, vertexIdx: number, newLng: number, newLat: number) => {
+      setPolygonEditCoords((prev) => {
+        if (!prev) return prev;
+        const updated = [...prev];
+        if (vertexIdx >= 0 && vertexIdx < updated.length) {
+          updated[vertexIdx] = [newLng, newLat];
+          // GeoJSON linear rings must remain closed when an endpoint is moved.
+          if (vertexIdx === 0 && updated.length > 1) {
+            updated[updated.length - 1] = [newLng, newLat];
+          } else if (vertexIdx === updated.length - 1 && updated.length > 1) {
+            updated[0] = [newLng, newLat];
+          }
+        }
+        return updated;
+      });
+      console.log(`[PolygonEdit] Vertex ${vertexIdx} moved to [${newLng.toFixed(6)}, ${newLat.toFixed(6)}]`);
+    },
+    []
+  );
+
+  const handlePolygonSave = useCallback(() => {
+    if (!selectedPolygonFeature || !polygonEditCoords || !polygonEditOriginal) return;
+
+    const { id: featureId, layerId } = selectedPolygonFeature;
+    const surveyGeometry = { type: 'Polygon', coordinates: [polygonEditCoords] };
+    const existingSurvey = getSurveyFeatureForHld(featureId);
+    const { geometry: origGeom, attributes: origAttrs } = findHldFeatureOriginal(featureId, layerId);
+
+    if (existingSurvey) {
+      updateSurveyFeature(existingSurvey.id, layerId, {
+        survey_geometry: surveyGeometry,
+        survey_status: 'modified',
+      });
+    } else {
+      upsertSurveyFeature(
+        featureId,
+        layerId,
+        activeLayerNames[layerId] ?? layerId.toUpperCase(),
+        surveyGeometry,
+        origAttrs ?? {},
+        origGeom,
+        origAttrs,
+        'Adjusted polygon boundary',
+      );
+    }
+
+    setSelectedPolygonFeature(null);
+    setPolygonEditCoords(null);
+    setPolygonEditOriginal(null);
+  }, [selectedPolygonFeature, polygonEditCoords, polygonEditOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, updateSurveyFeature, upsertSurveyFeature, activeLayerNames]);
+
+  // ── Polygon cancel handler — discard changes and exit editing ──────────
+  const handlePolygonCancel = useCallback(() => {
+    setSelectedPolygonFeature(null);
+    setPolygonEditCoords(null);
+    setPolygonEditOriginal(null);
+  }, []);
+
   // ── Handle empty map area click (for add point / deselect) ───────────
   // When adding a point, we create a SurveyFeature (not an HLD feature).
   // original_hld_feature = null indicates this is an engineer-created point.
@@ -1957,6 +2122,9 @@ export default function MapScreen() {
     (lng: number, lat: number) => {
       // Clear line selection when tapping empty area
       setSelectedLineFeature(null);
+      setSelectedPolygonFeature(null);
+      setPolygonEditCoords(null);
+      setPolygonEditOriginal(null);
       if (geoMode === 'add_point') {
         if (!addPointTargetLayer) {
           console.warn('[AddPoint] No target layer selected — tap a layer chip first');
@@ -2071,10 +2239,12 @@ export default function MapScreen() {
     };
     if (geomType === 'LineString') {
       handleLineEditFromPopup(feature);
+    } else if (geomType === 'Polygon') {
+      handlePolygonEditStart(feature);
     } else {
       handleStartEdit(feature);
     }
-  }, [selectedFeaturePopup, handleLineEditFromPopup, handleStartEdit]);
+  }, [selectedFeaturePopup, handleLineEditFromPopup, handlePolygonEditStart, handleStartEdit]);
 
   // ── View features for a specific layer — opens overlay on map ─────────────
   const handleViewLayerFeatures = useCallback((layerId: string) => {
@@ -2313,6 +2483,8 @@ export default function MapScreen() {
             onFeatureDragEnd={handleFeatureDragEnd}
             onVertexDragEnd={lineMoveMode && tempLineCoords && lineToolMode !== 'continue-line' ? handleVertexDragEnd : undefined}
             vertexDragTarget={memoizedVertexTarget}
+            polygonEditTarget={selectedPolygonFeature ? { featureId: selectedPolygonFeature.id, layerId: selectedPolygonFeature.layerId } : null}
+            onPolygonVertexDragEnd={handlePolygonVertexDragEnd}
             draggableLayerIds={draggableLayerIds}
             dragMode={dragMode}
             selectedFeatureId={selectedMapFeatureId ?? undefined}
@@ -2429,6 +2601,19 @@ export default function MapScreen() {
                 }
               />
             </View>
+          )}
+
+          {/* Polygon Toolbar — appears when a polygon feature is tapped */}
+          {viewMode === 'map' && selectedPolygonFeature && !editingFeature && (
+            <PolygonToolbar
+              selectedFeature={selectedPolygonFeature}
+              onDeselect={handlePolygonCancel}
+              undoCount={undoCount}
+              onUndo={handleUndo}
+              onSave={handlePolygonSave}
+              onCancel={handlePolygonCancel}
+              hasUnsavedChanges={polygonEditCoords !== null && polygonEditOriginal !== null && JSON.stringify(polygonEditCoords) !== JSON.stringify(polygonEditOriginal)}
+            />
           )}
 
           {/* Line Selection Toolbar — appears when a line feature is tapped */}

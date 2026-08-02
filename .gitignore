@@ -63,3 +63,4 @@ docker-compose.override.yml
 
 # ── Windows artifacts ──────────────────────────────────────────
 NUL
+crash_log.txt

@@ -57,10 +57,14 @@ interface MapLibreMapProps {
   onEmptyAreaClick?: (lng: number, lat: number, screenPoint?: { x: number; y: number }) => void;
   /** Called when a point feature is dragged to a new location. Only fires when dragMode is true. */
   onFeatureDragEnd?: (featureId: string, layerId: string, newLng: number, newLat: number) => void;
-  /** Called when a vertex of a LineString is dragged to a new location. */
+  /** Called when a vertex of a LineString or polygon corner is dragged to a new location. */
   onVertexDragEnd?: (featureId: string, layerId: string, vertexIdx: number, newLng: number, newLat: number) => void;
   /** When set, renders draggable vertex markers for the target feature's LineString vertices. */
   vertexDragTarget?: { featureId: string; layerId: string; vertexIdx: number } | null;
+  /** When set, renders a highlighted polygon and draggable corner markers for the target polygon feature. */
+  polygonEditTarget?: { featureId: string; layerId: string } | null;
+  /** Called when a polygon corner handle is dragged to a new location. */
+  onPolygonVertexDragEnd?: (featureId: string, layerId: string, vertexIdx: number, newLng: number, newLat: number) => void;
   /** Set of layer IDs whose point features can be dragged */
   draggableLayerIds?: Set<string>;
   /** Whether point dragging is enabled */
@@ -877,7 +881,7 @@ function loadMapLibreJS(): Promise<void> {
 
 /** Remove all vertex marker layers and sources from the map */
 function removeVertexMarkers(map: any): void {
-  const vertexPrefixes = ['ml-vert-src-', 'ml-vert-lyr-', 'ml-vert-hl-', 'ml-vert-drag-'];
+  const vertexPrefixes = ['ml-vert-src-', 'ml-vert-lyr-', 'ml-vert-hl-', 'ml-vert-drag-', 'ml-poly-hl-src-', 'ml-poly-hl-fill-', 'ml-poly-hl-line-'];
   const style = map.getStyle();
   if (style?.layers) {
     for (const layer of [...style.layers]) {
@@ -904,6 +908,49 @@ function coordDistMeters(lng1: number, lat1: number, lng2: number, lat2: number)
 }
 
 /** Add vertex marker points for a LineString feature being edited */
+function addPolygonHighlight(map: any, featureId: string, layerId: string, feature: any, color: string): void {
+  const sourceId = `ml-poly-hl-src-${layerId}-${featureId}`;
+  const fillLayerId = `ml-poly-hl-fill-${layerId}-${featureId}`;
+  const lineLayerId = `ml-poly-hl-line-${layerId}-${featureId}`;
+
+  try {
+    map.addSource(sourceId, {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features: [{
+          type: 'Feature',
+          geometry: feature?.geometry ?? { type: 'Polygon', coordinates: [] },
+          properties: { _id: featureId, _layer_id: layerId },
+        }],
+      },
+    });
+
+    map.addLayer({
+      id: fillLayerId,
+      type: 'fill',
+      source: sourceId,
+      paint: {
+        'fill-color': color,
+        'fill-opacity': 0.16,
+      },
+    });
+
+    map.addLayer({
+      id: lineLayerId,
+      type: 'line',
+      source: sourceId,
+      paint: {
+        'line-color': color,
+        'line-width': 3,
+        'line-opacity': 0.95,
+      },
+    });
+  } catch (e) {
+    console.warn('[Polygon] Failed to add highlight layers:', e);
+  }
+}
+
 function addVertexMarkers(
   map: any,
   featureId: string,
@@ -911,6 +958,7 @@ function addVertexMarkers(
   coords: [number, number][],
   activeVertexIdx: number,
   color: string,
+  minSpacingM = 10,
 ): void {
   const sourceId = `ml-vert-src-${layerId}-${featureId}`;
 
@@ -918,7 +966,6 @@ function addVertexMarkers(
   // Start and end are always included. The original vertex index is
   // preserved in _vertex_idx so dragging a marker updates the correct
   // coordinate in tempLineCoords.
-  const MIN_VERTEX_SPACING_M = 10;
   const thinIndices: number[] = []; // original indices that get a marker
   for (let i = 0; i < coords.length; i++) {
     if (thinIndices.length === 0 || i === coords.length - 1) {
@@ -927,7 +974,7 @@ function addVertexMarkers(
     }
     const last = coords[thinIndices[thinIndices.length - 1]];
     const dist = coordDistMeters(last[0], last[1], coords[i][0], coords[i][1]);
-    if (dist >= MIN_VERTEX_SPACING_M) {
+    if (minSpacingM <= 0 || dist >= minSpacingM) {
       thinIndices.push(i);
     }
   }
@@ -1079,6 +1126,8 @@ function WebMapView({
   onFeatureDragEnd,
   onVertexDragEnd,
   vertexDragTarget,
+  polygonEditTarget,
+  onPolygonVertexDragEnd,
   draggableLayerIds,
   dragMode = false,
   selectedFeatureId,
@@ -1321,49 +1370,78 @@ function WebMapView({
   const isVertexDragRef = useRef(false);
   const onVertexDragEndRef = useRef(onVertexDragEnd);
   onVertexDragEndRef.current = onVertexDragEnd;
+  const onPolygonVertexDragEndRef = useRef(onPolygonVertexDragEnd);
+  onPolygonVertexDragEndRef.current = onPolygonVertexDragEnd;
   const vertexDragTargetRef = useRef(vertexDragTarget);
   vertexDragTargetRef.current = vertexDragTarget;
+  const polygonEditTargetRef = useRef(polygonEditTarget);
+  polygonEditTargetRef.current = polygonEditTarget;
 
-  // Effect: render/update vertex markers when vertexDragTarget changes
+  // Effect: render/update edit handles when the active vertex target changes
   useEffect(() => {
     const map = mapRef.current;
     if (!map || status !== 'ready') return;
 
-    // Remove existing vertex markers first
+    // Remove existing edit handles first
     removeVertexMarkers(map);
 
-    if (!vertexDragTarget) return;
+    const target = vertexDragTarget ?? polygonEditTarget;
+    if (!target) return;
 
-    // Find the target feature's coordinates
     for (const layerData of layersRef.current) {
-      if (layerData.id !== vertexDragTarget.layerId) continue;
+      if (layerData.id !== target.layerId) continue;
       for (const feat of layerData.features) {
         const fid = (feat.properties as any)?.id ?? (feat.properties as any)?._id ?? '';
-        if (fid === vertexDragTarget.featureId) {
-          const geom = feat.geometry;
-          if (geom?.type === 'LineString') {
-            const coords = geom.coordinates as [number, number][];
-            addVertexMarkers(
-              map,
-              vertexDragTarget.featureId,
-              vertexDragTarget.layerId,
-              coords,
-              vertexDragTarget.vertexIdx,
-              layerData.color ?? '#0D5CFF',
-            );
-          }
-          console.log(`[Vertex] Markers rendered for ${vertexDragTarget.featureId.slice(-8)} on ${vertexDragTarget.layerId}`);
-          return;
+        if (fid !== target.featureId) continue;
+
+        const geom = feat.geometry;
+        if (geom?.type === 'LineString') {
+          const coords = geom.coordinates as [number, number][];
+          addVertexMarkers(
+            map,
+            target.featureId,
+            target.layerId,
+            coords,
+            vertexDragTarget?.vertexIdx ?? -1,
+            layerData.color ?? '#0D5CFF',
+          );
+        } else if (geom?.type === 'Polygon') {
+          const outerRing = (geom.coordinates as [number, number][][])[0] ?? [];
+          addPolygonHighlight(map, target.featureId, target.layerId, feat, layerData.color ?? '#0D5CFF');
+          addVertexMarkers(
+            map,
+            target.featureId,
+            target.layerId,
+            outerRing as [number, number][],
+            -1,
+            layerData.color ?? '#0D5CFF',
+            0,
+          );
+        } else if (geom?.type === 'MultiPolygon') {
+          const firstRing = ((geom.coordinates as [number, number][][][])[0]?.[0] ?? []) as [number, number][];
+          addPolygonHighlight(map, target.featureId, target.layerId, feat, layerData.color ?? '#0D5CFF');
+          addVertexMarkers(
+            map,
+            target.featureId,
+            target.layerId,
+            firstRing,
+            -1,
+            layerData.color ?? '#0D5CFF',
+            0,
+          );
         }
+
+        console.log(`[Vertex] Edit handles rendered for ${target.featureId.slice(-8)} on ${target.layerId}`);
+        return;
       }
     }
-    // Feature not found in any layer — log diagnostic info
+
     console.warn(
-      `[Vertex] Feature ${vertexDragTarget.featureId.slice(-8)} not found in any rendered layer ` +
-      `(layerId: ${vertexDragTarget.layerId}). Available layers: ` +
+      `[Vertex] Feature ${target.featureId.slice(-8)} not found in any rendered layer ` +
+      `(layerId: ${target.layerId}). Available layers: ` +
       layersRef.current.map(l => `${l.id}(${l.features.length}feat)`).join(', ')
     );
-  }, [vertexDragTarget, status]);
+  }, [vertexDragTarget, polygonEditTarget, status]);
 
   // Clean up vertex markers on unmount
   useEffect(() => {
@@ -1608,12 +1686,86 @@ function WebMapView({
     return () => { for (const fn of cleanupFns) try { fn(); } catch {} };
   }, [layers, status, dragMode, draggableLayerIds, onFeatureDragEnd]);
 
+  const applyVertexGeometryUpdate = useCallback((featureGeom: any, vertexIdx: number, lng: number, lat: number) => {
+    if (!featureGeom) return null;
+
+    if (featureGeom.type === 'LineString') {
+      const coords = Array.isArray(featureGeom.coordinates) ? [...featureGeom.coordinates] : [];
+      if (vertexIdx >= 0 && vertexIdx < coords.length) {
+        coords[vertexIdx] = [lng, lat];
+        return { ...featureGeom, coordinates: coords };
+      }
+    }
+
+    if (featureGeom.type === 'Polygon') {
+      const rings = Array.isArray(featureGeom.coordinates) ? [...featureGeom.coordinates] : [];
+      if (rings.length > 0 && Array.isArray(rings[0])) {
+        const outerRing = [...rings[0]] as [number, number][];
+        if (vertexIdx >= 0 && vertexIdx < outerRing.length) {
+          outerRing[vertexIdx] = [lng, lat];
+          // GeoJSON linear rings must remain closed when an endpoint is moved.
+          if (vertexIdx === 0 && outerRing.length > 1) {
+            outerRing[outerRing.length - 1] = [lng, lat];
+          } else if (vertexIdx === outerRing.length - 1 && outerRing.length > 1) {
+            outerRing[0] = [lng, lat];
+          }
+          return { ...featureGeom, coordinates: [outerRing, ...rings.slice(1)] };
+        }
+      }
+    }
+
+    if (featureGeom.type === 'MultiPolygon') {
+      const polygons = Array.isArray(featureGeom.coordinates) ? [...featureGeom.coordinates] : [];
+      if (polygons.length > 0 && Array.isArray(polygons[0])) {
+        const firstPolygon = [...polygons[0]] as [number, number][][];
+        if (firstPolygon.length > 0 && Array.isArray(firstPolygon[0])) {
+          const outerRing = [...firstPolygon[0]] as [number, number][];
+          if (vertexIdx >= 0 && vertexIdx < outerRing.length) {
+            outerRing[vertexIdx] = [lng, lat];
+            // GeoJSON linear rings must remain closed when an endpoint is moved.
+            if (vertexIdx === 0 && outerRing.length > 1) {
+              outerRing[outerRing.length - 1] = [lng, lat];
+            } else if (vertexIdx === outerRing.length - 1 && outerRing.length > 1) {
+              outerRing[0] = [lng, lat];
+            }
+            const updatedFirstPolygon = [outerRing, ...firstPolygon.slice(1)] as [number, number][][];
+            return { ...featureGeom, coordinates: [updatedFirstPolygon, ...polygons.slice(1)] };
+          }
+        }
+      }
+    }
+
+    return null;
+  }, []);
+
+  const snapshotGeometryCoords = useCallback((featureGeom: any) => {
+    if (!featureGeom) return undefined;
+    if (featureGeom.type === 'LineString') {
+      return Array.isArray(featureGeom.coordinates) ? featureGeom.coordinates.map((c: [number, number]) => [c[0], c[1]] as [number, number]) : undefined;
+    }
+    if (featureGeom.type === 'Polygon') {
+      const firstRing = Array.isArray(featureGeom.coordinates?.[0]) ? featureGeom.coordinates[0] : [];
+      return firstRing.map((c: [number, number]) => [c[0], c[1]] as [number, number]);
+    }
+    if (featureGeom.type === 'MultiPolygon') {
+      const firstRing = Array.isArray(featureGeom.coordinates?.[0]?.[0]) ? featureGeom.coordinates[0][0] : [];
+      return firstRing.map((c: [number, number]) => [c[0], c[1]] as [number, number]);
+    }
+    return undefined;
+  }, []);
+
   // ── Vertex drag effect (runs independently of dragMode) ────────────────
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !onVertexDragEndRef.current || !vertexDragTargetRef.current || status !== 'ready') return;
+    const activeTarget = vertexDragTargetRef.current ?? polygonEditTargetRef.current;
+    if (
+      !map ||
+      (!onVertexDragEndRef.current && !onPolygonVertexDragEndRef.current) ||
+      !activeTarget ||
+      status !== 'ready'
+    ) return;
 
-    const vt = vertexDragTargetRef.current;
+    const vt = activeTarget;
     const vertDragLayerId = `ml-vert-drag-${vt.layerId}-${vt.featureId}`;
     const vertSourceId = `ml-vert-src-${vt.layerId}-${vt.featureId}`;
     const parentSourceId = `ml-src-${vt.layerId}`;
@@ -1654,7 +1806,7 @@ function WebMapView({
         }
         src.setData({ type: 'FeatureCollection', features });
 
-        // Update the parent LineString's coordinate at the vertex index
+        // Update the parent feature geometry at the dragged vertex index
         try {
           const parentSrc = map.getSource(ds.parentSourceId!) as any;
           if (parentSrc?._data?.features) {
@@ -1662,19 +1814,12 @@ function WebMapView({
             const parentFeat = parentFeatures.find(
               (f: any) => (f.properties?._id === ds.featureId || f.properties?.id === ds.featureId)
             );
-            if (parentFeat?.geometry?.type === 'LineString') {
-              const coords = [...parentFeat.geometry.coordinates];
-              const vi = ds.vertexIdx;
-
-              // ── Rigid V: only the dragged vertex moves ──────────────
-              // Connected segments stay completely straight because they
-              // are lines between two fixed points. The neighboring
-              // vertices (i-1 and i+1) are NOT moved — the segments
-              // pivot naturally at those fixed pivot points.
-              coords[vi] = [lngLat.lng, lngLat.lat];
-
-              parentFeat.geometry = { ...parentFeat.geometry, coordinates: coords };
-              parentSrc.setData({ type: 'FeatureCollection', features: parentFeatures });
+            if (parentFeat) {
+              const updatedGeom = applyVertexGeometryUpdate(parentFeat.geometry, ds.vertexIdx, lngLat.lng, lngLat.lat);
+              if (updatedGeom) {
+                parentFeat.geometry = updatedGeom;
+                parentSrc.setData({ type: 'FeatureCollection', features: parentFeatures });
+              }
             }
           }
         } catch {}
@@ -1755,7 +1900,12 @@ function WebMapView({
         const pixelDx = Math.abs((px?.x ?? 0) - ds.startPoint.x);
         const pixelDy = Math.abs((px?.y ?? 0) - ds.startPoint.y);
         if ((pixelDx > 8 || pixelDy > 8) && onVertexDragEndRef.current) {
-          onVertexDragEndRef.current(ds.featureId, ds.layerId, vertexIdx, lngLat.lng, lngLat.lat);
+          const isPolygonTarget = polygonEditTargetRef.current != null && vertexDragTargetRef.current == null;
+          if (isPolygonTarget && onPolygonVertexDragEndRef.current) {
+            onPolygonVertexDragEndRef.current(ds.featureId, ds.layerId, vertexIdx, lngLat.lng, lngLat.lat);
+          } else if (onVertexDragEndRef.current) {
+            onVertexDragEndRef.current(ds.featureId, ds.layerId, vertexIdx, lngLat.lng, lngLat.lat);
+          }
         }
       }
     };
@@ -1799,11 +1949,7 @@ function WebMapView({
             const parentFeat = parentSrc._data.features.find(
               (f: any) => (f.properties?._id === vt.featureId || f.properties?.id === vt.featureId)
             );
-            if (parentFeat?.geometry?.type === 'LineString') {
-              initialCoords = parentFeat.geometry.coordinates.map(
-                (c: [number, number]) => [c[0], c[1]] as [number, number]
-              );
-            }
+            initialCoords = snapshotGeometryCoords(parentFeat.geometry);
           }
         } catch {}
 
@@ -1837,7 +1983,7 @@ function WebMapView({
     return () => {
       for (const fn of cleanupFns) try { fn(); } catch {}
     };
-  }, [status, vertexDragTarget, onVertexDragEnd]);
+}, [status, vertexDragTarget, polygonEditTarget, onVertexDragEnd, onPolygonVertexDragEnd, applyVertexGeometryUpdate, snapshotGeometryCoords]);
 
   // ── Fly-to imported center ────────────────────────────────────────────
   useEffect(() => {

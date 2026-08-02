@@ -18,7 +18,15 @@ import {
 import { useThemeStore } from '../stores/theme';
 import { Spacing, Radius } from '../theme/colors';
 import { getLayerSchema } from '../stores/demo-data';
-import { MapPin, X, ChevronRight, FileText, Edit3, Camera, Crosshair, ChevronDown, ChevronUp } from 'lucide-react-native';
+import MapPin from 'lucide-react-native/icons/map-pin';
+import X from 'lucide-react-native/icons/x';
+import ChevronRight from 'lucide-react-native/icons/chevron-right';
+import FileText from 'lucide-react-native/icons/file-text';
+import Edit3 from 'lucide-react-native/icons/pen-line';
+import Camera from 'lucide-react-native/icons/camera';
+import Crosshair from 'lucide-react-native/icons/crosshair';
+import ChevronDown from 'lucide-react-native/icons/chevron-down';
+import ChevronUp from 'lucide-react-native/icons/chevron-up';
 
 // ── Types ─────────────────────────────────────────────────────────────────
 

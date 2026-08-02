@@ -27,10 +27,16 @@ import { useSurveyStore } from '../stores/survey';
 import { Spacing, Radius } from '../theme/colors';
 import { getLayerSchema } from '../stores/demo-data';
 import type { FieldSchemaField } from '../utils/types';
-import {
-  X, Check, ChevronDown, ChevronRight, MapPin,
-  Camera, Ruler, ClipboardList, AlertTriangle, Flag,
-} from 'lucide-react-native';
+import X from 'lucide-react-native/icons/x';
+import Check from 'lucide-react-native/icons/check';
+import ChevronDown from 'lucide-react-native/icons/chevron-down';
+import ChevronRight from 'lucide-react-native/icons/chevron-right';
+import MapPin from 'lucide-react-native/icons/map-pin';
+import Camera from 'lucide-react-native/icons/camera';
+import Ruler from 'lucide-react-native/icons/ruler';
+import ClipboardList from 'lucide-react-native/icons/clipboard-list';
+import AlertTriangle from 'lucide-react-native/icons/triangle-alert';
+import Flag from 'lucide-react-native/icons/flag';
 
 // ── Types ─────────────────────────────────────────────────────────────────
 

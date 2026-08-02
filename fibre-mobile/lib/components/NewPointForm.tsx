@@ -19,7 +19,10 @@ import { useThemeStore } from '../stores/theme';
 import { Spacing, Radius } from '../theme/colors';
 import { getLayerSchema } from '../stores/demo-data';
 import type { FieldSchemaField } from '../utils/types';
-import { X, Check, ChevronDown, MapPin } from 'lucide-react-native';
+import X from 'lucide-react-native/icons/x';
+import Check from 'lucide-react-native/icons/check';
+import ChevronDown from 'lucide-react-native/icons/chevron-down';
+import MapPin from 'lucide-react-native/icons/map-pin';
 
 // ── Types ─────────────────────────────────────────────────────────────────
 

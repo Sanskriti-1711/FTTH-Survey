@@ -16,7 +16,13 @@ import {
 } from 'react-native';
 import { useThemeStore } from '../stores/theme';
 import { Radius, Spacing } from '../theme/colors';
-import { ChevronDown, ChevronUp, ChevronRight, Check, List, FolderOpen, FolderClosed } from 'lucide-react-native';
+import ChevronDown from 'lucide-react-native/icons/chevron-down';
+import ChevronUp from 'lucide-react-native/icons/chevron-up';
+import ChevronRight from 'lucide-react-native/icons/chevron-right';
+import Check from 'lucide-react-native/icons/check';
+import List from 'lucide-react-native/icons/list';
+import FolderOpen from 'lucide-react-native/icons/folder-open';
+import FolderClosed from 'lucide-react-native/icons/folder-closed';
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
