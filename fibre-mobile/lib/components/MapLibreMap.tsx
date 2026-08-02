@@ -672,12 +672,83 @@ function NativeMapView({
   // ── Retry handler ──────────────────────────────────────────────────────
   const handleRetry = useCallback(() => {
     retryCountRef.current += 1;
+    // CRITICAL: reset the alive-flag so the fallback ready-signals can
+    // re-fire on the fresh map instance. Without this, a retry after a
+    // dropped-event hang would stay stuck on 'loading' forever.
+    mapAliveRef.current = false;
     setStatus('loading');
     setLoadProgress(undefined);
     setErrorInfo({ type: 'unknown', message: '' });
     // Bump mapKey to force React to unmount/remount the MapLibreGL.Map
     setMapKey((k) => k + 1);
   }, []);
+
+  // ── Robust 'map is alive' detection ───────────────────────────────────
+  // v11 on RN 0.8x (New Architecture) can silently drop DirectEventHandler
+  // events (Fabric requires a 'top' prefix that the library may not emit),
+  // so relying on onDidFinishLoadingMap alone leaves the loading overlay
+  // stuck forever. Instead, treat ANY of these signals as proof the map
+  // initialized and rendering: style loaded, first frame rendered, or the
+  // camera moved (the initial <Camera> always moves the viewport).
+  const mapAliveRef = useRef(false);
+  const aliveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const markMapReady = useCallback((source: string) => {
+    mapAliveRef.current = true;
+    if (aliveTimerRef.current) { clearTimeout(aliveTimerRef.current); aliveTimerRef.current = null; }
+    setLoadProgress(1);
+    setStatus('ready');
+    console.log(`[MapLibre] Map marked ready via ${source}`);
+  }, []);
+
+  const markMapAlive = useCallback(() => {
+    if (mapAliveRef.current) return;
+    // Grace: if any event proves the map is interactive, accept it as ready.
+    // The timeout effect will still fire if nothing ever signals.
+    mapAliveRef.current = true;
+    if (aliveTimerRef.current) clearTimeout(aliveTimerRef.current);
+    aliveTimerRef.current = setTimeout(() => {
+      aliveTimerRef.current = null;
+      setLoadProgress(1);
+      setStatus((s) => (s === 'loading' ? 'ready' : s));
+      console.log('[MapLibre] Map marked ready via camera/interaction signal');
+    }, 1200);
+  }, []);
+
+  // Clear any pending alive-timer on unmount to avoid setState-after-unmount
+  useEffect(() => {
+    return () => {
+      if (aliveTimerRef.current) { clearTimeout(aliveTimerRef.current); aliveTimerRef.current = null; }
+    };
+  }, []);
+
+  // ── TurboModule liveness poll (event-bridge independent) ───────────────
+  // The event bridge (DirectEventHandler) can silently drop events under
+  // Fabric, but the imperative TurboModule (getZoom/getCenter) does NOT go
+  // through that bridge. Polling it proves the native map is alive even if
+  // every event is dropped — a bulletproof ready-signal.
+  useEffect(() => {
+    if (status !== 'loading') return;
+    const poll = setInterval(() => {
+      try {
+        // getZoom() is a TurboModule call that returns a Promise — it does
+        // NOT depend on the (possibly dropped) event bridge. If it resolves
+        // with a finite number, the native map is alive and interactive.
+        const maybe = mapRef.current?.getZoom?.();
+        if (maybe && typeof maybe.then === 'function') {
+          maybe.then((zoom: unknown) => {
+            if (typeof zoom === 'number' && Number.isFinite(zoom)) {
+              markMapAlive();
+            }
+          }).catch(() => { /* native not ready yet */ });
+        } else if (typeof maybe === 'number' && Number.isFinite(maybe)) {
+          markMapAlive();
+        }
+      } catch { /* native not ready yet */ }
+    }, 2000);
+    // Stop polling once we leave the loading state or after 25s (timeout covers it)
+    const stop = setTimeout(() => clearInterval(poll), 25000);
+    return () => { clearInterval(poll); clearTimeout(stop); };
+  }, [status, markMapAlive, mapKey]);
 
   // ── Check if all layers are empty ───────────────────────────────────────
   const isEmpty = useMemo(() => !hasVisibleFeatures(layers), [layers]);
@@ -721,11 +792,13 @@ function NativeMapView({
           if (zoom !== undefined) {
             zoomRef.current = zoom;
           }
+          markMapAlive();
         }}
-        onDidFinishLoadingMap={() => {
-          setStatus('ready');
-          setLoadProgress(1);
-        }}
+        onRegionDidChange={() => markMapAlive()}
+        onDidFinishLoadingMap={() => markMapReady('onDidFinishLoadingMap')}
+        onDidFinishLoadingStyle={() => markMapReady('onDidFinishLoadingStyle')}
+        onDidFinishRenderingMap={() => markMapReady('onDidFinishRenderingMap')}
+        onDidFinishRenderingMapFully={() => markMapReady('onDidFinishRenderingMapFully')}
         onDidFailLoadingMap={(e: any) => {
           // v11 passes NativeSyntheticEvent<null> here — no error payload is
           // available, so report a generic style-load failure. Log to the
