@@ -145,8 +145,7 @@ const IS_NATIVE = IS_NATIVE_PLATFORM && NativeMapLibre !== null;
 // fails to load on a native platform, show the user actionable guidance
 // instead of a generic error.
 const IS_EXPO_GO = IS_NATIVE_PLATFORM
-  ? (Constants as any).executionEnvironment === 'storeClient' ||
-    (Constants as any).appOwnership === 'expo'
+  ? (Constants as any).executionEnvironment === 'storeClient'
   : false;
 
 // ── Shared UI Components ─────────────────────────────────────────────────
