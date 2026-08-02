@@ -47,6 +47,7 @@
       "expo-image-picker",
       "expo-document-picker",
       "expo-location",
+      "@maplibre/maplibre-react-native",
       [
         "expo-build-properties",
         {
