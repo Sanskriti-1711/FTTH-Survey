@@ -24,6 +24,7 @@ import {
   PanResponder,
 } from 'react-native';
 import type { GeoJSONFeature } from '../utils/types';
+import Constants from 'expo-constants';
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -137,6 +138,16 @@ if (IS_NATIVE_PLATFORM) {
 }
 
 const IS_NATIVE = IS_NATIVE_PLATFORM && NativeMapLibre !== null;
+
+// ── Expo Go detection ────────────────────────────────────────────────────
+// @maplibre/maplibre-react-native ships a native TurboModule
+// (MLRNMapViewModule) that is NOT bundled inside Expo Go. When the module
+// fails to load on a native platform, show the user actionable guidance
+// instead of a generic error.
+const IS_EXPO_GO = IS_NATIVE_PLATFORM
+  ? (Constants as any).executionEnvironment === 'storeClient' ||
+    (Constants as any).appOwnership === 'expo'
+  : false;
 
 // ── Shared UI Components ─────────────────────────────────────────────────
 
@@ -508,8 +519,11 @@ function NativeMapView({
 
   const styleUrl = useMemo(() => {
     if (!mapStyleProp) return DEFAULT_MAP_STYLE;
-    if (typeof mapStyleProp === 'string') return mapStyleProp;
-    return DEFAULT_MAP_STYLE;
+    // v11's Map.mapStyle accepts both a style URL string and an inline
+    // StyleSpecification object (e.g. the satellite raster style). Passing
+    // the object through lets satellite imagery work on Android instead of
+    // silently falling back to the default streets style.
+    return mapStyleProp as string | Record<string, unknown>;
   }, [mapStyleProp]);
 
   // ── Feature click handler ──────────────────────────────────────────────
@@ -850,6 +864,8 @@ let scriptLoadPromise: Promise<void> | null = null;
 
 function loadMapLibreCSS(): Promise<void> {
   return new Promise((resolve) => {
+    // Defensive guard — this code path must only run in a browser.
+    if (typeof document === 'undefined') { resolve(); return; }
     if (document.getElementById('ml-css')) { resolve(); return; }
     const link = document.createElement('link');
     link.id = 'ml-css';
@@ -862,6 +878,10 @@ function loadMapLibreCSS(): Promise<void> {
 }
 
 function loadMapLibreJS(): Promise<void> {
+  // Defensive guard — this code path must only run in a browser.
+  if (typeof document === 'undefined' || typeof window === 'undefined') {
+    return Promise.resolve();
+  }
   if ((window as any).maplibregl) return Promise.resolve();
   if (scriptLoadPromise) return scriptLoadPromise;
 
@@ -2077,6 +2097,22 @@ function WebMapView({
 
 // ── Main Export ──────────────────────────────────────────────────────────
 
+function NativeMapUnavailableView({ isExpoGo }: { isExpoGo: boolean }) {
+  return (
+    <View style={[styles.errorContainer, { minHeight: 300 }]}>
+      <View style={styles.errorIconCircle}>
+        <Text style={styles.errorIconLarge}>📦</Text>
+      </View>
+      <Text style={styles.errorTitle}>Map Library Not Available</Text>
+      <Text style={styles.errorDescription}>
+        {isExpoGo
+          ? 'The map engine (MapLibre) is not included in Expo Go. Install the development build of this app instead: connect your phone and run `npx expo run:android`, or install an APK built with EAS (`eas build -p android --profile preview`).'
+          : 'The MapLibre native module could not be loaded. Rebuild the app with `npx expo run:android` or `eas build -p android --profile preview` and install the new APK.'}
+      </Text>
+    </View>
+  );
+}
+
 export default function MapLibreMap(props: MapLibreMapProps) {
   if (IS_NATIVE) {
     return <NativeMapView {...props} />;
@@ -2084,13 +2120,9 @@ export default function MapLibreMap(props: MapLibreMapProps) {
   if (Platform.OS === 'web') {
     return <WebMapView {...props} />;
   }
-  return (
-    <View style={[styles.errorContainer, { minHeight: 300 }]}>
-      <Text style={styles.errorIconLarge}>🗺️</Text>
-      <Text style={styles.errorTitle}>Map Unavailable</Text>
-      <Text style={styles.errorDescription}>Map rendering is not supported on this platform.</Text>
-    </View>
-  );
+  // Native platform without the native module (e.g. Expo Go or a stale
+  // build) — never attempt the DOM-based WebMapView here.
+  return <NativeMapUnavailableView isExpoGo={IS_EXPO_GO} />;
 }
 
 // ── Shared Styles ─────────────────────────────────────────────────────────
