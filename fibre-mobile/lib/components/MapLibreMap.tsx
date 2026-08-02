@@ -81,11 +81,32 @@ interface MapLibreMapProps {
 
 // ── Basemap Presets ──────────────────────────────────────────────────────
 
+// Inline raster StyleSpecification using OpenStreetMap tiles — the same
+// reliable pattern as the satellite basemap. Avoids depending on a hosted
+// vector style server (style JSON + glyphs + sprites) that can fail on
+// mobile networks. OSM tiles are served up to z19; beyond that MapLibre
+// scales the last tile, so no layer maxzoom is set.
+const OSM_STREETS_STYLE: Record<string, unknown> = {
+  version: 8,
+  sources: {
+    'osm-streets': {
+      type: 'raster',
+      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+      tileSize: 256,
+      attribution: '© OpenStreetMap contributors',
+      maxzoom: 19,
+    },
+  },
+  layers: [
+    { id: 'osm-streets-layer', type: 'raster', source: 'osm-streets', minzoom: 0 },
+  ],
+};
+
 export const BASEMAPS: Record<string, BasemapStyle> = {
   streets: {
     id: 'streets',
     name: 'Streets',
-    style: 'https://tiles.openfreemap.org/styles/liberty',
+    style: OSM_STREETS_STYLE,
     icon: '🗺️',
   },
   satellite: {
@@ -118,7 +139,7 @@ export const BASEMAPS: Record<string, BasemapStyle> = {
 };
 
 const OAKWOOD_CENTER: [number, number] = [-0.1100, 51.5900];
-const DEFAULT_MAP_STYLE = 'https://tiles.openfreemap.org/styles/liberty';
+const DEFAULT_MAP_STYLE: string | Record<string, unknown> = OSM_STREETS_STYLE;
 const LOADING_TIMEOUT_MS = 30000;
 
 // ── Platform Detection ───────────────────────────────────────────────────
@@ -705,9 +726,19 @@ function NativeMapView({
           setStatus('ready');
           setLoadProgress(1);
         }}
-        onDidFailLoadingMap={() => {
+        onDidFailLoadingMap={(e: any) => {
           // v11 passes NativeSyntheticEvent<null> here — no error payload is
-          // available, so report a generic style-load failure.
+          // available, so report a generic style-load failure. Log to the
+          // native console (visible via `adb logcat`) with diagnostic
+          // context so style failures are traceable in the field.
+          const styleDesc =
+            typeof styleUrl === 'string'
+              ? styleUrl
+              : `inline StyleSpecification (${Object.keys(styleUrl).length} keys)`;
+          console.error(
+            `[MapLibre] Map style failed to load. platform=${Platform.OS} mapKey=${mapKey} retry=${retryCountRef.current} style=${styleDesc}`,
+            e?.nativeEvent ?? e ?? '',
+          );
           setErrorInfo({
             type: 'style',
             message: 'Map style failed to load.',
