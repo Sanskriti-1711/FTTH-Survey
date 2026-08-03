@@ -1,6 +1,6 @@
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
-import { API_BASE_URL } from '../utils/constants';
+import { getApiBaseUrl, loadServerUrl } from '../utils/constants';
 import { useOfflineStore } from '../stores/offline';
 
 // ── Token Management ─────────────────────────────────────────────────────
@@ -25,6 +25,9 @@ export let apiClientToken: string | null = null;
 
 export async function loadStoredToken(): Promise<string | null> {
   try {
+    // Load the persisted runtime server override before any API call so a
+    // changed LAN IP is picked up on app restart without a rebuild.
+    await loadServerUrl();
     const token = isWeb
       ? webStorage.getItem(TOKENS.access)
       : await SecureStore.getItemAsync(TOKENS.access);
@@ -101,7 +104,7 @@ export async function refreshAccessToken(signal?: AbortSignal): Promise<string |
   if (!refresh) return null;
 
   try {
-    const res = await fetch(`${API_BASE_URL}/api/users/token/refresh/`, {
+    const res = await fetch(`${getApiBaseUrl()}/api/users/token/refresh/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refresh }),
@@ -134,7 +137,7 @@ export async function apiFetch<T = unknown>(
     headers['Authorization'] = `Bearer ${apiClientToken}`;
   }
 
-  const url = path.startsWith('http') ? path : `${API_BASE_URL}${path}`;
+  const url = path.startsWith('http') ? path : `${getApiBaseUrl()}${path}`;
 
   // Abort early if offline — avoid pointless timeout waits
   requireOnline();
