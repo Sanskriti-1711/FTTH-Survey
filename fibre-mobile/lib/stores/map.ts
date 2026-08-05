@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import { DEMO_LAYERS } from './demo-data';
 
 // ── Map Store ─────────────────────────────────────────────────────────────
 
@@ -32,7 +31,6 @@ interface MapState {
   selectFeature: (featureId: string | null, popup?: FeaturePopup | null) => void;
   setUserLocation: (location: { latitude: number; longitude: number } | null) => void;
   setFollowUser: (follow: boolean) => void;
-  loadDemoLayers: () => void;
 }
 
 export const useMapStore = create<MapState>((set) => ({
@@ -53,15 +51,4 @@ export const useMapStore = create<MapState>((set) => ({
     set({ selectedFeatureId: featureId, selectedFeaturePopup: popup }),
   setUserLocation: (location) => set({ userLocation: location }),
   setFollowUser: (follow) => set({ followUser: follow }),
-
-  loadDemoLayers: () =>
-    set({
-      layers: DEMO_LAYERS.map((l) => ({
-        id: l.layer_id,
-        name: l.layer_name,
-        visible: true,
-        featureCount: l.feature_count,
-        geometryType: l.layer_id === 'trenches' ? 'LineString' : l.layer_id === 'polygons' ? 'Polygon' : 'Point',
-      })),
-    }),
 }));

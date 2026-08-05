@@ -52,7 +52,7 @@ interface ActionDef {
 }
 
 const ACTIONS: ActionDef[] = [
-  { id: 'undo', label: 'Undo', icon: '↩️' },
+  { id: 'undo', label: 'Undo', icon: '↩️', enabled: true },
   { id: 'cancel', label: 'Cancel', icon: '✕', danger: true, enabled: true },
   { id: 'save', label: 'Save', icon: '💾', accent: true, enabled: true },
 ];

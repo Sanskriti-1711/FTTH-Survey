@@ -64,3 +64,6 @@ docker-compose.override.yml
 # ── Windows artifacts ──────────────────────────────────────────
 NUL
 crash_log.txt
+
+# ── Built APKs (release builds — regenerated, ~150MB each) ───────
+*.apk

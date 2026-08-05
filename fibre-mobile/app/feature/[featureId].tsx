@@ -17,7 +17,7 @@ import { useSurveyStore } from '../../lib/stores/survey';
 import { useImageStore } from '../../lib/stores/image';
 import { useProjectStore } from '../../lib/stores/project';
 import { getFeatureDetail as apiGetFeatureDetail } from '../../lib/api/projects';
-import { getDemoFeatureDetail, getLayerSchema } from '../../lib/stores/demo-data';
+import { getLayerSchema } from '../../lib/stores/layer-schemas';
 import { Card } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
 import { StatusBadge } from '../../components/ui/StatusBadge';
@@ -58,7 +58,6 @@ export default function FeatureDetailScreen() {
   const [toastType, setToastType] = useState<'success' | 'error'>('success');
   const [loading, setLoading] = useState(true);
 
-  const { demoMode } = useAuthStore();
   const { projectGeojsons } = useProjectStore();
 
   useEffect(() => {
@@ -69,13 +68,7 @@ export default function FeatureDetailScreen() {
   const loadData = async () => {
     try {
       setLoading(true);
-      if (demoMode && featureId?.startsWith('demo-')) {
-        const detail = getDemoFeatureDetail(featureId as string);
-        setFeature(detail.feature);
-        setGeojson(detail.geojson);
-        setMeasurements((detail.feature.field_measurements as Record<string, unknown>) ?? {});
-        setNotes(detail.feature.comparison_notes ?? '');
-      } else if (routeProjectId) {
+      if (routeProjectId) {
         try {
           const data = await apiGetFeatureDetail(routeProjectId, featureId as string);
           setFeature(data.feature);
@@ -586,7 +579,7 @@ export default function FeatureDetailScreen() {
           headerRight={
             <TouchableOpacity
               style={[styles.addPhotoBtn, { backgroundColor: colors.primary }]}
-              onPress={() => router.push('/camera')}
+              onPress={() => router.push({ pathname: '/camera', params: { featureId: featureId as string } })}
             >
               <Camera size={16} stroke={colors.onPrimary} />
               <Text style={[styles.addPhotoText, { color: colors.onPrimary }]}>Add</Text>

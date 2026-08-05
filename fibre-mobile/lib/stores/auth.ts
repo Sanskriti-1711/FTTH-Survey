@@ -11,13 +11,11 @@ interface AuthState {
   isLoading: boolean;
   isRestoring: boolean;
   error: string | null;
-  demoMode: boolean;
   // Actions
   restoreSession: () => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, fullName: string, role?: string) => Promise<void>;
   logout: () => Promise<void>;
-  setDemoMode: (enabled: boolean) => void;
   clearError: () => void;
 }
 
@@ -27,7 +25,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   isLoading: false,
   isRestoring: true,
   error: null,
-  demoMode: false,
 
   restoreSession: async () => {
     try {
@@ -66,7 +63,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         user: data.user,
         token: data.access,
         isLoading: false,
-        demoMode: false,
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Login failed';
@@ -90,24 +86,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   logout: async () => {
     await clearTokens();
-    set({ user: null, token: null, demoMode: false });
-  },
-
-  setDemoMode: (enabled) => {
-    set({
-      demoMode: enabled,
-      user: enabled
-        ? {
-            id: 'demo-user',
-            email: 'demo@fibre360.com',
-            full_name: 'Demo Engineer',
-            role: 'ENGINEER',
-            created_by: null,
-            created_at: new Date().toISOString(),
-          }
-        : null,
-      token: enabled ? 'demo-token' : null,
-    });
+    set({ user: null, token: null });
   },
 
   clearError: () => set({ error: null }),

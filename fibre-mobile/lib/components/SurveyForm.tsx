@@ -24,8 +24,9 @@ import {
 } from 'react-native';
 import { useThemeStore } from '../stores/theme';
 import { useSurveyStore } from '../stores/survey';
+import { router } from 'expo-router';
 import { Spacing, Radius } from '../theme/colors';
-import { getLayerSchema } from '../stores/demo-data';
+import { getLayerSchema } from '../stores/layer-schemas';
 import type { FieldSchemaField } from '../utils/types';
 import X from 'lucide-react-native/icons/x';
 import Check from 'lucide-react-native/icons/check';
@@ -45,6 +46,9 @@ export interface SurveyFormData {
   layerId: string;
   /** Feature ID to update on save */
   featureId: string;
+  /** HLD feature ID for photo uploads (backend photo endpoint only accepts HLD Feature ids).
+   *  Undefined for engineer-created points with no HLD row — photos stay local. */
+  photoTargetId?: string;
   /** Feature name for header display */
   featureName?: string;
   /** Initial property values */
@@ -298,7 +302,7 @@ function CollapsibleSection({
         <ChevronRight
           size={16}
           stroke={colors.primary}
-          style={{ transform: isOpen ? [{ rotate: '90deg' }] : [] }}
+          style={isOpen ? { transform: [{ rotate: '90deg' }] } : undefined}
         />
       </TouchableOpacity>
       {isOpen && children && (
@@ -869,15 +873,30 @@ export default function SurveyForm({ formData, onDismiss, onSave }: SurveyFormPr
             {section.id === 'evidence' && (
               <View>
                 <View style={styles.evidenceRow}>
-                  <TouchableOpacity style={[styles.evidenceBtn, { backgroundColor: colors.primary + '15', borderColor: colors.primary }]}>
+                  <TouchableOpacity
+                    style={[styles.evidenceBtn, { backgroundColor: colors.primary + '15', borderColor: colors.primary }]}
+                    onPress={() => {
+                      // Open camera with the HLD feature id so the photo attaches +
+                      // uploads (backend only accepts HLD Feature ids). For
+                      // engineer-created points with no HLD row, no featureId is
+                      // passed — the camera stores the photo locally instead.
+                      router.push({ pathname: '/camera', params: formData.photoTargetId ? { featureId: formData.photoTargetId } : {} });
+                    }}
+                  >
                     <Camera size={18} stroke={colors.primary} />
                     <Text style={[styles.evidenceBtnText, { color: colors.primary }]}>Photo</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity style={[styles.evidenceBtn, { backgroundColor: colors.warning + '15', borderColor: colors.warning }]}>
+                  <TouchableOpacity
+                    style={[styles.evidenceBtn, { backgroundColor: colors.warning + '15', borderColor: colors.warning }]}
+                    onPress={() => setEvidenceDescription((prev) => (prev ? prev + '\n' : '') + 'Measurement: ')}
+                  >
                     <Ruler size={18} stroke={colors.warning} />
                     <Text style={[styles.evidenceBtnText, { color: colors.warning }]}>Measure</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity style={[styles.evidenceBtn, { backgroundColor: colors.success + '15', borderColor: colors.success }]}>
+                  <TouchableOpacity
+                    style={[styles.evidenceBtn, { backgroundColor: colors.success + '15', borderColor: colors.success }]}
+                    onPress={() => setEvidenceDescription((prev) => (prev ? prev + '\n' : '') + 'Note: ')}
+                  >
                     <ClipboardList size={18} stroke={colors.success} />
                     <Text style={[styles.evidenceBtnText, { color: colors.success }]}>Note</Text>
                   </TouchableOpacity>

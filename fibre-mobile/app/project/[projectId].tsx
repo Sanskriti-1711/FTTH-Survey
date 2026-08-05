@@ -10,13 +10,11 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, router } from 'expo-router';
 import { useThemeStore } from '../../lib/stores/theme';
-import { useAuthStore } from '../../lib/stores/auth';
 import { Card } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
 import { StatusBadge, ProgressBar } from '../../components/ui/StatusBadge';
 import { Spacing, Radius } from '../../lib/theme/colors';
 import { ArrowLeft, Layers, ChevronRight, Download, Map } from 'lucide-react-native';
-import { DEMO_PROJECTS, DEMO_LAYERS } from '../../lib/stores/demo-data';
 import type { Layer, Project } from '../../lib/utils/types';
 
 // ── Project Detail Screen ─────────────────────────────────────────────────
@@ -24,7 +22,6 @@ import type { Layer, Project } from '../../lib/utils/types';
 export default function ProjectDetailScreen() {
   const { projectId } = useLocalSearchParams<{ projectId: string }>();
   const colors = useThemeStore((s) => s.colors);
-  const { demoMode } = useAuthStore();
 
   const [project, setProject] = useState<Project | null>(null);
   const [layers, setLayers] = useState<Layer[]>([]);
@@ -39,21 +36,6 @@ export default function ProjectDetailScreen() {
     try {
       setLoading(true);
 
-      // Demo mode support
-      if (demoMode) {
-        const proj = DEMO_PROJECTS.find((p) => p.id === projectId);
-        if (proj) {
-          setProject(proj);
-          setLayers(DEMO_LAYERS);
-        } else {
-          // Fallback: use first demo project
-          setProject(DEMO_PROJECTS[0]);
-          setLayers(DEMO_LAYERS);
-        }
-        setLoading(false);
-        return;
-      }
-
       const { getProject, getProjectLayers } = await import('../../lib/api/projects');
       const [proj, layerData] = await Promise.all([
         getProject(projectId as string),
@@ -62,11 +44,7 @@ export default function ProjectDetailScreen() {
       setProject(proj);
       setLayers(layerData.layers);
     } catch {
-      // Fallback to demo data on error
-      if (demoMode) {
-        setProject(DEMO_PROJECTS[0]);
-        setLayers(DEMO_LAYERS);
-      }
+      // Leave project null — the "Project not found" state handles it
     } finally {
       setLoading(false);
     }

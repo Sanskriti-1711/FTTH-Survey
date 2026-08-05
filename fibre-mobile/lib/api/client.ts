@@ -88,12 +88,10 @@ export class ApiError extends Error {
  * Throws early with a clear message so callers can handle offline gracefully.
  */
 function requireOnline(): void {
-  const { isOnline, connectivitySource } = useOfflineStore.getState();
+  const { isOnline } = useOfflineStore.getState();
   if (!isOnline) {
     throw new ApiError(
-      connectivitySource === 'demo'
-        ? 'Demo mode: no network available. Toggle online in Offline Storage to simulate connectivity.'
-        : 'No internet connection. Data will sync automatically when reconnected.',
+      'No internet connection. Data will sync automatically when reconnected.',
       0
     );
   }

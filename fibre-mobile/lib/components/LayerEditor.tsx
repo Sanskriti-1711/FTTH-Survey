@@ -1,6 +1,6 @@
 // ── Layer Editor Component ───────────────────────────────────────────────
 // Dynamic form component that renders the correct survey form based on
-// the feature's layer_name. Uses LayerSchema from demo-data to determine:
+// the feature's layer_name. Uses LayerSchema from layer-schemas to determine:
 //  - Which fields are read-only (HLD data)
 //  - Which fields are editable with dropdowns/validation
 //  - Required photos for this layer type
@@ -19,7 +19,7 @@ import {
 } from 'react-native';
 import { useThemeStore } from '../stores/theme';
 import { Spacing, Radius } from '../theme/colors';
-import { getLayerSchema } from '../stores/demo-data';
+import { getLayerSchema } from '../stores/layer-schemas';
 import type { LayerSchema, FieldSchemaField } from '../utils/types';
 import {
   Eye,

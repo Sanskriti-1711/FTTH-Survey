@@ -271,6 +271,32 @@ export async function createSurveyFeature(
   });
 }
 
+/**
+ * POST /api/survey/survey-features/<id>/upload-photo/ — attach an evidence
+ * photo to a survey feature. Used for engineer-created points (no HLD row).
+ */
+export async function uploadSurveyFeaturePhoto(
+  featureId: string,
+  photo: { uri: string; name: string; type: string }
+): Promise<{
+  id: string;
+  photo_url: string;
+  uploaded_at: string;
+}> {
+  const form = new FormData();
+  form.append('photo', {
+    uri: photo.uri,
+    name: photo.name,
+    type: photo.type,
+  } as unknown as Blob);
+
+  return apiFetch(`/api/survey/survey-features/${featureId}/upload-photo/`, {
+    method: 'POST',
+    body: form,
+    isFormData: true,
+  });
+}
+
 export async function getSurveyFeature(featureId: string): Promise<SurveyFeatureData> {
   return apiFetch(`/api/survey/survey-features/${featureId}/`);
 }

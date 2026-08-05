@@ -35,7 +35,7 @@ import CheckCircle2 from 'lucide-react-native/icons/circle-check';
 
 export default function LoginScreen() {
   const colors = useThemeStore((s) => s.colors);
-  const { login, register, isLoading, error, clearError, setDemoMode } = useAuthStore();
+  const { login, register, isLoading, error, clearError } = useAuthStore();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -84,11 +84,6 @@ export default function LoginScreen() {
       const msg = err instanceof Error ? err.message : 'Authentication failed';
       showToast(msg);
     }
-  };
-
-  const handleDemoMode = () => {
-    setDemoMode(true);
-    router.replace('/(tabs)/home');
   };
 
   // ── Server settings handlers ────────────────────────────────────────────
@@ -240,21 +235,6 @@ export default function LoginScreen() {
                   : "Don't have an account? Create one"}
               </Text>
             </TouchableOpacity>
-
-            {/* Divider */}
-            <View style={styles.divider}>
-              <View style={[styles.dividerLine, { backgroundColor: colors.outline }]} />
-              <Text style={[styles.dividerText, { color: colors.textTertiary }]}>or</Text>
-              <View style={[styles.dividerLine, { backgroundColor: colors.outline }]} />
-            </View>
-
-            {/* Demo mode */}
-            <Button
-              title="Continue in Demo Mode"
-              variant="secondary"
-              onPress={handleDemoMode}
-              size="md"
-            />
 
             {/* Server settings toggle */}
             <TouchableOpacity
@@ -410,19 +390,6 @@ const styles = StyleSheet.create({
   switchText: {
     fontSize: 14,
     fontWeight: '500',
-  },
-  divider: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: Spacing.lg,
-  },
-  dividerLine: {
-    flex: 1,
-    height: 1,
-  },
-  dividerText: {
-    marginHorizontal: Spacing.lg,
-    fontSize: 13,
   },
   serverToggle: {
     flexDirection: 'row',

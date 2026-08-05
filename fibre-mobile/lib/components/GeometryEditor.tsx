@@ -214,27 +214,6 @@ export default function GeometryEditor({
             <Text style={[styles.editToolLabel, { color: '#EF4444' }]}>Delete</Text>
           </TouchableOpacity>
 
-          {/* Placeholder for future line/polygon tools */}
-          {geomType === 'LineString' && (
-            <View style={[styles.editToolPlaceholder, { borderColor: colors.outlineLight }]}>
-              <Text style={[styles.editToolPlaceholderText, { color: colors.textTertiary }]}>
-                Split · Merge · Draw · Vertices
-              </Text>
-              <Text style={[styles.editToolPlaceholderSub, { color: colors.textTertiary }]}>
-                Custom rules coming soon
-              </Text>
-            </View>
-          )}
-          {geomType === 'Polygon' && (
-            <View style={[styles.editToolPlaceholder, { borderColor: colors.outlineLight }]}>
-              <Text style={[styles.editToolPlaceholderText, { color: colors.textTertiary }]}>
-                Vertices
-              </Text>
-              <Text style={[styles.editToolPlaceholderSub, { color: colors.textTertiary }]}>
-                Custom rules coming soon
-              </Text>
-            </View>
-          )}
         </View>
       </Animated.View>
     );
@@ -505,25 +484,5 @@ const styles = StyleSheet.create({
   editToolLabel: {
     fontSize: 11,
     fontWeight: '600',
-  },
-  editToolPlaceholder: {
-    flex: 1,
-    minWidth: 120,
-    borderWidth: 1,
-    borderStyle: 'dashed',
-    borderRadius: Radius.md,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    alignItems: 'center',
-    opacity: 0.7,
-  },
-  editToolPlaceholderText: {
-    fontSize: 10,
-    fontWeight: '600',
-  },
-  editToolPlaceholderSub: {
-    fontSize: 8,
-    fontWeight: '500',
-    marginTop: 1,
   },
 });

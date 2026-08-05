@@ -445,6 +445,8 @@ export interface SurveyFeatureData {
   survey_geometry: Record<string, unknown>;
   /** Engineer-edited attributes */
   survey_attributes: Record<string, unknown>;
+  /** Evidence photo URL (backed by the survey-feature photo endpoint) */
+  photo_url?: string | null;
   survey_status: 'new' | 'modified' | 'removed' | 'pending_review' | 'rejected' | 'approved' | 'completed';
   version_number: number;
   sync_status: 'pending' | 'synced' | 'failed';

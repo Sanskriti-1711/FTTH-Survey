@@ -9,7 +9,7 @@ import {
   ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import { useThemeStore } from '../lib/stores/theme';
 import { useImageStore } from '../lib/stores/image';
@@ -18,16 +18,23 @@ import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Card';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Spacing, Radius } from '../lib/theme/colors';
-import { Camera as CameraIcon, Image as ImageIcon, X, Upload, Check, ArrowLeft } from 'lucide-react-native';
+import { Camera as CameraIcon, Image as ImageIcon, X, Upload, Check, ArrowLeft, Link2 } from 'lucide-react-native';
+import { PhotoFeaturePicker } from '../lib/components/PhotoFeaturePicker';
 import type { PendingPhoto } from '../lib/utils/types';
 
 // ── Camera Screen ─────────────────────────────────────────────────────────
 
 export default function CameraScreen() {
   const colors = useThemeStore((s) => s.colors);
-  const { pendingPhotos, addPhoto, removePhoto, uploadPhoto, uploading } = useImageStore();
+  const { pendingPhotos, addPhoto, removePhoto, uploadPhoto, attachPhoto, uploading } = useImageStore();
   const { activeProject } = useProjectStore();
+  // featureId passed via route param (from feature detail / survey forms)
+  const { featureId } = useLocalSearchParams<{ featureId?: string }>();
   const [selectedPhoto, setSelectedPhoto] = useState<PendingPhoto | null>(null);
+  // Photo currently being linked to a feature via the picker
+  const [attachPhotoTarget, setAttachPhotoTarget] = useState<PendingPhoto | null>(null);
+  // id of the photo currently uploading via the attach flow (scoped per photo)
+  const [attachBusyId, setAttachBusyId] = useState<string | null>(null);
 
   const takePhoto = async () => {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
@@ -43,12 +50,17 @@ export default function CameraScreen() {
 
     if (!result.canceled && result.assets?.[0]) {
       const asset = result.assets[0];
+      const id = `photo_${Date.now()}`;
       addPhoto({
-        id: `photo_${Date.now()}`,
+        id,
         localUri: asset.uri,
         projectId: activeProject?.id ?? 'unknown',
-        featureId: undefined,
+        featureId,
       });
+      // If opened from a feature, upload immediately so the photo is attached
+      if (featureId) {
+        uploadPhoto(id, featureId);
+      }
     }
   };
 
@@ -61,19 +73,75 @@ export default function CameraScreen() {
 
     if (!result.canceled && result.assets?.[0]) {
       const asset = result.assets[0];
+      const id = `photo_${Date.now()}`;
       addPhoto({
-        id: `photo_${Date.now()}`,
+        id,
         localUri: asset.uri,
         projectId: activeProject?.id ?? 'unknown',
-        featureId: undefined,
+        featureId,
       });
+      if (featureId) {
+        uploadPhoto(id, featureId);
+      }
     }
+  };
+
+  // ── Upload all pending/failed photos that are tied to a feature ────────
+  const handleUploadAll = async () => {
+    const toUpload = pendingPhotos.filter(
+      (p) => p.featureId && p.uploadStatus !== 'uploaded' && p.uploadStatus !== 'uploading'
+    );
+    if (toUpload.length === 0) {
+      Alert.alert(
+        'Nothing to upload',
+        featureId
+          ? 'All photos for this feature are already uploaded.'
+          : 'All photos are already uploaded. Tap a photo and use “Attach to Feature” to link un-attached photos.'
+      );
+      return;
+    }
+    for (const p of toUpload) {
+      if (p.featureId) {
+        await uploadPhoto(p.id, p.featureId);
+      }
+    }
+    Alert.alert('Upload complete', `${toUpload.length} photo${toUpload.length === 1 ? '' : 's'} uploaded.`);
   };
 
   const statusCount = {
     pending: pendingPhotos.filter((p) => p.uploadStatus === 'pending').length,
     uploaded: pendingPhotos.filter((p) => p.uploadStatus === 'uploaded').length,
     failed: pendingPhotos.filter((p) => p.uploadStatus === 'failed').length,
+  };
+
+  // ── Attach a local photo to a chosen feature (picker callback) ────────
+  const handleAttachSelect = async (targetFeatureId: string, label: string) => {
+    const photo = attachPhotoTarget ?? selectedPhoto;
+    setAttachPhotoTarget(null);
+    if (!photo) return;
+    setAttachBusyId(photo.id);
+    try {
+      const ok = await attachPhoto(photo.id, targetFeatureId);
+      // Refresh the preview so the status badge updates immediately
+      setSelectedPhoto((prev) =>
+        prev && prev.id === photo.id
+          ? {
+              ...prev,
+              featureId: targetFeatureId,
+              uploadStatus: ok ? 'uploaded' : 'failed',
+            }
+          : prev
+      );
+      if (ok) {
+        Alert.alert('Photo attached', `Photo linked to ${label} and uploaded.`);
+      } else {
+        Alert.alert('Upload failed', 'The photo was linked to the feature, but the upload failed. Tap Upload to retry.');
+      }
+    } catch {
+      Alert.alert('Upload failed', 'The photo was linked locally, but the upload failed. Tap Upload to retry.');
+    } finally {
+      setAttachBusyId(null);
+    }
   };
 
   return (
@@ -92,6 +160,16 @@ export default function CameraScreen() {
           </View>
         </View>
 
+        {/* Guidance when opened from Home (no feature context) */}
+        {!featureId && (
+          <View style={[styles.noFeatureNotice, { backgroundColor: colors.warning + '14', borderColor: colors.warning + '55' }]}>
+            <CameraIcon size={16} stroke={colors.warning} />
+            <Text style={[styles.noFeatureText, { color: colors.textSecondary }]}>
+              Photos taken here are stored on this device. Tap a photo, then “Attach to Feature” to link it to an HLD feature and upload it.
+            </Text>
+          </View>
+        )}
+
         {/* Viewport / Gallery */}
         {selectedPhoto ? (
           <View style={styles.preview}>
@@ -102,7 +180,28 @@ export default function CameraScreen() {
               <X size={20} color="#FFFFFF" />
             </TouchableOpacity>
             <Image source={{ uri: selectedPhoto.localUri }} style={styles.previewImage} resizeMode="contain" />
+            <View style={styles.previewInfo}>
+              {selectedPhoto.featureId ? (
+                <Text style={[styles.previewAttached, { color: colors.success }]} numberOfLines={1}>
+                  ✓ Attached to feature {selectedPhoto.featureId.slice(-6)}
+                </Text>
+              ) : (
+                <Text style={[styles.previewAttached, { color: colors.textTertiary }]}>
+                  Not attached to a feature yet
+                </Text>
+              )}
+            </View>
             <View style={styles.previewActions}>
+              {!selectedPhoto.featureId && (
+                <Button
+                  title="Attach to Feature"
+                  variant="secondary"
+                  size="sm"
+                  icon={<Link2 size={16} stroke={colors.primary} />}
+                  loading={attachBusyId === selectedPhoto.id}
+                  onPress={() => setAttachPhotoTarget(selectedPhoto)}
+                />
+              )}
               <Button
                 title="Delete"
                 variant="danger"
@@ -135,6 +234,12 @@ export default function CameraScreen() {
                 activeOpacity={0.8}
               >
                 <Image source={{ uri: photo.localUri }} style={styles.thumbnail} />
+                {/* Unattached badge — photos with no feature link (e.g. from Home) */}
+                {!photo.featureId && (
+                  <View style={[styles.thumbnailBadge, { backgroundColor: 'rgba(255,255,255,0.92)' }]}>
+                    <Link2 size={13} stroke={colors.textTertiary} />
+                  </View>
+                )}
                 <View style={styles.thumbnailOverlay}>
                   {photo.uploadStatus === 'uploaded' && (
                     <Check size={16} stroke={colors.success} />
@@ -150,6 +255,13 @@ export default function CameraScreen() {
             ))}
           </ScrollView>
         )}
+
+        {/* Feature picker — attach a local photo to an HLD feature */}
+        <PhotoFeaturePicker
+          visible={attachPhotoTarget !== null}
+          onClose={() => setAttachPhotoTarget(null)}
+          onSelect={handleAttachSelect}
+        />
 
         {/* Capture Buttons */}
         <View style={styles.captureBar}>
@@ -173,7 +285,7 @@ export default function CameraScreen() {
           <TouchableOpacity
             style={[styles.captureBtn, { backgroundColor: colors.surface, borderColor: colors.outline }]}
             activeOpacity={0.7}
-            onPress={() => {}}
+            onPress={handleUploadAll}
           >
             <Upload size={22} stroke={colors.textSecondary} />
             <Text style={[styles.captureLabel, { color: colors.textSecondary }]}>Upload</Text>
@@ -254,6 +366,26 @@ const styles = StyleSheet.create({
   },
   previewActions: {
     marginTop: Spacing.lg,
+    gap: Spacing.md,
+    width: '100%',
+  },
+  previewInfo: {
+    marginTop: Spacing.md,
+    alignItems: 'center',
+  },
+  previewAttached: {
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  thumbnailBadge: {
+    position: 'absolute',
+    bottom: 6,
+    left: 6,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   captureBar: {
     flexDirection: 'row',
@@ -270,6 +402,16 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   captureLabel: { fontSize: 12, fontWeight: '500' },
+  noFeatureNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    borderWidth: 1,
+    borderRadius: Radius.md,
+    padding: Spacing.md,
+    marginBottom: Spacing.md,
+  },
+  noFeatureText: { flex: 1, fontSize: 13, lineHeight: 18 },
   shutterBtn: {
     width: 72,
     height: 72,

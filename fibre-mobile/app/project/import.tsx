@@ -61,31 +61,32 @@ export default function ProjectImportScreen() {
   const [importPhase, setImportPhase] = useState<string>('');
 
   const handleImport = async () => {
-    // Pass a default file object so the store can try zip parsing or fall back to demo data
-    const importFile = file ?? { uri: '', name: 'demo-survey.zip', type: 'application/zip' };
+    if (!file) {
+      showToast('Select a survey package file first');
+      return;
+    }
 
     try {
       setStep('uploading');
       setImportPhase('Importing survey package... This may take a moment.');
 
-      await importSurveyPackage(projectId as string ?? '', importFile);
+      await importSurveyPackage(projectId as string ?? '', file);
 
       setStep('done');
       setImportPhase('');
 
-      // Check if the store recorded a warning (e.g. fallback to demo data)
+      // Surface any error the store recorded (e.g. backend validation failure)
       const currentState = useProjectStore.getState();
       if (currentState.error) {
-        const errMsg = (currentState.error ?? '').toLowerCase();
-        const isFallback = errMsg.includes('demo data') || errMsg.includes('fallback');
-        showToast(currentState.error, isFallback ? 'warning' : 'error');
+        showToast(currentState.error, 'error');
       } else {
         showToast('Survey package imported successfully!', 'success');
       }
     } catch {
       setStep('select');
       setImportPhase('');
-      showToast('Failed to import package');
+      const storeError = useProjectStore.getState().error;
+      showToast(storeError || 'Failed to import package');
     }
   };
 
@@ -203,11 +204,11 @@ export default function ProjectImportScreen() {
       {/* Import Button */}
       <View style={[styles.bottomBar, { backgroundColor: colors.surface, borderTopColor: colors.outline }]}>
         <Button
-          title={step === 'done' ? 'View on Map' : file ? 'Import Package' : 'Import Demo Data'}
+          title={step === 'done' ? 'View on Map' : 'Import Package'}
           variant="primary"
           size="lg"
           loading={isLoading && step !== 'done'}
-          disabled={isLoading && step !== 'done'}
+          disabled={(isLoading || !file) && step !== 'done'}
           onPress={step === 'done' ? () => router.replace('/(tabs)/map') : handleImport}
         />
       </View>

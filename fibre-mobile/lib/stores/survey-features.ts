@@ -11,7 +11,6 @@
 
 import { create } from 'zustand';
 import * as surveyApi from '../api/survey';
-import { useAuthStore } from './auth';
 import { useProjectStore } from './project';
 import type { SurveyFeatureData, GeoJSONFeature, LayerDisplayMode } from '../utils/types';
 
@@ -77,9 +76,8 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
   displayMode: 'hld', // Default: show HLD only (blue)
 
   fetchSurveyFeatures: async (projectId: string) => {
-    const { demoMode } = useAuthStore.getState();
-    if (demoMode || projectId.startsWith('demo-') || projectId.startsWith('imported-')) {
-      // In demo mode, no survey features from backend — start empty
+    if (projectId.startsWith('imported-')) {
+      // Local-only import project — no survey features on the backend
       set({ surveyFeatures: {}, isLoaded: true, isLoading: false });
       return;
     }
@@ -138,40 +136,9 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
     originalAttributes,
     changeReason,
   ) => {
-    const { demoMode } = useAuthStore.getState();
     const activeProject = useProjectStore.getState().activeProject;
-
-    if (demoMode || !activeProject || activeProject.id.startsWith('demo-') || activeProject.id.startsWith('imported-')) {
-      // In demo mode, create a local mock survey feature
-      const mock: SurveyFeatureData = {
-        id: `demo-sf-${Date.now()}`,
-        original_hld_feature: hldFeatureId,
-        hld_feature_id: hldFeatureId,
-        project: activeProject?.id ?? 'demo',
-        project_name: activeProject?.name ?? 'Demo',
-        engineer: 'demo-user',
-        engineer_name: 'Demo Engineer',
-        layer_id: layerId,
-        layer_name: layerName,
-        original_geometry: originalGeometry ?? null,
-        original_attributes: originalAttributes ?? null,
-        survey_geometry: surveyGeometry,
-        survey_attributes: surveyAttributes ?? {},
-        survey_status: 'new',
-        version_number: 1,
-        sync_status: 'pending',
-        change_reason: changeReason ?? '',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
-      set((s) => ({
-        surveyFeatures: {
-          ...s.surveyFeatures,
-          [layerId]: [...(s.surveyFeatures[layerId] ?? []), mock],
-        },
-      }));
-      console.log(`[SurveyFeatures] Demo upsert for HLD ${hldFeatureId} → ${mock.id}`);
-      return mock;
+    if (!activeProject || activeProject.id.startsWith('imported-')) {
+      return null;
     }
 
     try {
@@ -239,35 +206,22 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
   },
 
   updateSurveyFeature: async (surveyFeatureId, layerId, data) => {
-    const { demoMode } = useAuthStore.getState();
-
-    if (demoMode) {
-      // Update locally in demo mode
-      set((s) => {
-        const features = s.surveyFeatures[layerId] ?? [];
-        const updated = features.map((sf) => {
-          if (sf.id === surveyFeatureId) {
-            return {
-              ...sf,
-              ...data,
-              version_number: sf.version_number + 1,
-              survey_status: sf.survey_status === 'new' ? 'modified' as const : sf.survey_status,
-              sync_status: 'pending' as const,
-              updated_at: new Date().toISOString(),
-            };
-          }
-          return sf;
-        });
-        return { surveyFeatures: { ...s.surveyFeatures, [layerId]: updated } };
-      });
-      return;
-    }
-
     try {
       const result = await surveyApi.updateSurveyFeature(surveyFeatureId, data);
       set((s) => {
         const features = s.surveyFeatures[layerId] ?? [];
-        const updated = features.map((sf) => (sf.id === surveyFeatureId ? result : sf));
+        // Merge the requested fields OVER the API response: the backend
+        // serializer can echo stale/original values (e.g. it ignores
+        // survey_status PATCHes), so the fields we just sent must win.
+        // Drop undefined keys so a caller that omits a field can't clobber
+        // the backend's value with undefined.
+        const cleanData: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(data ?? {})) {
+          if (v !== undefined) cleanData[k] = v;
+        }
+        const updated = features.map((sf) =>
+          sf.id === surveyFeatureId ? ({ ...result, ...cleanData } as SurveyFeatureData) : sf
+        );
         return { surveyFeatures: { ...s.surveyFeatures, [layerId]: updated } };
       });
     } catch (err: unknown) {
@@ -278,21 +232,6 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
   },
 
   deleteSurveyFeature: async (surveyFeatureId, layerId) => {
-    const { demoMode } = useAuthStore.getState();
-
-    if (demoMode) {
-      set((s) => {
-        const features = s.surveyFeatures[layerId] ?? [];
-        return {
-          surveyFeatures: {
-            ...s.surveyFeatures,
-            [layerId]: features.filter((sf) => sf.id !== surveyFeatureId),
-          },
-        };
-      });
-      return;
-    }
-
     try {
       await surveyApi.deleteSurveyFeature(surveyFeatureId);
       set((s) => {

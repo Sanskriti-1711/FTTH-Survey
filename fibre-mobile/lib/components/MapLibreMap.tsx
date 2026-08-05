@@ -66,6 +66,8 @@ interface MapLibreMapProps {
   polygonEditTarget?: { featureId: string; layerId: string } | null;
   /** Called when a polygon corner handle is dragged to a new location. */
   onPolygonVertexDragEnd?: (featureId: string, layerId: string, vertexIdx: number, newLng: number, newLat: number) => void;
+  /** GPS position of the device — renders a blue user-location dot when set. */
+  userLocation?: { latitude: number; longitude: number } | null;
   /** Set of layer IDs whose point features can be dragged */
   draggableLayerIds?: Set<string>;
   /** Whether point dragging is enabled */
@@ -77,6 +79,8 @@ interface MapLibreMapProps {
   loadingTimeoutMs?: number;
   /** When this value changes, the map flies to the given center at given zoom */
   flyToCenter?: { lng: number; lat: number; zoom: number } | null;
+  /** When ts changes, the map flies to the user's GPS location (crosshair FAB). */
+  flyToUserTarget?: { lng: number; lat: number; zoom: number; ts: number } | null;
 }
 
 // ── Basemap Presets ──────────────────────────────────────────────────────
@@ -363,6 +367,12 @@ function NativeMapView({
   layers,
   onFeatureClick,
   onFeatureDragEnd,
+  onEmptyAreaClick,
+  onVertexDragEnd,
+  vertexDragTarget,
+  polygonEditTarget,
+  onPolygonVertexDragEnd,
+  userLocation,
   draggableLayerIds,
   dragMode,
   selectedFeatureId,
@@ -370,6 +380,7 @@ function NativeMapView({
   mapStyle: mapStyleProp,
   loadingTimeoutMs = LOADING_TIMEOUT_MS,
   flyToCenter,
+  flyToUserTarget,
 }: MapLibreMapProps) {
   const cameraRef = useRef<any>(null);
   const mapRef = useRef<any>(null);
@@ -434,22 +445,52 @@ function NativeMapView({
   }, []);
 
   // ── Sync layers → layerShapes (skip during active drag to avoid flicker) ─
+  // OPTIMIZATION (memory): layers whose feature array is reference-identical
+  // to the previous render are SKIPPED — editing one line/polygon no longer
+  // rebuilds the GeoJSON sources for the other ~2,400 map features. Keeping
+  // the same shape object reference also lets the native GeoJSONSource skip
+  // re-processing. This was the memory-churn spike that made the phone's OS
+  // freeze the app under low-memory pressure right after an edit.
+  const prevLayersRef = useRef<MapLayerData[]>([]);
   useEffect(() => {
     if (isDragging) return;
-    const shapes: Record<string, any> = {};
-    for (const layerData of layers) {
-      if (!layerData.visible || layerData.features.length === 0) continue;
-      const features = layerData.features.map((f, i) => ({
-        ...f,
-        properties: {
-          ...(f.properties ?? {}),
-          _id: f.properties?.id ?? `${layerData.id}-${i}`,
-          _layer_id: layerData.id,
-        },
-      }));
-      shapes[layerData.id] = { type: 'FeatureCollection' as const, features };
-    }
-    setLayerShapes(shapes);
+    const prevLayers = prevLayersRef.current;
+    setLayerShapes((prevShapes) => {
+      const next: Record<string, any> = { ...prevShapes };
+      for (const layerData of layers) {
+        if (!layerData.visible || layerData.features.length === 0) {
+          delete next[layerData.id];
+          continue;
+        }
+        // Fast path — keep unchanged layers untouched. NOTE: map.tsx's
+        // buildMapLayerData wraps every feature in a new object on each
+        // recompute, so feature-object identity is useless — but the spread
+        // ({...f}) PRESERVES the geometry reference. Unchanged layers keep
+        // the same geometry refs (and the edited preview/survey layer gets
+        // fresh geometry), which is the correct change signal.
+        const prevLayer = prevLayers.find((p) => p.id === layerData.id);
+        const unchanged =
+          prevLayer !== undefined &&
+          prevLayer.color === layerData.color &&
+          prevLayer.features.length === layerData.features.length &&
+          prevLayer.features.every(
+            (f, i) => (f as any).geometry === (layerData.features[i] as any).geometry
+          );
+        if (unchanged && next[layerData.id]) continue;
+
+        const features = layerData.features.map((f, i) => ({
+          ...f,
+          properties: {
+            ...(f.properties ?? {}),
+            _id: f.properties?.id ?? `${layerData.id}-${i}`,
+            _layer_id: layerData.id,
+          },
+        }));
+        next[layerData.id] = { type: 'FeatureCollection' as const, features };
+      }
+      return next;
+    });
+    prevLayersRef.current = layers;
   }, [layers, isDragging]);
 
   // ── Screen-to-LngLat conversion (linear approximation — synchronous) ────
@@ -547,41 +588,373 @@ function NativeMapView({
   }, [mapStyleProp]);
 
   // ── Feature click handler ──────────────────────────────────────────────
+  // Fires onFeatureClick for features, onEmptyAreaClick for empty map taps.
+  // The MapLibreGL.Map onPress fires with the tapped features array;
+  // if no custom feature is at the tap point, fall back to empty-area.
   const handlePress = useCallback(
     (e: any) => {
       // In drag mode, don't fire click events — drag overlay handles interaction
       if (dragMode) return;
       // v11 wraps press payloads in NativeSyntheticEvent — support both shapes
-      const features = e?.nativeEvent?.features ?? e?.features;
-      if (!onFeatureClick || !features) return;
+      const allFeatures: any[] = e?.nativeEvent?.features ?? e?.features ?? [];
+      // Belt-and-suspenders: never treat the GPS user-location dot as a
+      // feature OR as an empty-area tap (draw modes must not place a stray
+      // point at the surveyor's own position).
+      const dotHit = allFeatures.some((f: any) => f?.properties?._is_user_location);
+      const features = allFeatures.filter((f: any) => !f?.properties?._is_user_location);
+      if (dotHit && features.length === 0) return;
+      // Attempt to extract lngLat from the event (v11 exposes it on nativeEvent)
+      const rawCoords = e?.nativeEvent?.coordinates ?? e?.nativeEvent?.lngLat;
+      const lngLat: [number, number] | undefined =
+        rawCoords && typeof rawCoords[0] === 'number' && typeof rawCoords[1] === 'number'
+          ? [rawCoords[0] as number, rawCoords[1] as number]
+          : undefined;
+
+      if (!features || features.length === 0) {
+        // No feature under tap — fire empty-area click for draw / add-point modes
+        if (onEmptyAreaClick && lngLat) {
+          onEmptyAreaClick(lngLat[0], lngLat[1], undefined);
+        }
+        return;
+      }
+
       const feature = features[0];
-      if (!feature) return;
+      if (!feature) {
+        if (onEmptyAreaClick && lngLat) {
+          onEmptyAreaClick(lngLat[0], lngLat[1], undefined);
+        }
+        return;
+      }
       const props = feature.properties || {};
       const fid = props.id || props._id;
       const lid = props._layer_id;
+      // Vertex marker tap: start a vertex drag ONLY when the current tool mode
+      // wires a drag callback for this geometry type (line vs polygon).
+      // In delete-section / continue-line modes the callback is disabled so the
+      // tap falls through to onFeatureClick for vertex-based selection.
+      let vertexDragHandled = false;
+      if (props._is_vertex && lngLat) {
+        const parentFeatureId = props._parent_feature_id as string | undefined;
+        const vertexIdx = props._vertex_idx as number | undefined;
+        const parentLayerId = props._layer_id as string | undefined;
+        if (parentFeatureId && parentLayerId && typeof vertexIdx === 'number') {
+          // Find parent feature coords to set drag baseline
+          for (const layerData of layers) {
+            const previewLayerId = `temp-preview-${parentLayerId}`;
+            if (layerData.id !== parentLayerId && layerData.id !== previewLayerId) continue;
+            for (const feat of layerData.features) {
+              const pfid = (feat.properties as any)?.id ?? (feat.properties as any)?._id ?? '';
+              if (pfid !== parentFeatureId) continue;
+              const geom = feat.geometry;
+              let vCoords: [number, number][] = [];
+              let vIsPolygon = false;
+              if (geom?.type === 'LineString') vCoords = (geom.coordinates as [number, number][]) ?? [];
+              else if (geom?.type === 'MultiLineString') vCoords = ((geom.coordinates as [number, number][][])[0] ?? []) as [number, number][];
+              else if (geom?.type === 'Polygon') { vCoords = ((geom.coordinates as [number, number][][])[0] ?? []) as [number, number][]; vIsPolygon = true; }
+              else if (geom?.type === 'MultiPolygon') { vCoords = ((geom.coordinates as [number, number][][][])[0]?.[0] ?? []) as [number, number][]; vIsPolygon = true; }
+              if (vertexIdx >= 0 && vertexIdx < vCoords.length) {
+                // Only start a drag if the matching callback is wired for this
+                // geometry type. Otherwise fall through to onFeatureClick so the
+                // delete-section / continue-line handlers can use the vertex tap.
+                const dragCb = vIsPolygon ? onPolygonVertexDragEnd : onVertexDragEnd;
+                if (!dragCb) break;
+                vertexDragHandled = true;
+                vertexDragRef.current = {
+                  featureId: parentFeatureId,
+                  layerId: parentLayerId,
+                  vertexIdx,
+                  startLng: vCoords[vertexIdx][0],
+                  startLat: vCoords[vertexIdx][1],
+                  startScreenX: 0,
+                  startScreenY: 0,
+                  baselineCaptured: false,
+                  isPolygon: vIsPolygon,
+                  coords: [...vCoords],
+                };
+                vertexDragCoordsRef.current = lngLat;
+                setIsVertexDragging(true);
+                setVertexDragDistance(null);
+                console.log(`[Vertex] Tap started drag of vertex ${vertexIdx}`);
+                return;
+              }
+            }
+          }
+        }
+        if (vertexDragHandled) return;
+        // Fall through → onFeatureClick with the vertex feature so tool-mode
+        // handlers (delete-section, continue-line) can select the vertex.
+      }
       const geometry = feature.geometry;
-      if (fid && lid && geometry) {
+      if (fid && lid && geometry && onFeatureClick) {
         const coords = geometry.coordinates;
-        const lngLat: [number, number] =
+        const geomPoint: [number, number] =
           geometry.type === 'Point'
             ? [coords[0], coords[1]]
             : [coords[0]?.[0] ?? 0, coords[0]?.[1] ?? 0];
-        onFeatureClick(fid, lid, lngLat, undefined);
+        // CRITICAL: pass the ACTUAL tap coordinate (lngLat from the press
+        // event) instead of the geometry's first vertex. For line/polygon
+        // features the first vertex is NOT where the user tapped — snapping
+        // tools (delete-section, draw-segment) need the real tap location
+        // to find the nearest vertex.
+        onFeatureClick(fid, lid, lngLat ?? geomPoint, undefined);
       }
     },
-    [onFeatureClick, dragMode]
+    [onFeatureClick, onEmptyAreaClick, dragMode]
   );
 
-  // ── Long-press handler — initiates point drag ───────────────────────────
+  // ── Vertex Drag State ──────────────────────────────────────────────────
+  const [isVertexDragging, setIsVertexDragging] = useState(false);
+  const [vertexDragDistance, setVertexDragDistance] = useState<number | null>(null);
+  const vertexDragRef = useRef<{
+    featureId: string;
+    layerId: string;
+    vertexIdx: number;
+    startLng: number;
+    startLat: number;
+    startScreenX: number;
+    startScreenY: number;
+    baselineCaptured: boolean;
+    isPolygon: boolean;
+    coords: [number, number][];
+  } | null>(null);
+  const vertexDragCoordsRef = useRef<[number, number] | null>(null);
+
+  // ── Vertex press handler — starts vertex drag when a handle is tapped ──
+  const handleVertexPress = useCallback((e: any) => {
+    if (!onVertexDragEnd && !onPolygonVertexDragEnd) return;
+    const features = e?.nativeEvent?.features ?? e?.features ?? [];
+    if (!features || features.length === 0) return;
+    const feature = features[0];
+    const props = feature?.properties;
+    if (!props?._is_vertex) return;
+    const vertexIdx = props._vertex_idx as number;
+    const parentFeatureId = props._parent_feature_id as string;
+    const parentLayerId = props._layer_id as string;
+    if (vertexIdx === undefined || !parentFeatureId || !parentLayerId) return;
+
+    // Find the parent feature in layers to get current coords
+    let parentCoords: [number, number][] = [];
+    let parentIsPolygon = false;
+    for (const layerData of layers) {
+      if (layerData.id !== parentLayerId) continue;
+      for (const feat of layerData.features) {
+        const fid = (feat.properties as any)?.id ?? (feat.properties as any)?._id ?? '';
+        if (fid !== parentFeatureId) continue;
+        const geom = feat.geometry;
+        if (geom?.type === 'LineString') {
+          parentCoords = (geom.coordinates as [number, number][]) ?? [];
+        } else if (geom?.type === 'MultiLineString') {
+          parentCoords = ((geom.coordinates as [number, number][][])[0] ?? []) as [number, number][];
+        } else if (geom?.type === 'Polygon') {
+          parentCoords = ((geom.coordinates as [number, number][][])[0] ?? []) as [number, number][];
+          parentIsPolygon = true;
+        } else if (geom?.type === 'MultiPolygon') {
+          parentCoords = ((geom.coordinates as [number, number][][][])[0]?.[0] ?? []) as [number, number][];
+          parentIsPolygon = true;
+        }
+        break;
+      }
+      break;
+    }
+    if (parentCoords.length === 0 || vertexIdx >= parentCoords.length) return;
+    const [lng, lat] = parentCoords[vertexIdx];
+
+    vertexDragRef.current = {
+      featureId: parentFeatureId,
+      layerId: parentLayerId,
+      vertexIdx,
+      startLng: lng,
+      startLat: lat,
+      startScreenX: 0,
+      startScreenY: 0,
+      baselineCaptured: false,
+      isPolygon: parentIsPolygon,
+      coords: [...parentCoords],
+    };
+    vertexDragCoordsRef.current = [lng, lat];
+    setIsVertexDragging(true);
+    setVertexDragDistance(null);
+  }, [onVertexDragEnd, onPolygonVertexDragEnd]);
+
+  // ── Vertex PanResponder — captures gestures during vertex drag ─────────
+  const vertexPanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderMove: (evt) => {
+        const ds = vertexDragRef.current;
+        if (!ds) return;
+
+        if (!ds.baselineCaptured) {
+          ds.startScreenX = evt.nativeEvent.pageX;
+          ds.startScreenY = evt.nativeEvent.pageY;
+          ds.baselineCaptured = true;
+          return;
+        }
+
+        // Convert screen delta to lngLat delta
+        const dx = evt.nativeEvent.pageX - ds.startScreenX;
+        const dy = evt.nativeEvent.pageY - ds.startScreenY;
+        const scale = 256 * Math.pow(2, zoomRef.current);
+        const cosLat = Math.cos((ds.startLat * Math.PI) / 180);
+        const lngPerPixel = 360 / (scale * cosLat);
+        const latPerPixel = 180 / scale;
+        const newLng = ds.startLng + dx * lngPerPixel;
+        const newLat = ds.startLat - dy * latPerPixel;
+
+        vertexDragCoordsRef.current = [newLng, newLat];
+
+        // Update the vertex position in the layer data (visual feedback)
+        setLayerShapes((prev) => {
+          const current = prev[ds.layerId];
+          if (!current?.features) return prev;
+          const features = [...current.features];
+          // Find the parent feature by ID
+          for (let i = 0; i < features.length; i++) {
+            const f = features[i];
+            const fid = f.properties?._id ?? f.properties?.id ?? '';
+            if (fid === ds.featureId) {
+              const updated = { ...f };
+              if (ds.isPolygon && updated.geometry?.type === 'Polygon') {
+                const rings = [...updated.geometry.coordinates] as [number, number][][];
+                const outer = [...rings[0]] as [number, number][];
+                if (ds.vertexIdx < outer.length) {
+                  outer[ds.vertexIdx] = [newLng, newLat];
+                  if (ds.vertexIdx === 0 && outer.length > 1) outer[outer.length - 1] = [newLng, newLat];
+                  else if (ds.vertexIdx === outer.length - 1 && outer.length > 1) outer[0] = [newLng, newLat];
+                  updated.geometry = { ...updated.geometry, coordinates: [outer, ...rings.slice(1)] };
+                }
+              } else if (updated.geometry?.type === 'LineString') {
+                const lineCoords = [...updated.geometry.coordinates] as [number, number][];
+                if (ds.vertexIdx < lineCoords.length) {
+                  lineCoords[ds.vertexIdx] = [newLng, newLat];
+                  updated.geometry = { ...updated.geometry, coordinates: lineCoords };
+                }
+              } else if (updated.geometry?.type === 'MultiLineString') {
+                const multiCoords = [...updated.geometry.coordinates] as [number, number][][];
+                const firstLine = [...(multiCoords[0] ?? [])] as [number, number][];
+                if (ds.vertexIdx < firstLine.length) {
+                  firstLine[ds.vertexIdx] = [newLng, newLat];
+                  multiCoords[0] = firstLine;
+                  updated.geometry = { ...updated.geometry, coordinates: multiCoords };
+                }
+              } else if (updated.geometry?.type === 'MultiPolygon') {
+                const polys = [...updated.geometry.coordinates] as [number, number][][][];
+                const firstPoly = polys[0];
+                if (firstPoly && Array.isArray(firstPoly) && firstPoly.length > 0 && Array.isArray(firstPoly[0])) {
+                  const outerRing = [...firstPoly[0]] as [number, number][];
+                  if (ds.vertexIdx >= 0 && ds.vertexIdx < outerRing.length) {
+                    outerRing[ds.vertexIdx] = [newLng, newLat];
+                    // GeoJSON linear rings must remain closed when an endpoint is moved.
+                    if (ds.vertexIdx === 0 && outerRing.length > 1) outerRing[outerRing.length - 1] = [newLng, newLat];
+                    else if (ds.vertexIdx === outerRing.length - 1 && outerRing.length > 1) outerRing[0] = [newLng, newLat];
+                    const updatedPoly = [...firstPoly];
+                    updatedPoly[0] = outerRing;
+                    polys[0] = updatedPoly;
+                    updated.geometry = { ...updated.geometry, coordinates: polys };
+                  }
+                }
+              }
+              features[i] = updated;
+              break;
+            }
+          }
+          return { ...prev, [ds.layerId]: { ...current, features } };
+        });
+
+        const dist = haversineDistance(ds.startLng, ds.startLat, newLng, newLat);
+        setVertexDragDistance(Math.round(dist));
+      },
+      onPanResponderRelease: () => {
+        const ds = vertexDragRef.current;
+        const coords = vertexDragCoordsRef.current;
+        if (ds && coords) {
+          const pixDx = Math.abs(coords[0] - ds.startLng);
+          const pixDy = Math.abs(coords[1] - ds.startLat);
+          if (pixDx > 0.00005 || pixDy > 0.00005) {
+            if (ds.isPolygon && onPolygonVertexDragEnd) {
+              onPolygonVertexDragEnd(ds.featureId, ds.layerId, ds.vertexIdx, coords[0], coords[1]);
+            } else if (!ds.isPolygon && onVertexDragEnd) {
+              onVertexDragEnd(ds.featureId, ds.layerId, ds.vertexIdx, coords[0], coords[1]);
+            }
+          }
+        }
+        setIsVertexDragging(false);
+        setVertexDragDistance(null);
+        vertexDragCoordsRef.current = null;
+        vertexDragRef.current = null;
+      },
+      onPanResponderTerminate: () => {
+        setIsVertexDragging(false);
+        setVertexDragDistance(null);
+        vertexDragCoordsRef.current = null;
+        vertexDragRef.current = null;
+      },
+    })
+  ).current;
+
+  // ── Long-press handler — initiates point drag, or vertex drag when
+  //     the long-press lands near an editing vertex ───────────────────────
   const handleLongPress = useCallback(
     (e: any) => {
-      if (!dragMode || !onDragEndRef.current || !draggableLayerIds) return;
-
       // v11 long-press exposes lngLat on nativeEvent (v10 used geometry.coordinates)
       const lngLat = e?.nativeEvent?.lngLat ?? e?.geometry?.coordinates;
       if (!lngLat) return;
       const pressLng = lngLat[0] as number;
       const pressLat = lngLat[1] as number;
+
+      // ── Vertex drag: if editing a line/polygon, long-press near a vertex ──
+      const vTarget = vertexDragTarget ?? polygonEditTarget;
+      if (vTarget && (onVertexDragEnd || onPolygonVertexDragEnd)) {
+        for (const layerData of layers) {
+          const previewLayerId = `temp-preview-${vTarget.layerId}`;
+          if (layerData.id !== vTarget.layerId && layerData.id !== previewLayerId) continue;
+          for (const feat of layerData.features) {
+            const fid = (feat.properties as any)?.id ?? (feat.properties as any)?._id ?? '';
+            if (fid !== vTarget.featureId) continue;
+
+            const geom = feat.geometry;
+            let vCoords: [number, number][] = [];
+            let vIsPolygon = false;
+            if (geom?.type === 'LineString') vCoords = (geom.coordinates as [number, number][]) ?? [];
+            else if (geom?.type === 'MultiLineString') vCoords = ((geom.coordinates as [number, number][][])[0] ?? []) as [number, number][];
+            else if (geom?.type === 'Polygon') { vCoords = ((geom.coordinates as [number, number][][])[0] ?? []) as [number, number][]; vIsPolygon = true; }
+            else if (geom?.type === 'MultiPolygon') { vCoords = ((geom.coordinates as [number, number][][][])[0]?.[0] ?? []) as [number, number][]; vIsPolygon = true; }
+
+            // Find nearest vertex within ~60m
+            let bestIdx = -1;
+            let bestVDist = Infinity;
+            vCoords.forEach(([vlng, vlat], i) => {
+              const d = (vlng - pressLng) ** 2 + (vlat - pressLat) ** 2;
+              if (d < bestVDist) { bestVDist = d; bestIdx = i; }
+            });
+            if (bestIdx >= 0 && bestVDist <= 0.0006 ** 2) {
+              const dragCb = vIsPolygon ? onPolygonVertexDragEnd : onVertexDragEnd;
+              if (!dragCb) continue; // no drag callback for this mode → skip grab
+              vertexDragRef.current = {
+                featureId: vTarget.featureId,
+                layerId: vTarget.layerId,
+                vertexIdx: bestIdx,
+                startLng: pressLng,
+                startLat: pressLat,
+                startScreenX: 0,
+                startScreenY: 0,
+                baselineCaptured: false,
+                isPolygon: vIsPolygon,
+                coords: [...vCoords],
+              };
+              vertexDragCoordsRef.current = [pressLng, pressLat];
+              setIsVertexDragging(true);
+              setVertexDragDistance(null);
+              console.log(`[Vertex] Long-press started drag of vertex ${bestIdx}`);
+              return;
+            }
+          }
+        }
+      }
+
+      // ── Point drag (only when dragMode is enabled) ─────────────────────
+      if (!dragMode || !onDragEndRef.current || !draggableLayerIds) return;
 
       // Find nearest draggable point feature within 500m
       let bestDist = Infinity;
@@ -630,7 +1003,7 @@ function NativeMapView({
         setIsDragging(true);
       }
     },
-    [dragMode, draggableLayerIds, layers]
+    [dragMode, draggableLayerIds, layers, vertexDragTarget, polygonEditTarget, onVertexDragEnd, onPolygonVertexDragEnd]
   );
 
   // ── Fly-to imported center ────────────────────────────────────────────
@@ -641,6 +1014,15 @@ function NativeMapView({
       cameraRef.current?.zoomTo(flyToCenter.zoom, { duration: 1200 });
     } catch {}
   }, [flyToCenter?.lng, flyToCenter?.lat, flyToCenter?.zoom, status]);
+
+  // ── Fly-to user GPS location (crosshair FAB) ──────────────────────────
+  useEffect(() => {
+    if (!cameraRef.current || !flyToUserTarget || status !== 'ready') return;
+    try {
+      cameraRef.current?.flyTo({ center: [flyToUserTarget.lng, flyToUserTarget.lat], duration: 1000 });
+      cameraRef.current?.zoomTo(flyToUserTarget.zoom, { duration: 1000 });
+    } catch {}
+  }, [flyToUserTarget?.ts, status]);
 
   // ── Fly-to selected feature ────────────────────────────────────────────
   useEffect(() => {
@@ -657,11 +1039,17 @@ function NativeMapView({
               cameraRef.current?.zoomTo(17, { duration: 800 });
             } catch {}
           } else {
-            const first = (coords as unknown[][])[0] as number[];
-            try {
-              cameraRef.current?.flyTo({ center: [first[0], first[1]], duration: 800 });
-              cameraRef.current?.zoomTo(17, { duration: 800 });
-            } catch {}
+            // LineString: coords = [[lng,lat],...] → first = [lng,lat]
+            // Polygon:    coords = [[[lng,lat],...]] → first = [[lng,lat],...] → need first[0]
+            const raw = (coords as unknown[][])[0];
+            const lng = typeof raw === 'number' ? raw : (raw as number[])?.[0];
+            const lat = typeof raw === 'number' ? (coords as unknown[][])[1] : (raw as number[])?.[1];
+            if (typeof lng === 'number' && typeof lat === 'number') {
+              try {
+                cameraRef.current?.flyTo({ center: [lng, lat], duration: 800 });
+                cameraRef.current?.zoomTo(17, { duration: 800 });
+              } catch {}
+            }
           }
           return;
         }
@@ -753,6 +1141,66 @@ function NativeMapView({
   // ── Check if all layers are empty ───────────────────────────────────────
   const isEmpty = useMemo(() => !hasVisibleFeatures(layers), [layers]);
 
+  // ── Vertex markers / polygon highlight data derivation ────────────────
+  // When vertexDragTarget or polygonEditTarget is set, find the target
+  // feature in the layers and build point features for each vertex.
+  const editHandleData = useMemo(() => {
+    const target = vertexDragTarget ?? polygonEditTarget;
+    if (!target) return null;
+    for (const layerData of layers) {
+      // Match exact layer ID OR temp-preview- prefixed version (used during Move Mode)
+      const layerId = layerData.id;
+      const previewLayerId = `temp-preview-${target.layerId}`;
+      if (layerId !== target.layerId && layerId !== previewLayerId) continue;
+      for (const feat of layerData.features) {
+        const fid = (feat.properties as any)?.id ?? (feat.properties as any)?._id ?? '';
+        if (fid !== target.featureId) continue;
+
+        const geom = feat.geometry;
+        const color = layerData.color ?? '#0D5CFF';
+        let coords: [number, number][] = [];
+        let isPolygon = false;
+
+        if (geom?.type === 'LineString') {
+          coords = (geom.coordinates as [number, number][]) ?? [];
+        } else if (geom?.type === 'MultiLineString') {
+          coords = ((geom.coordinates as [number, number][][])[0] ?? []) as [number, number][];
+        } else if (geom?.type === 'Polygon') {
+          coords = ((geom.coordinates as [number, number][][])[0] ?? []) as [number, number][];
+          isPolygon = true;
+        } else if (geom?.type === 'MultiPolygon') {
+          coords = ((geom.coordinates as [number, number][][][])[0]?.[0] ?? []) as [number, number][];
+          isPolygon = true;
+        }
+
+        if (coords.length === 0) return null;
+
+        const pointFeatures = coords.map(([lng, lat], idx) => ({
+          type: 'Feature' as const,
+          geometry: { type: 'Point' as const, coordinates: [lng, lat] },
+          properties: {
+            _id: `vert-${target.layerId}-${target.featureId}-${idx}`,
+            _layer_id: target.layerId,
+            _parent_feature_id: target.featureId,
+            _vertex_idx: idx,
+            _is_vertex: true,
+          },
+        }));
+
+        return {
+          featureId: target.featureId,
+          layerId: target.layerId,
+          coords,
+          color,
+          isPolygon: isPolygon || geom?.type === 'Polygon' || geom?.type === 'MultiPolygon',
+          polygonGeom: (isPolygon || geom?.type === 'Polygon' || geom?.type === 'MultiPolygon') ? geom : null,
+          vertexFeatures: pointFeatures,
+        };
+      }
+    }
+    return null;
+  }, [layers, vertexDragTarget, polygonEditTarget]);
+
   const containerStyle: any = { flex: 1, minHeight: 300 };
   if (height !== undefined && typeof height === 'number') {
     containerStyle.height = height;
@@ -783,10 +1231,10 @@ function NativeMapView({
         androidView="texture"
         onPress={handlePress}
         onLongPress={handleLongPress}
-        dragPan={!isDragging}
-        touchZoom={!isDragging}
-        touchPitch={!isDragging}
-        touchRotate={!isDragging}
+        dragPan={!isDragging && !isVertexDragging}
+        touchZoom={!isDragging && !isVertexDragging}
+        touchPitch={!isDragging && !isVertexDragging}
+        touchRotate={!isDragging && !isVertexDragging}
         onRegionIsChanging={(e: any) => {
           const zoom = e?.nativeEvent?.zoom ?? e?.properties?.zoom;
           if (zoom !== undefined) {
@@ -901,7 +1349,143 @@ function NativeMapView({
             </React.Fragment>
           );
         })}
+
+        {/* ── Vertex Markers — rendered when a line/polygon is being edited ── */}
+        {editHandleData && (
+          <MapLibreGL.GeoJSONSource
+            id={`ml-vert-src-${editHandleData.layerId}-${editHandleData.featureId}`}
+            onPress={handleVertexPress}
+            data={{
+              type: 'FeatureCollection',
+              features: editHandleData.vertexFeatures as any[],
+            }}
+          >
+            {/* White circle with colored stroke for each vertex */}
+            <MapLibreGL.Layer
+              type="circle"
+              id={`ml-vert-lyr-${editHandleData.layerId}-${editHandleData.featureId}`}
+              source={`ml-vert-src-${editHandleData.layerId}-${editHandleData.featureId}`}
+              style={{
+                circleRadius: 7,
+                circleColor: '#FFFFFF',
+                circleStrokeWidth: 2.5,
+                circleStrokeColor: editHandleData.color,
+                circleOpacity: 0.95,
+              }}
+            />
+            {/* Larger invisible drag handle for easier tapping */}
+            <MapLibreGL.Layer
+              type="circle"
+              id={`ml-vert-drag-${editHandleData.layerId}-${editHandleData.featureId}`}
+              source={`ml-vert-src-${editHandleData.layerId}-${editHandleData.featureId}`}
+              style={{
+                circleRadius: 20,
+                circleColor: 'transparent',
+                circleStrokeWidth: 0,
+              }}
+            />
+          </MapLibreGL.GeoJSONSource>
+        )}
+
+        {/* ── Polygon Highlight — rendered when a polygon is being edited ── */}
+        {editHandleData && editHandleData.isPolygon && editHandleData.polygonGeom && !isVertexDragging && (
+          <MapLibreGL.GeoJSONSource
+            id={`ml-poly-hl-src-${editHandleData.layerId}-${editHandleData.featureId}`}
+            data={{
+              type: 'FeatureCollection',
+              features: [
+                {
+                  type: 'Feature',
+                  geometry: editHandleData.polygonGeom,
+                  properties: {
+                    _id: editHandleData.featureId,
+                    _layer_id: editHandleData.layerId,
+                  },
+                },
+              ],
+            }}
+          >
+            {/* Semi-transparent fill */}
+            <MapLibreGL.Layer
+              type="fill"
+              id={`ml-poly-hl-fill-${editHandleData.layerId}-${editHandleData.featureId}`}
+              source={`ml-poly-hl-src-${editHandleData.layerId}-${editHandleData.featureId}`}
+              style={{
+                fillColor: editHandleData.color,
+                fillOpacity: 0.18,
+              }}
+            />
+            {/* Thick outline */}
+            <MapLibreGL.Layer
+              type="line"
+              id={`ml-poly-hl-line-${editHandleData.layerId}-${editHandleData.featureId}`}
+              source={`ml-poly-hl-src-${editHandleData.layerId}-${editHandleData.featureId}`}
+              style={{
+                lineColor: editHandleData.color,
+                lineWidth: 3.5,
+                lineOpacity: 0.95,
+              }}
+            />
+          </MapLibreGL.GeoJSONSource>
+        )}
+
+        {/* ── User Location Dot (GPS) ── blue dot + white halo when the device has a fix ── */}
+        {userLocation && (
+          <MapLibreGL.GeoJSONSource
+            id="ml-user-loc-src"
+            onPress={() => {
+              // Swallow taps on the GPS dot — must not fire empty-area clicks
+              // (e.g. placing a stray path point while in draw-segment mode).
+            }}
+            data={{
+              type: 'FeatureCollection',
+              features: [
+                {
+                  type: 'Feature',
+                  geometry: {
+                    type: 'Point',
+                    coordinates: [userLocation.longitude, userLocation.latitude],
+                  },
+                  properties: { _is_user_location: true },
+                },
+              ],
+            }}
+          >
+            <MapLibreGL.Layer
+              type="circle"
+              id="ml-user-loc-halo"
+              source="ml-user-loc-src"
+              style={{
+                circleRadius: 14,
+                circleColor: 'transparent',
+                circleStrokeWidth: 3,
+                circleStrokeColor: '#0D5CFF',
+                circleStrokeOpacity: 0.35,
+              }}
+            />
+            <MapLibreGL.Layer
+              type="circle"
+              id="ml-user-loc-dot"
+              source="ml-user-loc-src"
+              style={{
+                circleRadius: 6,
+                circleColor: '#0D5CFF',
+                circleStrokeWidth: 2,
+                circleStrokeColor: '#FFFFFF',
+              }}
+            />
+          </MapLibreGL.GeoJSONSource>
+        )}
       </MapLibreGL.Map>
+
+      {/* ── Vertex Drag overlay ── visible when dragging a vertex ───── */}
+      {isVertexDragging && (
+        <View
+          style={StyleSheet.absoluteFill}
+          pointerEvents="auto"
+          {...vertexPanResponder.panHandlers}
+        />
+      )}
 
       {/* ── Drag overlay — transparent PanResponder view that captures
             gestures during active drag. Only renders when dragging. ──────── */}
@@ -920,6 +1504,19 @@ function NativeMapView({
             <Text style={styles.dragDistanceIcon}>↕️</Text>
             <View style={{ flexDirection: 'row', alignItems: 'baseline' }}>
               <Text style={styles.dragDistanceValue}>{dragDistance}</Text>
+              <Text style={styles.dragDistanceUnit}>m</Text>
+            </View>
+          </View>
+        </View>
+      )}
+
+      {/* Vertex Drag Distance Display */}
+      {isVertexDragging && vertexDragDistance !== null && (
+        <View style={styles.dragDistanceOverlay}>
+          <View style={styles.dragDistanceCard}>
+            <Text style={styles.dragDistanceIcon}>📐</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'baseline' }}>
+              <Text style={styles.dragDistanceValue}>{vertexDragDistance}</Text>
               <Text style={styles.dragDistanceUnit}>m</Text>
             </View>
           </View>
@@ -1251,6 +1848,7 @@ function WebMapView({
   vertexDragTarget,
   polygonEditTarget,
   onPolygonVertexDragEnd,
+  userLocation,
   draggableLayerIds,
   dragMode = false,
   selectedFeatureId,
@@ -1258,6 +1856,7 @@ function WebMapView({
   mapStyle,
   loadingTimeoutMs = LOADING_TIMEOUT_MS,
   flyToCenter,
+  flyToUserTarget,
 }: MapLibreMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
@@ -1417,6 +2016,85 @@ function WebMapView({
     addGeoJSONLayers(map, layers);
   }, [layers, status]);
 
+  // ── User Location Dot (GPS) ── blue dot + halo when the device has a fix ──
+  // The source + layers are created ONCE; position updates only call
+  // source.setData(). This avoids removeSource/addSource churn on every
+  // watchPositionAsync tick (~every 5m of movement while the surveyor walks).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || status !== 'ready') return;
+    if (!map.isStyleLoaded()) return;
+
+    const SRC = 'ml-user-loc-src';
+    const HALO = 'ml-user-loc-halo';
+    const DOT = 'ml-user-loc-dot';
+
+    // NOTE: this effect also re-runs after a basemap switch because the
+    // basemap effect sets status → 'loading' → 'ready' (deps include status),
+    // and map.setStyle() destroys all sources/layers — so the getSource/
+    // getLayer guards below re-create the dot on the freshly loaded style.
+
+    try {
+      // Create source + layers once (skip if already present — e.g. after
+      // a style reload, getLayer/getSource return null so they get re-added).
+      if (!map.getSource(SRC)) {
+        map.addSource(SRC, {
+          type: 'geojson',
+          data: { type: 'FeatureCollection', features: [] },
+        });
+      }
+      if (!map.getLayer(HALO)) {
+        map.addLayer({
+          id: HALO,
+          type: 'circle',
+          source: SRC,
+          paint: {
+            'circle-radius': 14,
+            'circle-color': 'transparent',
+            'circle-stroke-width': 3,
+            'circle-stroke-color': '#0D5CFF',
+            'circle-stroke-opacity': 0.35,
+          },
+        });
+      }
+      if (!map.getLayer(DOT)) {
+        map.addLayer({
+          id: DOT,
+          type: 'circle',
+          source: SRC,
+          paint: {
+            'circle-radius': 6,
+            'circle-color': '#0D5CFF',
+            'circle-stroke-width': 2,
+            'circle-stroke-color': '#FFFFFF',
+          },
+        });
+      }
+
+      // Update position without recreating GL resources.
+      const source = map.getSource(SRC);
+      if (source && typeof source.setData === 'function') {
+        source.setData({
+          type: 'FeatureCollection',
+          features: userLocation
+            ? [{
+                type: 'Feature',
+                geometry: {
+                  type: 'Point',
+                  coordinates: [userLocation.longitude, userLocation.latitude],
+                },
+                // Non-empty property so the click handler can identify (and
+                // ignore) taps that land only on the GPS dot.
+                properties: { _is_user_location: true },
+              }]
+            : [],
+        });
+      }
+    } catch (e) {
+      console.warn('[UserLoc] Failed to update user-location dot:', e);
+    }
+  }, [userLocation, status]);
+
   // ── Click handler — fires onFeatureClick if a feature is hit,
   //     otherwise fires onEmptyAreaClick (if provided) ───────────────────
   useEffect(() => {
@@ -1427,9 +2105,17 @@ function WebMapView({
       const features = map.queryRenderedFeatures(e.point);
       const screenPt = e.point ? { x: e.point.x, y: e.point.y } : undefined;
 
+      // Taps that land ONLY on the GPS user-location dot are not feature
+      // interactions — ignore them so draw/continue-line modes don't place a
+      // stray path point at the surveyor's own position.
+      const nonUserFeatures = (features ?? []).filter(
+        (f: any) => !f?.properties?._is_user_location
+      );
+      if (nonUserFeatures.length === 0) return;
+
       // Check if ANY of the returned features belong to our custom layers
       // (basemap features like street labels won't have _id/_layer_id)
-      const hasOurFeature = features?.some(
+      const hasOurFeature = nonUserFeatures.some(
         (f: any) => f.properties?._id || f.properties?._layer_id
       );
 
@@ -1441,7 +2127,7 @@ function WebMapView({
         return;
       }
 
-      for (const feature of features) {
+      for (const feature of nonUserFeatures) {
         const props = feature.properties as Record<string, unknown> | null;
         if (!props) continue;
         const fid = props._id as string | undefined;
@@ -2116,6 +2802,15 @@ function WebMapView({
       map.flyTo({ center: [flyToCenter.lng, flyToCenter.lat], zoom: flyToCenter.zoom, duration: 1200 });
     } catch {}
   }, [flyToCenter?.lng, flyToCenter?.lat, flyToCenter?.zoom, status]);
+
+  // ── Fly-to user GPS location (crosshair FAB) ──────────────────────────
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !flyToUserTarget || status !== 'ready') return;
+    try {
+      map.flyTo({ center: [flyToUserTarget.lng, flyToUserTarget.lat], zoom: flyToUserTarget.zoom, duration: 1000 });
+    } catch {}
+  }, [flyToUserTarget?.ts, status]);
 
   // ── Fly-to selected feature ────────────────────────────────────────────
   useEffect(() => {

@@ -2,12 +2,12 @@ import { create } from 'zustand';
 
 // ── Offline / Network Store ───────────────────────────────────────────────
 
-export type ConnectivitySource = 'real' | 'demo';
+export type ConnectivitySource = 'real' | 'offline';
 
 interface OfflineState {
   /** Whether the device currently has network access */
   isOnline: boolean;
-  /** Where the online status comes from — real NetInfo or manual demo toggle */
+  /** Where the online status comes from — real NetInfo */
   connectivitySource: ConnectivitySource;
   pendingSyncCount: number;
   lastSyncAt: string | null;
@@ -24,7 +24,7 @@ interface OfflineState {
 
 export const useOfflineStore = create<OfflineState>((set) => ({
   isOnline: true,
-  connectivitySource: 'demo',
+  connectivitySource: 'real',
   pendingSyncCount: 0,
   lastSyncAt: null,
   isSyncing: false,

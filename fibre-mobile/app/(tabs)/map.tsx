@@ -12,11 +12,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useThemeStore } from '../../lib/stores/theme';
 import { useMapStore } from '../../lib/stores/map';
-import { useAuthStore } from '../../lib/stores/auth';
 import { useProjectStore } from '../../lib/stores/project';
 import { useSurveyStore } from '../../lib/stores/survey';
 import { useSurveyFeaturesStore, SURVEY_COLOR } from '../../lib/stores/survey-features';
-import { getDemoAllFeatures, DEMO_GEOJSON_FEATURES, DEMO_FEATURES, DEMO_LAYERS } from '../../lib/stores/demo-data';
 import { recalculateDependentProperties } from '../../lib/utils/spatial';
 // Geometry operation utilities removed — all edits now route through survey-features store
 import GeometryEditor from '../../lib/components/GeometryEditor';
@@ -31,6 +29,7 @@ import { StatusBadge } from '../../components/ui/StatusBadge';
 import MapLibreMap, { BASEMAPS } from '../../lib/components/MapLibreMap';
 import MapLegend, { buildLayerGroups, DEFAULT_LAYER_GROUPS } from '../../lib/components/MapLegend';
 import MapFeaturePopup from '../../lib/components/MapFeaturePopup';
+import * as Location from 'expo-location';
 import type { MapLayerData, BasemapStyle } from '../../lib/components/MapLibreMap';
 import type { GeoJSONFeature, LayerDisplayMode, SurveyFeatureData } from '../../lib/utils/types';
 import { Spacing, Radius } from '../../lib/theme/colors';
@@ -218,7 +217,6 @@ function resolveGeometryType(layerId: string): string {
 // ── Map Screen ────────────────────────────────────────────────────────────
 export default function MapScreen() {
   const colors = useThemeStore((s) => s.colors);
-  const { demoMode } = useAuthStore();
   const {
     layers: storeLayers,
     selectedFeaturePopup,
@@ -226,7 +224,7 @@ export default function MapScreen() {
     followUser,
     selectFeature,
     setFollowUser,
-    loadDemoLayers,
+    setUserLocation,
   } = useMapStore();
   const { projects } = useProjectStore();
   const { recordPointMove } = useSurveyStore();
@@ -242,6 +240,39 @@ export default function MapScreen() {
     getSurveyFeatureForHld,
   } = useSurveyFeaturesStore();
 
+  // ── GPS: track the device's real location ─────────────────────────────
+  // Requests foreground permission on mount, reads the current fix, then
+  // keeps watching so the blue dot + crosshair FAB stay accurate.
+  useEffect(() => {
+    let watchSub: { remove: () => void } | null = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (cancelled || status !== 'granted') return;
+        const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        if (cancelled) return;
+        setUserLocation({ latitude: pos.coords.latitude, longitude: pos.coords.longitude });
+        watchSub = await Location.watchPositionAsync(
+          { accuracy: Location.Accuracy.Balanced, distanceInterval: 5 },
+          (p) => {
+            if (!cancelled) {
+              setUserLocation({ latitude: p.coords.latitude, longitude: p.coords.longitude });
+            }
+          },
+        );
+      } catch (e) {
+        console.warn('[GPS] Location unavailable:', e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      watchSub?.remove();
+    };
+  }, [setUserLocation]);
+
   const [viewMode, setViewMode] = useState<'map' | 'list'>('map');
   const [selectedLayer, setSelectedLayer] = useState<string | null>(null);
   const [layerFeaturePanel, setLayerFeaturePanel] = useState<{ visible: boolean; layerId: string | null; layerName: string; featureCount: number }>({ visible: false, layerId: null, layerName: '', featureCount: 0 });
@@ -254,6 +285,8 @@ export default function MapScreen() {
   const [popupScreenCoords, setPopupScreenCoords] = useState<{ x: number; y: number } | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [dragMode, setDragMode] = useState(false);
+  // Fly-to-user request — bumped each time the crosshair FAB is pressed
+  const [flyToUserTarget, setFlyToUserTarget] = useState<{ lng: number; lat: number; zoom: number; ts: number } | null>(null);
 
   // ── HLD/Survey Display Mode ──────────────────────────────────────────────
   // 'hld' = blue only (original HLD), 'survey' = orange only (engineer edits),
@@ -274,6 +307,11 @@ export default function MapScreen() {
   const [selectedPolygonFeature, setSelectedPolygonFeature] = useState<EditingFeature | null>(null);
   const [polygonEditCoords, setPolygonEditCoords] = useState<[number, number][] | null>(null);
   const [polygonEditOriginal, setPolygonEditOriginal] = useState<[number, number][] | null>(null);
+  // Original geometry/attributes captured from the RENDERED layer at edit-start.
+  // Used by handlePolygonSave as a fallback when the raw-store lookup fails
+  // (imported polygons whose rendered _id differs from raw properties.id).
+  const [polygonEditOrigGeom, setPolygonEditOrigGeom] = useState<Record<string, unknown> | null>(null);
+  const [polygonEditOrigAttrs, setPolygonEditOrigAttrs] = useState<Record<string, unknown> | null>(null);
 
   // ── Line Move Mode state ──
   // When active, vertex handles are displayed for the selected line.
@@ -289,6 +327,14 @@ export default function MapScreen() {
 
   // ── Continue Line state ──────────────────────────────────────────────
   const [continueLineAnchor, setContinueLineAnchor] = useState<number | null>(null);
+  // Number of points appended so far (0 = none yet). Drives the toolbar step UI
+  // and lets the connect handler append A→B→C→D instead of re-truncating.
+  const [continueLinePoints, setContinueLinePoints] = useState(0);
+  // Dedupe guard: the native map fires BOTH the Map onPress AND the
+  // GeoJSONSource onPress for a single tap, so handleContinueLineTap can
+  // fire twice with the same lngLat. Without this guard every tap would
+  // append TWO points in multi-segment mode.
+  const lastContinueTapRef = useRef<{ lng: number; lat: number; t: number } | null>(null);
 
   // ── Add Point state ────────────────────────────────────────────────
   const [addPointTargetLayer, setAddPointTargetLayer] = useState<string>('');
@@ -337,8 +383,7 @@ export default function MapScreen() {
   const undoStackRef = useRef<UndoEntry[]>([]);
   const [undoCount, setUndoCount] = useState(0);
   // Refs that track values declared later — avoids TDZ in hooks that reference them
-  const localDemoGeojsonRef = useRef<Record<string, GeoJSONFeature[]>>(DEMO_GEOJSON_FEATURES);
-  const activeGeojsonRef = useRef<Record<string, GeoJSONFeature[]>>(DEMO_GEOJSON_FEATURES);
+  const activeGeojsonRef = useRef<Record<string, GeoJSONFeature[]>>({});
   const allPanelLayersRef = useRef<any[]>([]);
   const panelLayerDataRef = useRef<any[]>([]);
 
@@ -382,26 +427,62 @@ export default function MapScreen() {
         return;
       }
 
-      // API-backed features: directly update in store (bypass API to avoid backend failures)
+      // Optimistic local restore so the map re-renders immediately.
       const store = useSurveyFeaturesStore.getState();
       const features = store.surveyFeatures[layerId] ?? [];
+      const exists = features.some((sf) => sf.id === surveyFeatureId);
+      const nextFeatures = exists
+        ? features.map((sf) =>
+            sf.id === surveyFeatureId
+              ? {
+                  ...sf,
+                  survey_geometry: previousGeometry,
+                  survey_attributes: previousAttributes,
+                  survey_status: previousStatus,
+                }
+              : sf
+          )
+        : // Feature was hard-deleted → re-insert it so the map shows it again.
+          [
+            ...features,
+            {
+              id: surveyFeatureId,
+              original_hld_feature: null,
+              hld_feature_id: null,
+              project: useProjectStore.getState().activeProject?.id ?? '',
+              project_name: useProjectStore.getState().activeProject?.name ?? '',
+              engineer: '',
+              engineer_name: '',
+              layer_id: layerId,
+              layer_name: layerId.replace(/^imp-/, '').toUpperCase(),
+              original_geometry: null,
+              original_attributes: previousAttributes,
+              survey_geometry: previousGeometry,
+              survey_attributes: previousAttributes,
+              survey_status: previousStatus,
+              version_number: 1,
+              sync_status: 'pending' as const,
+              change_reason: description,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            },
+          ];
       useSurveyFeaturesStore.setState({
         surveyFeatures: {
           ...store.surveyFeatures,
-          [layerId]: features.map((sf) => {
-            if (sf.id === surveyFeatureId) {
-              return {
-                ...sf,
-                survey_geometry: previousGeometry,
-                survey_attributes: previousAttributes,
-                survey_status: previousStatus,
-              };
-            }
-            return sf;
-          }),
+          [layerId]: nextFeatures,
         },
       });
-      console.log(`[Undo] Restored survey feature ${surveyFeatureId.slice(-8)} directly in store`);
+      // Persist to the backend when the DB record still exists (hard-deleted
+      // records can only be restored locally — the DB row is gone).
+      if (exists) {
+        updateSurveyFeature(surveyFeatureId, layerId, {
+          survey_geometry: previousGeometry,
+          survey_attributes: previousAttributes,
+          survey_status: previousStatus,
+        });
+      }
+      console.log(`[Undo] Restored survey feature ${surveyFeatureId.slice(-8)}${exists ? ' + synced to DB' : ' (re-inserted locally — DB row was hard-deleted)'}`);
       return;
     }
 
@@ -410,24 +491,18 @@ export default function MapScreen() {
       const { layerId, previousFeatures, description } = entry.layerSnapshot;
       console.log(`[Undo] Restoring layer "${layerId}" snapshot: ${description}`);
 
-      const currentHasImportedData = Object.keys(useProjectStore.getState().projectGeojsons).length > 0;
-
-      if (currentHasImportedData && layerId.startsWith(IMPORT_ID_PREFIX)) {
+      if (layerId.startsWith(IMPORT_ID_PREFIX)) {
         const cleanKey = layerId.slice(IMPORT_ID_PREFIX.length);
         const current = useProjectStore.getState().projectGeojsons;
         useProjectStore.getState().setProjectGeojsons({
           ...current,
           [cleanKey]: previousFeatures,
         });
-      } else if (DEMO_GEOJSON_FEATURES[layerId] || !currentHasImportedData) {
-        setLocalDemoGeojson((prev) => ({ ...prev, [layerId]: previousFeatures }));
       }
       return;
     }
 
     // ── SINGLE-FEATURE RESTORE: coordinate-based (point drag, vertex move, vertex delete) ──
-    const currentHasImportedData = Object.keys(useProjectStore.getState().projectGeojsons).length > 0;
-    const currentLocalGeojson = localDemoGeojsonRef.current;
 
     // Helper to map a feature array and restore old coordinates
     const restoreCoords = (layerFeatures: GeoJSONFeature[]) => {
@@ -460,7 +535,7 @@ export default function MapScreen() {
 
     console.log(`[Undo] Restoring ${entry.featureId} to [${entry.oldLng.toFixed(6)}, ${entry.oldLat.toFixed(6)}]`);
 
-    if (currentHasImportedData && entry.layerId.startsWith(IMPORT_ID_PREFIX)) {
+    if (entry.layerId.startsWith(IMPORT_ID_PREFIX)) {
       const cleanKey = entry.layerId.slice(IMPORT_ID_PREFIX.length);
       const currentGeojsons = useProjectStore.getState().projectGeojsons;
       const layerFeatures = currentGeojsons[cleanKey];
@@ -468,7 +543,6 @@ export default function MapScreen() {
       if (updatedFeatures) {
         // Recalculate dependent properties
         const fullGeojson: Record<string, GeoJSONFeature[]> = {};
-        for (const [k, v] of Object.entries(currentLocalGeojson)) fullGeojson[k] = v;
         for (const [k, v] of Object.entries(currentGeojsons)) fullGeojson[`imp-${k}`] = v;
         fullGeojson[entry.layerId] = updatedFeatures;
         const recalc = recalculateDependentProperties(entry.layerId, fullGeojson, updatedFeatures);
@@ -478,34 +552,7 @@ export default function MapScreen() {
           ...currentGeojsons,
           [cleanKey]: updatedFeatures,
         });
-
-        // Apply paired demo layer updates
-        for (const [key, features] of Object.entries(recalc.geojson)) {
-          if (key !== entry.layerId && !key.startsWith(IMPORT_ID_PREFIX) && DEMO_GEOJSON_FEATURES[key]) {
-            setLocalDemoGeojson((prev) => ({ ...prev, [key]: features }));
-          }
-        }
       }
-    } else if (DEMO_GEOJSON_FEATURES[entry.layerId]) {
-      setLocalDemoGeojson((prev) => {
-        const layerFeatures = prev[entry.layerId];
-        if (!layerFeatures) return prev;
-        let updatedFeatures = restoreCoords(layerFeatures);
-        if (!updatedFeatures) return prev;
-
-        // Recalculate dependent properties
-        const fullGeojson: Record<string, GeoJSONFeature[]> = { ...prev };
-        fullGeojson[entry.layerId] = updatedFeatures;
-        const recalc = recalculateDependentProperties(entry.layerId, fullGeojson, updatedFeatures);
-
-        const next = { ...prev };
-        for (const [key, features] of Object.entries(recalc.geojson)) {
-          if (DEMO_GEOJSON_FEATURES[key] || key === entry.layerId) {
-            next[key] = features;
-          }
-        }
-        return next;
-      });
     }
   }, [updateSurveyFeature]);
 
@@ -513,8 +560,10 @@ export default function MapScreen() {
   // to avoid TDZ errors from referencing later-declared const variables in dependency arrays.
 
   // ── Ctrl+Z keyboard shortcut (web only) ──────────────────────────────
+  // NOTE: must check for a REAL browser `window` — on React Native, `window`
+  // is aliased to `global` and has NO addEventListener (crash: undefined is not a function).
   useEffect(() => {
-    if (typeof window === 'undefined') return;
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
 
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
@@ -536,13 +585,6 @@ export default function MapScreen() {
 
   const currentBasemapStyle = BASEMAPS[activeBasemap]?.style ?? BASEMAPS.streets.style;
 
-  // Load demo layers on mount
-  useEffect(() => {
-    if (storeLayers.length === 0 && demoMode) {
-      loadDemoLayers();
-    }
-  }, [demoMode]);
-
   // Init visibility from store layers
   useEffect(() => {
     if (storeLayers.length > 0) {
@@ -556,7 +598,7 @@ export default function MapScreen() {
     }
   }, [storeLayers]);
 
-  // ── Determine GeoJSON source: merge demo + imported data ────────────
+  // ── Determine GeoJSON source: prefix imported data with 'imp-' ────────
   const {
     projectGeojsons,
     projectLayers,
@@ -566,78 +608,27 @@ export default function MapScreen() {
   } = useProjectStore();
   const hasImportedData = Object.keys(projectGeojsons).length > 0;
 
-  // ── SECURITY FALLBACK: Auto-fetch GeoJSON from backend when a real project is active but empty ──
-  // With a 15-second timeout that falls back to demo data if the fetch fails or hangs.
+  // ── Auto-fetch GeoJSON from backend when a real project is active but empty ──
   const fetchAttemptedRef = useRef(false);
-  const fetchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (
       storeActiveProject &&
-      !storeActiveProject.id.startsWith('demo-') &&
       !storeActiveProject.id.startsWith('imported-') &&
       !hasImportedData &&
       !fetchAttemptedRef.current
     ) {
       fetchAttemptedRef.current = true;
       console.log('[Map] Active project found but GeoJSON empty — fetching from backend');
-      
-      // Set a safety timeout: if data doesn't load in 15s, show demo data
-      fetchTimeoutRef.current = setTimeout(() => {
-        console.log('[Map] ⚠️ Project data fetch timed out — falling back to demo data');
-        // Reset the state so activeGeojson uses demo data instead of empty
-        useProjectStore.getState().setActiveProject(null);
-        fetchAttemptedRef.current = false;
-      }, 15000);
-      
       fetchProjectGeojsons(storeActiveProject.id).catch((err) => {
-        console.log('[Map] ⚠️ Project data fetch failed — falling back to demo data:', err);
-        if (fetchTimeoutRef.current) clearTimeout(fetchTimeoutRef.current);
-        useProjectStore.getState().setActiveProject(null);
+        console.log('[Map] ⚠️ Project data fetch failed:', err);
         fetchAttemptedRef.current = false;
       });
     }
-    
-    // Clear timeout if data loads successfully
-    if (hasImportedData && fetchTimeoutRef.current) {
-      clearTimeout(fetchTimeoutRef.current);
-      fetchTimeoutRef.current = null;
-    }
-    
-    return () => {
-      if (fetchTimeoutRef.current) {
-        clearTimeout(fetchTimeoutRef.current);
-        fetchTimeoutRef.current = null;
-      }
-    };
   }, [storeActiveProject?.id, hasImportedData]);
 
-  // Merge: always show demo data + prefix imported data with 'imp-'
-  // Uses local state copy for reactivity — drag updates trigger re-renders
-  const [localDemoGeojson, setLocalDemoGeojson] = useState<Record<string, GeoJSONFeature[]>>(DEMO_GEOJSON_FEATURES);
-  // Keep ref in sync — placed right after useState so localDemoGeojson is initialized
-  useEffect(() => {
-    localDemoGeojsonRef.current = localDemoGeojson;
-  }, [localDemoGeojson]);
-
+  // Active GeoJSON = the active project's layers, prefixed with 'imp-'
   const activeGeojson = useMemo(() => {
-    if (!hasImportedData) {
-      // CRITICAL: When a real backend project is active but data hasn't loaded yet,
-      // return an EMPTY object — NOT demo data. This prevents showing 'wrong' layers.
-      if (
-        storeActiveProject &&
-        !storeActiveProject.id.startsWith('demo-') &&
-        !storeActiveProject.id.startsWith('imported-')
-      ) {
-        const empty: Record<string, GeoJSONFeature[]> = {};
-        activeGeojsonRef.current = empty;
-        return empty;
-      }
-      // Only show demo data when no real project is active
-      activeGeojsonRef.current = localDemoGeojson;
-      return localDemoGeojson;
-    }
-    // When a real project is active, show ONLY imported layers — no demo data
     const onlyImported: Record<string, GeoJSONFeature[]> = {};
     for (const [key, features] of Object.entries(projectGeojsons)) {
       const importedKey = `${IMPORT_ID_PREFIX}${key}`;
@@ -645,13 +636,13 @@ export default function MapScreen() {
     }
     activeGeojsonRef.current = onlyImported;
     return onlyImported;
-  }, [hasImportedData, projectGeojsons, localDemoGeojson, storeActiveProject]);
+  }, [projectGeojsons]);
 
   // ── Fetch Survey Features when the active project changes ────────────────
   // This loads all engineer survey edits from the backend so they can be
   // rendered as orange survey layers alongside the blue HLD layers.
   useEffect(() => {
-    if (storeActiveProject && !storeActiveProject.id.startsWith('demo-') && !storeActiveProject.id.startsWith('imported-')) {
+    if (storeActiveProject && !storeActiveProject.id.startsWith('imported-')) {
       fetchSurveyFeatures(storeActiveProject.id);
     } else {
       clearSurveyFeatures();
@@ -688,7 +679,7 @@ export default function MapScreen() {
     return ids;
   }, [activeGeojson, surveyFeatures]);
 
-  // Build layer names: demo defaults + imported layer names with '(Imported)' suffix
+  // Build layer names: base defaults + imported layer names with '(Imported)' suffix
   const activeLayerNames = useMemo(() => {
     const names: Record<string, string> = { ...LAYER_NAMES };
     if (hasImportedData) {
@@ -701,7 +692,7 @@ export default function MapScreen() {
     return names;
   }, [hasImportedData, projectGeojsons, projectLayers]);
 
-  // Merge colors: demo defaults + imported colors
+  // Merge colors: base defaults + imported colors
   const activeLayerColors = useMemo(() => {
     const colors: Record<string, string> = { ...LAYER_COLORS };
     if (hasImportedData) {
@@ -726,15 +717,6 @@ export default function MapScreen() {
     }
   }, [hasImportedData, projectGeojsons]);
 
-  // Build a feature ID map for demo data so GeoJSON layers have correct IDs
-  const demoFeatureIdMap = useMemo(() => {
-    const map: Record<string, string[]> = {};
-    for (const [layerId, features] of Object.entries(DEMO_FEATURES)) {
-      map[layerId] = features.map((f) => f.id);
-    }
-    return map;
-  }, []);
-
   // Feature ID map for imported features
   const importFeatureIdMap = useMemo(() => {
     if (!hasImportedData) return undefined;
@@ -746,19 +728,11 @@ export default function MapScreen() {
     return map;
   }, [hasImportedData, projectGeojsons]);
 
-  // Use imported project when available, otherwise demo project
   const activeProject = storeActiveProject ?? projects[0] ?? null;
   const mapProjectName = activeProject?.name ?? 'Survey Map';
 
-  const demoFeatures = getDemoAllFeatures();
-
-  // ── Build feature list for list view: when a real project is active, show ONLY imported ──
+  // ── Build feature list for list view (from the active project's layers) ──
   const mergedFeatureList = useMemo(() => {
-    if (!hasImportedData) {
-      return [...demoFeatures];
-    }
-
-    // Only imported features — no demo data
     const list: any[] = [];
     for (const [key, features] of Object.entries(projectGeojsons)) {
       const importedKey = `${IMPORT_ID_PREFIX}${key}`;
@@ -825,7 +799,7 @@ export default function MapScreen() {
     const hldLayers = displayMode === 'survey'
       ? [] // In survey-only mode, hide HLD layers
       : buildMapLayerData(activeGeojson, layerVisibility, activeLayerNames,
-          hasImportedData ? importFeatureIdMap : demoFeatureIdMap, effectiveLayerColors);
+          importFeatureIdMap, effectiveLayerColors);
 
     // ── Survey layers (orange) — only when survey features exist ──
     if (displayMode === 'hld') return hldLayers;
@@ -891,23 +865,39 @@ export default function MapScreen() {
       });
     }
 
-    return [...hldLayers, ...previewLayers, ...surveyLayers];
-  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, demoFeatureIdMap, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, tempLineCoords, selectedLineFeature]);
-
-  // Build visible layers: when a real project is active, show ONLY imported layers
-  const visibleLayers = useMemo(() => {
-    if (!hasImportedData) {
-      const demoBase = DEMO_LAYERS.map((l) => ({
-        id: l.layer_id,
-        name: l.layer_name,
-        visible: layerVisibility[l.layer_id] !== false,
-        featureCount: l.feature_count,
-        geometryType: resolveGeometryType(l.layer_id) as any,
-      }));
-      return demoBase.filter((l) => layerVisibility[l.id] !== false);
+    // ── Temp Polygon Preview layer (orange) — shown during polygon edit mode ──
+    // Mirrors the line preview: renders polygonEditCoords so the polygon shape
+    // follows live vertex drags, and the vertex markers + highlight render on
+    // this layer (via polygonEditTarget) so they move with the edits.
+    if (selectedPolygonFeature && polygonEditCoords) {
+      const polygonPreviewFeature = {
+        type: 'Feature' as const,
+        geometry: {
+          type: 'Polygon',
+          coordinates: [polygonEditCoords],
+        },
+        properties: {
+          id: `temp-preview-${selectedPolygonFeature.id}`,
+          _id: `temp-preview-${selectedPolygonFeature.id}`,
+          _layer_id: `temp-preview-${selectedPolygonFeature.layerId}`,
+          _is_preview: true,
+        },
+      };
+      previewLayers.push({
+        id: `temp-preview-${selectedPolygonFeature.layerId}`,
+        name: `Preview: ${activeLayerNames[selectedPolygonFeature.layerId] ?? selectedPolygonFeature.layerId.toUpperCase()}`,
+        features: [polygonPreviewFeature],
+        visible: true,
+        color: SURVEY_COLOR, // Orange
+        geometryType: 'Polygon' as const,
+      });
     }
 
-    // Only imported layers — no demo data
+    return [...hldLayers, ...previewLayers, ...surveyLayers];
+  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, tempLineCoords, selectedLineFeature, selectedPolygonFeature, polygonEditCoords]);
+
+  // Build visible layers from the active project's layers
+  const visibleLayers = useMemo(() => {
     const imported: any[] = [];
     for (const [key, features] of Object.entries(projectGeojsons)) {
       const importedKey = `${IMPORT_ID_PREFIX}${key}`;
@@ -920,23 +910,10 @@ export default function MapScreen() {
       });
     }
     return imported.filter((l) => layerVisibility[l.id] !== false);
-  }, [hasImportedData, projectGeojsons, activeLayerNames, layerVisibility]);
+  }, [projectGeojsons, activeLayerNames, layerVisibility]);
 
-  // All layers for the panel: when a real project is active, show ONLY imported layers
+  // All layers for the panel
   const allPanelLayers = useMemo(() => {
-    if (!hasImportedData) {
-      const demoBase = DEMO_LAYERS.map((l) => ({
-        id: l.layer_id,
-        name: l.layer_name,
-        visible: layerVisibility[l.layer_id] !== false,
-        featureCount: l.feature_count,
-        geometryType: resolveGeometryType(l.layer_id) as any,
-      }));
-      allPanelLayersRef.current = demoBase;
-      return demoBase;
-    }
-
-    // Only imported layers — no demo data
     const imported: any[] = [];
     for (const [key, features] of Object.entries(projectGeojsons)) {
       const importedKey = `${IMPORT_ID_PREFIX}${key}`;
@@ -950,7 +927,7 @@ export default function MapScreen() {
     }
     allPanelLayersRef.current = imported;
     return imported;
-  }, [hasImportedData, projectGeojsons, activeLayerNames, layerVisibility]);
+  }, [projectGeojsons, activeLayerNames, layerVisibility]);
 
   // ── Transform allPanelLayers into LegendLayer format (for MapLegend) ────
   const panelLayerData = useMemo(
@@ -1064,11 +1041,6 @@ export default function MapScreen() {
       // ── Detect survey features (orange markers) via 'survey-' prefix ─
       const isSurveyFeature = layerId.startsWith('survey-');
 
-      // First try to find in demo features (rich metadata)
-      const found = isSurveyFeature ? undefined : demoFeatures.find(
-        (f) => f.feature.id === featureId
-      );
-
       let featureName: string;
       let layerName: string;
       let popupLayerId = layerId;
@@ -1079,40 +1051,27 @@ export default function MapScreen() {
         layerName = `Survey: ${baseName}`;
         popupLayerId = baseLayerId;
       } else {
-        featureName = found
-          ? String(
-              found.feature.properties?.name ??
-                found.feature.properties?.address ??
-                found.feature.layer_name + ' #' + found.feature.id.slice(-3)
-            )
-          : (featureId.startsWith('demo-')
-              ? (activeLayerNames[layerId] ?? layerId.toUpperCase()) + ' #' + featureId.slice(-3)
-              : 'Feature #' + featureId.slice(0, 8));
-        layerName = found?.feature.layer_name ?? (activeLayerNames[layerId] ?? layerId.toUpperCase());
+        featureName = (activeLayerNames[layerId] ?? layerId.toUpperCase()) + ' #' + featureId.slice(-3);
+        layerName = activeLayerNames[layerId] ?? layerId.toUpperCase();
       }
-      const status = isSurveyFeature ? 'modified' : (found?.feature.status ?? 'assigned');
+      const status = isSurveyFeature ? 'modified' : 'assigned';
 
       // ── POLYGON features: open inline editing handles for the selected polygon ──
       if (geomType === 'Polygon') {
+        // Already editing this polygon? Keep current drag progress — don't restart.
+        if (selectedPolygonFeature && selectedPolygonFeature.id === featureId) {
+          setSelectedMapFeatureId(featureId);
+          return;
+        }
         setSelectedLineFeature(null);
         setSelectedMapFeatureId(featureId);
-        if (found) {
-          selectFeature(found.feature.id, {
-            id: found.feature.id,
-            name: featureName,
-            layerName,
-            status,
-            layerId: found.feature.layer_id,
-          });
-        } else {
-          selectFeature(featureId, {
-            id: featureId,
-            name: featureName,
-            layerName,
-            status,
-            layerId: popupLayerId,
-          });
-        }
+        selectFeature(featureId, {
+          id: featureId,
+          name: featureName,
+          layerName,
+          status,
+          layerId: popupLayerId,
+        });
         handlePolygonEditStart({
           id: featureId,
           layerId: popupLayerId,
@@ -1128,23 +1087,13 @@ export default function MapScreen() {
         // Highlight line on map
         setSelectedMapFeatureId(featureId);
         // Show popup with feature info + Edit button
-        if (found) {
-          selectFeature(found.feature.id, {
-            id: found.feature.id,
-            name: featureName,
-            layerName,
-            status,
-            layerId: found.feature.layer_id,
-          });
-        } else {
-          selectFeature(featureId, {
-            id: featureId,
-            name: featureName,
-            layerName,
-            status,
-            layerId: popupLayerId,
-          });
-        }
+        selectFeature(featureId, {
+          id: featureId,
+          name: featureName,
+          layerName,
+          status,
+          layerId: popupLayerId,
+        });
         // Close popup screen coords are set above
         return;
       }
@@ -1155,20 +1104,10 @@ export default function MapScreen() {
       setSelectedPolygonFeature(null);
       setPolygonEditCoords(null);
       setPolygonEditOriginal(null);
+      setPolygonEditOrigGeom(null);
+      setPolygonEditOrigAttrs(null);
 
-      if (found) {
-        selectFeature(found.feature.id, {
-          id: found.feature.id,
-          name: featureName,
-          layerName,
-          status,
-          layerId: found.feature.layer_id,
-        });
-        setSelectedMapFeatureId(found.feature.id);
-        return;
-      }
-
-      // Fallback for imported/unknown features — build popup from GeoJSON
+      // Build popup from GeoJSON
       selectFeature(featureId, {
         id: featureId,
         name: featureName,
@@ -1178,7 +1117,7 @@ export default function MapScreen() {
       });
       setSelectedMapFeatureId(featureId);
     },
-    [demoFeatures, selectFeature, activeLayerNames, mapLayerData]
+    [selectFeature, activeLayerNames, mapLayerData, selectedPolygonFeature]
   );
 
   // ── Layer isolation state ─────────────────────────────────────────────
@@ -1456,20 +1395,16 @@ export default function MapScreen() {
       }
 
       // Update the active GeoJSON
-      const currentHasImported = Object.keys(useProjectStore.getState().projectGeojsons).length > 0;
-
-      if (currentHasImported && layerId.startsWith(IMPORT_ID_PREFIX)) {
+      if (layerId.startsWith(IMPORT_ID_PREFIX)) {
         const cleanKey = layerId.slice(IMPORT_ID_PREFIX.length);
         const current = useProjectStore.getState().projectGeojsons;
         useProjectStore.getState().setProjectGeojsons({
           ...current,
           [cleanKey]: updatedFeatures,
         });
-      } else if (DEMO_GEOJSON_FEATURES[layerId] || !currentHasImported) {
-        setLocalDemoGeojson((prev) => ({ ...prev, [layerId]: updatedFeatures }));
       }
 
-      // ── Sync geometry changes to backend (no-op in demo mode) ──────
+      // ── Sync geometry changes to backend ────────────────────────────
       const syncProjectId = useProjectStore.getState().activeProject?.id;
       if (syncProjectId) {
         for (const feat of updatedFeatures) {
@@ -1486,24 +1421,50 @@ export default function MapScreen() {
       console.log(`[Geometry] ${description}`);
       setGeomBusy(false);
     },
-    [setGeomBusy, setLocalDemoGeojson, pushUndo],
+    [setGeomBusy, pushUndo],
   );
 
   // ── Start editing a feature (viewing → GeometryEditor editing mode) ─
   // For Points and Polygons (non-LineString features).
-  const handleStartEdit = useCallback((feature: EditingFeature) => {
-    setEditingFeature(feature);
-    // Close popup when entering editing mode
+  const handlePointSurveyForm = useCallback((feature: EditingFeature) => {
+    // ── Popup Edit on a POINT feature opens the SurveyForm ────────────────
+    // The form is pre-filled with any existing survey attributes, falling
+    // back to the HLD feature's original attributes. Saving creates/updates
+    // a SurveyFeature — the HLD GeoJSON is never touched.
+    //
+    // The tapped point could be:
+    //   A) An ORANGE survey point → feature.id IS the SurveyFeature id
+    //   B) A BLUE HLD point → feature.id is the HLD id, linked survey optional
+    const surveyById = surveyFeatures[feature.layerId]?.find((s) => s.id === feature.id);
+    const surveyByHld = surveyById ?? getSurveyFeatureForHld(feature.id);
+    const { attributes: origAttrs } = findHldFeatureOriginal(feature.id, feature.layerId);
+
+    // Prefer existing survey attributes when the engineer has already entered
+    // data; otherwise pre-fill from the original HLD attributes.
+    const hasSurveyData = surveyByHld?.survey_attributes && Object.keys(surveyByHld.survey_attributes).length > 0;
+    const initialValues = hasSurveyData ? surveyByHld.survey_attributes : (origAttrs ?? {});
+
+    setSurveyForm({
+      layerId: feature.layerId,
+      featureId: surveyByHld?.id ?? feature.id,
+      // Photo upload target: prefer the HLD feature id (routes to the HLD
+      // endpoint). For engineer-created survey points with no HLD row, the
+      // survey feature id is used — the image store routes it to the survey
+      // feature photo endpoint (backend now supports survey-feature photos).
+      photoTargetId: surveyByHld?.original_hld_feature ?? feature.id,
+      featureName: feature.name,
+      initialValues: initialValues as Record<string, unknown>,
+      isNewPoint: false,
+    });
+
+    // Close the popup when the form opens
     selectFeature(null);
     setSelectedMapFeatureId(null);
     setPopupScreenCoords(null);
-    // Exit add_point mode if active
-    if (geoMode !== 'select') {
-      setGeoMode('select');
-    }
-    setAddPointTargetLayer('');
-    console.log(`[Edit] Editing feature "${feature.name}" (${feature.geometryType}) on layer "${feature.layerName}"`);
-  }, [selectFeature, geoMode]);
+    // Auto-switch to overlay so a newly created orange survey point is visible
+    autoOverlayOnEdit();
+    console.log(`[SurveyForm] Opened form for point ${feature.id.slice(-8)} on ${feature.layerId}`);
+  }, [surveyFeatures, getSurveyFeatureForHld, findHldFeatureOriginal, selectFeature, autoOverlayOnEdit]);
 
   // ── Start editing a LINE feature from the popup (viewing → toolbar) ─
   // Closes the popup and opens the LineSelectionToolbar.
@@ -1533,7 +1494,7 @@ export default function MapScreen() {
     (featureId: string, layerId: string) => {
       // Check if a SurveyFeature exists for this feature
       const existingSurvey = getSurveyFeatureForHld(featureId);        if (existingSurvey) {
-          // ── Has an HLD original → mark as 'removed' (HLD stays on map in blue) ──
+          // ── Has an HLD original → hard-delete the survey edit (HLD stays on map in blue) ──
           pushUndo({
             featureId,
             layerId,
@@ -1551,18 +1512,19 @@ export default function MapScreen() {
               description: `Undo: restore survey feature ${featureId.slice(-8)}`,
             },
           });
-          // Update store directly so the map re-renders immediately (bypass API).
+          // Optimistic local removal so the map re-renders immediately.
           const store = useSurveyFeaturesStore.getState();
           const currentLayer = store.surveyFeatures[layerId] ?? [];
           useSurveyFeaturesStore.setState({
             surveyFeatures: {
               ...store.surveyFeatures,
-              [layerId]: currentLayer.map((sf) =>
-                sf.id === existingSurvey.id ? { ...sf, survey_status: 'removed' as const } : sf
-              ),
+              [layerId]: currentLayer.filter((sf) => sf.id !== existingSurvey.id),
             },
           });
-          console.log(`[Delete] SurveyFeature ${existingSurvey.id.slice(-8)} marked 'removed' — HLD untouched`);
+          // Hard delete from the DB — the backend ignores survey_status PATCHes,
+          // so DELETE is the only reliable way to actually remove the feature.
+          deleteSurveyFeature(existingSurvey.id, layerId);
+          console.log(`[Delete] SurveyFeature ${existingSurvey.id.slice(-8)} deleted (map + DB) — HLD untouched`);
       } else {
         // ── No existing SurveyFeature. This is a pure HLD point being deleted.
         // Create a new SurveyFeature with status 'removed' (Logical Delete).
@@ -1584,18 +1546,18 @@ export default function MapScreen() {
               description: `Undo: restore survey feature ${directSf.id.slice(-8)}`,
             },
           });
-          // Update store DIRECTLY so the map re-renders immediately (bypass API).
+          // Optimistic local removal so the map re-renders immediately.
           const store = useSurveyFeaturesStore.getState();
           const current = store.surveyFeatures[baseLid] ?? [];
           useSurveyFeaturesStore.setState({
             surveyFeatures: {
               ...store.surveyFeatures,
-              [baseLid]: current.map((sf) =>
-                sf.id === directSf.id ? { ...sf, survey_status: 'removed' as const } : sf
-              ),
+              [baseLid]: current.filter((sf) => sf.id !== directSf.id),
             },
           });
-          console.log(`[Delete] Marked survey feature ${directSf.id.slice(-8)} as 'removed'`);
+          // Hard delete from the DB — the backend ignores survey_status PATCHes.
+          deleteSurveyFeature(directSf.id, baseLid);
+          console.log(`[Delete] Survey feature ${directSf.id.slice(-8)} deleted (map + DB)`);
           return;
         }
         // Not a direct survey feature — this is a pure HLD feature.
@@ -1627,12 +1589,15 @@ export default function MapScreen() {
                 layerId,
                 previousGeometry: createdSf.survey_geometry,
                 previousAttributes: createdSf.survey_attributes,
-                previousStatus: 'new',
-                description: `Undo: restore removed point ${featureId.slice(-8)}`,
+                previousStatus: createdSf.survey_status,
+                description: `Undo: restore removed feature ${featureId.slice(-8)}`,
               },
             });
-            updateSurveyFeature(createdSf.id, layerId, { survey_status: 'removed' });
-            console.log(`[Delete] Created SurveyFeature ${createdSf.id.slice(-8)} + marked 'removed' for HLD ${featureId.slice(-8)}`);
+            // The backend cannot persist survey_status='removed', so the record
+            // is hard-deleted right after creation — net DB effect: none, and no
+            // stray orange feature is left behind.
+            deleteSurveyFeature(createdSf.id, layerId);
+            console.log(`[Delete] HLD ${featureId.slice(-8)} removed (no survey edit existed — record cleaned up)`);
           }
         }).catch((err) => {
           console.error(`[Delete] Failed to create removed survey feature:`, err);
@@ -1647,16 +1612,39 @@ export default function MapScreen() {
   const handleLineDelete = useCallback(() => {
     if (!selectedLineFeature) return;
     const name = selectedLineFeature.name ?? 'this feature';
-    // Use window.confirm on web (Alert.alert is native-only, silently fails on web)
-    const confirmed = typeof window !== 'undefined'
-      ? window.confirm(`Remove "${name}" from the survey?\n\nThis will NOT delete the original HLD feature.`)
-      : false; // native: don't auto-delete without confirmation
-    if (!confirmed) return;
+    const message = `Remove "${name}" from the survey?\n\nThis will NOT delete the original HLD feature.`;
+    // Web: use window.confirm. Native: use Alert.alert.
+    if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+      if (!window.confirm(message)) return;
+    } else {
+      // Native: Alert.alert is async, so we wrap in a promise-like pattern
+      // by immediately executing via a flag set in the callback.
+      // We use a simple approach: show alert and handle in callback.
+      const { Alert } = require('react-native');
+      Alert.alert('Remove Feature', message, [
+        { text: 'Cancel', style: 'cancel', onPress: () => {} },
+        { text: 'Delete', style: 'destructive', onPress: () => {
+          handleDeleteFeature(selectedLineFeature.id, selectedLineFeature.layerId);
+          setSelectedLineFeature(null);
+          setSelectedMapFeatureId(null);
+          setPopupScreenCoords(null);
+          setLineToolMode(null);
+          setContinueLineAnchor(null);
+          setContinueLinePoints(0);
+          lastContinueTapRef.current = null;
+          setDeleteSectionRange(null);
+        }},
+      ]);
+      return;
+    }
     handleDeleteFeature(selectedLineFeature.id, selectedLineFeature.layerId);
     setSelectedLineFeature(null);
     setSelectedMapFeatureId(null);
     setPopupScreenCoords(null);
     setLineToolMode(null);
+    setContinueLineAnchor(null);
+    setContinueLinePoints(0);
+    lastContinueTapRef.current = null;
     setDeleteSectionRange(null);
   }, [selectedLineFeature, handleDeleteFeature]);
 
@@ -1664,10 +1652,16 @@ export default function MapScreen() {
   const handleLineDeselect = useCallback(() => {
     setSelectedLineFeature(null);
     setSelectedMapFeatureId(null);
-    // Exit move mode + clear temp state
+    // Exit move mode + clear temp state + exit any line tool mode so the
+    // map tap handler returns to normal popup/selection behavior.
     setLineMoveMode(false);
     setTempLineCoords(null);
     setTempLineOriginal(null);
+    setLineToolMode(null);
+    setContinueLineAnchor(null);
+    setContinueLinePoints(0);
+    lastContinueTapRef.current = null;
+    setDeleteSectionRange(null);
   }, []);
 
   // ── Toggle Move Mode for the selected line ────────────────────────────
@@ -1685,6 +1679,9 @@ export default function MapScreen() {
       setTempLineCoords(null);
       setTempLineOriginal(null);
       setLineToolMode(null);
+      setContinueLineAnchor(null);
+      setContinueLinePoints(0);
+      lastContinueTapRef.current = null;
       setDeleteSectionRange(null);
       console.log('[MoveMode] Exited — temp changes discarded');
     } else {
@@ -1707,7 +1704,7 @@ export default function MapScreen() {
       // This handles cases where the map feature's _id (from buildMapLayerData)
       // differs from the original GeoJSON feature's .id (in activeGeojsonRef).
       if (!hldFeature) {
-        const idMap = (hasImportedData ? importFeatureIdMap : demoFeatureIdMap)?.[layerId];
+        const idMap = importFeatureIdMap?.[layerId];
         const idMapSize = idMap?.length ?? 0;
         console.log(`[MoveMode] DEBUG: direct match failed, trying fallback. idMap=${!!idMap}, idMapSize=${idMapSize}, features.length=${features.length}`);
         if (idMap) {
@@ -1720,12 +1717,19 @@ export default function MapScreen() {
         }
       }
 
-      if (!hldFeature?.geometry || hldFeature.geometry.type !== 'LineString') {
-        console.warn(`[MoveMode] GUARD 3: hldFeature not found. fallback=${!!hldFeature}, geom=${hldFeature?.geometry?.type}, featureId=${featureId.slice(-12)}`);
+      // Accept both LineString and MultiLineString (multi-line features are common in imports).
+      const geomType = hldFeature?.geometry?.type;
+      if (!hldFeature?.geometry || (geomType !== 'LineString' && geomType !== 'MultiLineString')) {
+        console.warn(`[MoveMode] GUARD 3: unsupported geom=${geomType}, featureId=${featureId.slice(-12)}`);
         return;
       }
 
-      const coords = hldFeature.geometry.coordinates as [number, number][];
+      // Extract coordinates: MultiLineString uses the first line's coordinate array.
+      const rawCoords =
+        geomType === 'MultiLineString'
+          ? (hldFeature.geometry.coordinates as [number, number][][])[0] ?? []
+          : (hldFeature.geometry.coordinates as [number, number][]);
+      const coords = rawCoords as [number, number][];
       const coordsCopy = coords.map(([lng, lat]) => [lng, lat] as [number, number]);
       const originalCopy = coords.map(([lng, lat]) => [lng, lat] as [number, number]);
 
@@ -1735,7 +1739,7 @@ export default function MapScreen() {
       autoOverlayOnEdit();
       console.log(`[MoveMode] Activated for ${featureId.slice(-8)} — ${coordsCopy.length} vertices`);
     }
-  }, [selectedLineFeature, lineMoveMode, autoOverlayOnEdit, hasImportedData, importFeatureIdMap, demoFeatureIdMap]);
+  }, [selectedLineFeature, lineMoveMode, autoOverlayOnEdit, importFeatureIdMap]);
 
   // ── Save the temporary line geometry to the survey-features store ──────
   // Creates or updates a SurveyFeature with the modified geometry.
@@ -1796,10 +1800,16 @@ export default function MapScreen() {
       });
     }
 
-    // Clear temp state + exit move mode
+    // Clear temp state + exit move mode + exit any line tool mode so the
+    // map tap handler returns to normal popup/selection behavior.
     setTempLineCoords(null);
     setTempLineOriginal(null);
     setLineMoveMode(false);
+    setLineToolMode(null);
+    setContinueLineAnchor(null);
+    setContinueLinePoints(0);
+    lastContinueTapRef.current = null;
+    setDeleteSectionRange(null);
     console.log(`[MoveMode] Saved line geometry for ${featureId.slice(-8)} — SurveyFeature ${existingSurvey ? 'updated' : 'created'}`);
   }, [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature]);
 
@@ -1823,18 +1833,23 @@ export default function MapScreen() {
       return fid === featureId;
     });
     if (!hldFeature) {
-      const idMap = (hasImportedData ? importFeatureIdMap : demoFeatureIdMap)?.[layerId];
+      const idMap = importFeatureIdMap?.[layerId];
       if (idMap) { const idx = idMap.indexOf(featureId); if (idx >= 0 && idx < features.length) hldFeature = features[idx]; }
     }
-    if (!hldFeature?.geometry || hldFeature.geometry.type !== 'LineString') return;
-    const coords = (hldFeature.geometry.coordinates as [number, number][]).map(([lng, lat]) => [lng, lat] as [number, number]);
+    const geomType = hldFeature?.geometry?.type;
+    if (!hldFeature?.geometry || (geomType !== 'LineString' && geomType !== 'MultiLineString')) return;
+    const rawCoords =
+      geomType === 'MultiLineString'
+        ? (hldFeature.geometry.coordinates as [number, number][][])[0] ?? []
+        : (hldFeature.geometry.coordinates as [number, number][]);
+    const coords = (rawCoords as [number, number][]).map(([lng, lat]) => [lng, lat] as [number, number]);
     setTempLineCoords(coords);
     setTempLineOriginal(coords.map(([lng, lat]) => [lng, lat] as [number, number]));
     setLineMoveMode(true);
     setLineToolMode('delete-section');
     setDeleteSectionRange(null);
     autoOverlayOnEdit();
-  }, [selectedLineFeature, lineToolMode, hasImportedData, importFeatureIdMap, demoFeatureIdMap, autoOverlayOnEdit]);
+  }, [selectedLineFeature, lineToolMode, importFeatureIdMap, autoOverlayOnEdit]);
 
   // ── Continue Line handler ────────────────────────────────────────────
   // Activates vertex markers. User taps endpoint vertex, then taps a Point
@@ -1846,6 +1861,8 @@ export default function MapScreen() {
       setLineMoveMode(false);
       setLineToolMode(null);
       setContinueLineAnchor(null);
+      setContinueLinePoints(0);
+      lastContinueTapRef.current = null;
       setTempLineCoords(null);
       setTempLineOriginal(null);
       return;
@@ -1859,18 +1876,25 @@ export default function MapScreen() {
       return fid === featureId;
     });
     if (!hldFeature) {
-      const idMap = (hasImportedData ? importFeatureIdMap : demoFeatureIdMap)?.[layerId];
+      const idMap = importFeatureIdMap?.[layerId];
       if (idMap) { const idx = idMap.indexOf(featureId); if (idx >= 0 && idx < features.length) hldFeature = features[idx]; }
     }
-    if (!hldFeature?.geometry || hldFeature.geometry.type !== 'LineString') return;
-    const coords = (hldFeature.geometry.coordinates as [number, number][]).map(([lng, lat]) => [lng, lat] as [number, number]);
+    const geomType = hldFeature?.geometry?.type;
+    if (!hldFeature?.geometry || (geomType !== 'LineString' && geomType !== 'MultiLineString')) return;
+    const rawCoords =
+      geomType === 'MultiLineString'
+        ? (hldFeature.geometry.coordinates as [number, number][][])[0] ?? []
+        : (hldFeature.geometry.coordinates as [number, number][]);
+    const coords = (rawCoords as [number, number][]).map(([lng, lat]) => [lng, lat] as [number, number]);
     setTempLineCoords(coords);
     setTempLineOriginal(coords.map(([lng, lat]) => [lng, lat] as [number, number]));
     setLineMoveMode(true);
     setLineToolMode('continue-line');
     setContinueLineAnchor(null);
+    setContinueLinePoints(0);
+    lastContinueTapRef.current = null;
     autoOverlayOnEdit();
-  }, [selectedLineFeature, lineToolMode, hasImportedData, importFeatureIdMap, demoFeatureIdMap, autoOverlayOnEdit]);
+  }, [selectedLineFeature, lineToolMode, importFeatureIdMap, autoOverlayOnEdit]);
 
   const handleDeleteSectionConfirm = useCallback(() => {
     if (!deleteSectionRange || !tempLineCoords || !tempLineOriginal || !selectedLineFeature) return;
@@ -1915,10 +1939,10 @@ export default function MapScreen() {
         id: `local-sf-${Date.now()}-${i}`,
         original_hld_feature: segHldId,
         hld_feature_id: segHldId,
-        project: activeProject?.id ?? 'demo',
-        project_name: activeProject?.name ?? 'Demo',
-        engineer: 'demo-user',
-        engineer_name: 'Demo Engineer',
+        project: activeProject?.id ?? '',
+        project_name: activeProject?.name ?? '',
+        engineer: '',
+        engineer_name: '',
         layer_id: layerId,
         layer_name: layerName,
         original_geometry: origGeom,
@@ -1957,8 +1981,159 @@ export default function MapScreen() {
         },
       });
     }
-    setLineMoveMode(false); setLineToolMode(null); setDeleteSectionRange(null); setTempLineCoords(null); setTempLineOriginal(null);
+    setLineMoveMode(false); setLineToolMode(null); setDeleteSectionRange(null); setContinueLineAnchor(null); setContinueLinePoints(0); lastContinueTapRef.current = null; setTempLineCoords(null); setTempLineOriginal(null);
   }, [deleteSectionRange, tempLineCoords, tempLineOriginal, selectedLineFeature, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, activeProject]);
+
+  // ── Delete Section: tap handler ────────────────────────────────────────
+  // Snaps the actual tap location (lngLat from the map press event) to the
+  // nearest vertex on tempLineCoords. The FIRST tap sets the start vertex,
+  // the SECOND tap sets the end vertex (order independent — confirm handler
+  // normalizes with Math.min/Math.max). Only vertices of the selected line
+  // are considered: taps on the temp-preview layer OR the original HLD
+  // line layer both resolve. Taps on OTHER features are ignored.
+  const handleDeleteSectionTap = useCallback(
+    (featureId: string, layerId: string, lngLat: [number, number]) => {
+      if (lineToolMode !== 'delete-section' || !selectedLineFeature || !tempLineCoords) return;
+      const expectedPreview = `temp-preview-${selectedLineFeature.layerId}`;
+      const onSelectedLine =
+        layerId === expectedPreview ||
+        (featureId === selectedLineFeature.id && layerId === selectedLineFeature.layerId);
+      if (!onSelectedLine) {
+        console.log(`[DeleteSection] Ignored tap on layer "${layerId}" — not the selected line`);
+        return;
+      }
+
+      // Snap to nearest vertex of tempLineCoords using the REAL tap point.
+      // No distance cap needed: onSelectedLine guarantees the tap landed on
+      // the selected line, so the nearest vertex is always the intended one
+      // (a cap would reject mid-segment taps on long straight trenches).
+      let bestIdx = 0;
+      let bestDist = Infinity;
+      tempLineCoords.forEach(([vlng, vlat], i) => {
+        const d = (lngLat[0] - vlng) ** 2 + (lngLat[1] - vlat) ** 2;
+        if (d < bestDist) { bestDist = d; bestIdx = i; }
+      });
+
+      setDeleteSectionRange((prev) => {
+        if (!prev) {
+          console.log(`[DeleteSection] Start vertex = ${bestIdx}`);
+          return [bestIdx, bestIdx];
+        }
+        console.log(`[DeleteSection] End vertex = ${bestIdx} (range ${Math.min(prev[0], bestIdx)}→${Math.max(prev[0], bestIdx)})`);
+        return [prev[0], bestIdx];
+      });
+    },
+    [lineToolMode, selectedLineFeature, tempLineCoords],
+  );
+
+  // ── Draw Segment (Continue Line): tap handler ──────────────────────────
+  // Step 1: FIRST tap on the selected line snaps to the nearest vertex and
+  //   sets the ANCHOR vertex — the segment starts from this vertex.
+  // Step 2: NEXT tap connects the anchor to the tapped location. If the tap
+  //   lands ON the selected line itself, it snaps to the nearest vertex
+  //   there ("connect the 2 nearby tapped vertex points"). If the tap lands
+  //   on a Point feature or empty area, it connects to that exact spot.
+  // Step 3+: EVERY following tap APPENDS another segment to the growing
+  //   path — the line becomes A→B→C→D… (multi-segment extension). Only the
+  //   FIRST connection truncates the original tail after the anchor so the
+  //   path extends straight out from the anchor instead of bending back.
+  const handleContinueLineTap = useCallback(
+    (featureId: string, layerId: string, lngLat: [number, number]) => {
+      if (lineToolMode !== 'continue-line' || !selectedLineFeature || !tempLineCoords) return;
+
+      // ── Dedupe guard ──
+      // Native MapLibre fires both the Map onPress and the GeoJSONSource
+      // onPress for a single tap → this handler runs twice with the same
+      // lngLat. In multi-segment mode a double-fire would append 2 points,
+      // so ignore the second call within 300 ms at (nearly) the same spot.
+      const now = Date.now();
+      const last = lastContinueTapRef.current;
+      if (
+        last &&
+        now - last.t < 300 &&
+        Math.abs(last.lng - lngLat[0]) < 1e-6 &&
+        Math.abs(last.lat - lngLat[1]) < 1e-6
+      ) {
+        console.log('[Continue] Deduped duplicate tap');
+        return;
+      }
+      lastContinueTapRef.current = { lng: lngLat[0], lat: lngLat[1], t: now };
+
+      const expectedPreview = `temp-preview-${selectedLineFeature.layerId}`;
+      const onSelectedLine =
+        layerId === expectedPreview ||
+        (featureId === selectedLineFeature.id && layerId === selectedLineFeature.layerId);
+
+      // ── Nearest-vertex snap helper (shared by both steps) ──
+      const nearestVertexIdx = (pt: [number, number]): number => {
+        let bestIdx = 0;
+        let bestDist = Infinity;
+        tempLineCoords!.forEach(([vlng, vlat], i) => {
+          const d = (pt[0] - vlng) ** 2 + (pt[1] - vlat) ** 2;
+          if (d < bestDist) { bestDist = d; bestIdx = i; }
+        });
+        return bestIdx;
+      };
+
+      // ── Step 1: pick the anchor vertex ──
+      if (continueLineAnchor === null) {
+        if (!onSelectedLine) {
+          console.log('[Continue] Tap the selected line to choose the start vertex');
+          return;
+        }
+        const bestIdx = nearestVertexIdx(lngLat);
+        setContinueLineAnchor(bestIdx);
+        console.log(`[Continue] Anchor set at vertex ${bestIdx}`);
+        return;
+      }
+
+      // ── Step 2+: connect the CURRENT end of the path to the tapped point ──
+      let connectLng: number;
+      let connectLat: number;
+      if (onSelectedLine) {
+        // Tapping the line again → snap to the nearest vertex there and
+        // connect to it (draws a segment between 2 line vertices).
+        const endIdx = nearestVertexIdx(lngLat);
+        if (endIdx === continueLineAnchor && continueLinePoints === 0) {
+          console.log('[Continue] Tapped the anchor vertex itself — ignoring');
+          return;
+        }
+        const [elng, elat] = tempLineCoords[endIdx];
+        connectLng = elng;
+        connectLat = elat;
+        console.log(`[Continue] Connected to vertex ${endIdx}`);
+      } else {
+        // Tapping elsewhere → connect to the exact tapped location.
+        connectLng = lngLat[0];
+        connectLat = lngLat[1];
+        console.log(`[Continue] Connected to [${connectLng.toFixed(6)}, ${connectLat.toFixed(6)}]`);
+      }
+
+      // Build the new path:
+      //   First connection — keep the line up to and including the anchor,
+      //   then go straight to the tapped point (truncates the tail so it
+      //   doesn't bend back and create a V shape).
+      //   Later connections — simply append, growing the path A→B→C→D…
+      const newCoords =
+        continueLinePoints === 0
+          ? [...tempLineCoords.slice(0, continueLineAnchor + 1)]
+          : [...tempLineCoords];
+
+      // ── Guard: skip zero-length segments (tapping the same spot or the
+      //    anchor vertex again would append a duplicate point). ──
+      const lastPt = newCoords[newCoords.length - 1];
+      if (lastPt && Math.abs(lastPt[0] - connectLng) < 1e-9 && Math.abs(lastPt[1] - connectLat) < 1e-9) {
+        console.log('[Continue] Tapped the same point as the current end — ignoring');
+        return;
+      }
+
+      newCoords.push([connectLng, connectLat]);
+      setTempLineCoords(newCoords);
+      setContinueLinePoints((p) => p + 1);
+      console.log(`[Continue] Segment ${continueLinePoints + 1} drawn — path ${tempLineCoords.length} → ${newCoords.length} vertices`);
+    },
+    [lineToolMode, selectedLineFeature, tempLineCoords, continueLineAnchor, continueLinePoints],
+  );
 
   // ── Check if temp line has unsaved changes ──
   const hasUnsavedLineChanges = useMemo(() => {
@@ -2004,47 +2179,67 @@ export default function MapScreen() {
   // ── Polygon edit handlers ───────────────────────────────────────────
   const handlePolygonEditStart = useCallback((feature: EditingFeature) => {
     console.log(`[PolygonEdit] Starting edit for feature ${feature.id.slice(-8)} on layer ${feature.layerId}`);
-    // ── Search for the feature across all rendered layers ──
-    // The layerId from the click event may not match activeGeojsonRef keys exactly
-    // (e.g., imported features use 'imp-' prefix), so search all layers as fallback.
+    // ── Search the RENDERED map layers first ──
+    // The click handler resolves feature IDs from the RENDERED layers (injected
+    // _id/_layer_id), so searching those ALWAYS matches what the user tapped.
+    // The raw activeGeojsonRef can differ for imported data (imp- prefix,
+    // synthetic imp-feat-* ids) and contains NO survey features (their ids live
+    // in the survey-features store) — which caused "Feature NOT found" before.
     let hldFeature: GeoJSONFeature | undefined;
     let matchedLayerId = feature.layerId;
 
-    // First: try exact layerId match
-    const exactLayers = activeGeojsonRef.current[feature.layerId];
-    if (exactLayers) {
-      hldFeature = exactLayers.find((item) => {
+    for (const layerData of mapLayerData) {
+      const fidMatch = layerData.features.find((item: GeoJSONFeature) => {
         const fid = (item.properties as any)?.id ?? (item.properties as any)?._id ?? '';
         return fid === feature.id;
       });
-    }
-
-    // Fallback: search ALL layers in activeGeojsonRef for this feature ID
-    if (!hldFeature) {
-      for (const [layerId, layerFeatures] of Object.entries(activeGeojsonRef.current)) {
-        const found = layerFeatures.find((item) => {
-          const fid = (item.properties as any)?.id ?? (item.properties as any)?._id ?? '';
-          return fid === feature.id;
-        });
-        if (found && found.geometry?.type === 'Polygon') {
-          hldFeature = found;
-          matchedLayerId = layerId;
+      if (fidMatch) {
+        const g = fidMatch.geometry;
+        if (g?.type === 'Polygon' || g?.type === 'MultiPolygon') {
+          hldFeature = fidMatch;
+          matchedLayerId = layerData.id;
           break;
         }
       }
     }
 
+    // Fallback: raw store search
     if (!hldFeature) {
-      console.warn(`[PolygonEdit] Feature ${feature.id.slice(-8)} NOT found in any layer. Available keys: ${Object.keys(activeGeojsonRef.current).join(', ')}`);
+      const exactLayers = activeGeojsonRef.current[feature.layerId];
+      if (exactLayers) {
+        hldFeature = exactLayers.find((item) => {
+          const fid = (item.properties as any)?.id ?? (item.properties as any)?._id ?? '';
+          return fid === feature.id;
+        });
+      }
+      if (!hldFeature) {
+        for (const [layerId, layerFeatures] of Object.entries(activeGeojsonRef.current)) {
+          const found = layerFeatures.find((item) => {
+            const fid = (item.properties as any)?.id ?? (item.properties as any)?._id ?? '';
+            return fid === feature.id;
+          });
+          if (found && (found.geometry?.type === 'Polygon' || found.geometry?.type === 'MultiPolygon')) {
+            hldFeature = found;
+            matchedLayerId = layerId;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!hldFeature) {
+      console.warn(`[PolygonEdit] Feature ${feature.id.slice(-8)} NOT found in rendered layers (${mapLayerData.map((l) => l.id).join(', ')}) or raw store`);
       return;
     }
-    if (hldFeature.geometry?.type !== 'Polygon') {
-      console.warn(`[PolygonEdit] Feature is ${hldFeature.geometry?.type}, not Polygon — aborting`);
+    if (hldFeature.geometry?.type !== 'Polygon' && hldFeature.geometry?.type !== 'MultiPolygon') {
+      console.warn(`[PolygonEdit] Feature is ${hldFeature.geometry?.type}, not Polygon/MultiPolygon — aborting`);
       return;
     }
     console.log(`[PolygonEdit] Found feature in ${matchedLayerId}: geometry type = ${hldFeature.geometry?.type}`);
 
-    const ring = (hldFeature.geometry.coordinates as [number, number][][])[0] ?? [];
+    const ring: [number, number][] = hldFeature.geometry.type === 'MultiPolygon'
+      ? ((hldFeature.geometry.coordinates as [number, number][][][])[0]?.[0] ?? []) as [number, number][]
+      : ((hldFeature.geometry.coordinates as [number, number][][])[0] ?? []) as [number, number][];
     const coordsCopy = ring.map(([lng, lat]) => [lng, lat] as [number, number]);
     const originalCopy = ring.map(([lng, lat]) => [lng, lat] as [number, number]);
 
@@ -2053,8 +2248,13 @@ export default function MapScreen() {
     setSelectedPolygonFeature(matchedFeature);
     setPolygonEditCoords(coordsCopy);
     setPolygonEditOriginal(originalCopy);
+    // Capture the original geometry/attributes from the found feature so the
+    // save path doesn't depend on a raw-store lookup that may fail for
+    // imported polygons (rendered _id vs raw properties.id mismatch).
+    setPolygonEditOrigGeom(hldFeature.geometry as Record<string, unknown>);
+    setPolygonEditOrigAttrs({ ...(hldFeature.properties as Record<string, unknown>) });
     autoOverlayOnEdit();
-  }, [autoOverlayOnEdit]);
+  }, [autoOverlayOnEdit, mapLayerData]);
 
   const handlePolygonVertexDragEnd = useCallback(
     (featureId: string, layerId: string, vertexIdx: number, newLng: number, newLat: number) => {
@@ -2082,10 +2282,67 @@ export default function MapScreen() {
 
     const { id: featureId, layerId } = selectedPolygonFeature;
     const surveyGeometry = { type: 'Polygon', coordinates: [polygonEditCoords] };
+
+    // ── SURVEY polygon (orange, layerId starts with 'survey-') ──
+    // featureId IS the survey feature's ID (it lives in the survey-features
+    // store, not in the raw HLD store). Update it directly.
+    if (layerId.startsWith('survey-')) {
+      const baseLayerId = layerId.slice('survey-'.length);
+      const sfList = surveyFeatures[baseLayerId] ?? [];
+      const sf = sfList.find((s) => s.id === featureId);
+      if (sf) {
+        pushUndo({
+          featureId,
+          layerId: baseLayerId,
+          oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+          timestamp: Date.now(),
+          surveyUndo: {
+            surveyFeatureId: sf.id,
+            layerId: baseLayerId,
+            previousGeometry: sf.survey_geometry,
+            previousAttributes: sf.survey_attributes,
+            previousStatus: sf.survey_status,
+            description: `Undo polygon edit for ${featureId.slice(-8)}`,
+          },
+        });
+        updateSurveyFeature(sf.id, baseLayerId, {
+          survey_geometry: surveyGeometry,
+          survey_status: 'modified',
+        });
+        console.log(`[PolygonEdit] Saved survey polygon ${featureId.slice(-8)} (${baseLayerId})`);
+      }
+      setSelectedPolygonFeature(null);
+      setPolygonEditCoords(null);
+      setPolygonEditOriginal(null);
+      setPolygonEditOrigGeom(null);
+      setPolygonEditOrigAttrs(null);
+      return;
+    }
+
+    // ── HLD polygon (blue): create/update a SurveyFeature tied to the HLD ──
     const existingSurvey = getSurveyFeatureForHld(featureId);
-    const { geometry: origGeom, attributes: origAttrs } = findHldFeatureOriginal(featureId, layerId);
+    // Prefer the originals captured at edit-start (works for imported polygons
+    // whose rendered _id doesn't match the raw store); fall back to the raw
+    // store lookup fallback.
+    const { geometry: rawGeom, attributes: rawAttrs } = findHldFeatureOriginal(featureId, layerId);
+    const origGeom = polygonEditOrigGeom ?? rawGeom;
+    const origAttrs = polygonEditOrigAttrs ?? rawAttrs;
 
     if (existingSurvey) {
+      pushUndo({
+        featureId,
+        layerId,
+        oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+        timestamp: Date.now(),
+        surveyUndo: {
+          surveyFeatureId: existingSurvey.id,
+          layerId,
+          previousGeometry: existingSurvey.survey_geometry,
+          previousAttributes: existingSurvey.survey_attributes,
+          previousStatus: existingSurvey.survey_status,
+          description: `Undo polygon edit for ${featureId.slice(-8)}`,
+        },
+      });
       updateSurveyFeature(existingSurvey.id, layerId, {
         survey_geometry: surveyGeometry,
         survey_status: 'modified',
@@ -2106,13 +2363,17 @@ export default function MapScreen() {
     setSelectedPolygonFeature(null);
     setPolygonEditCoords(null);
     setPolygonEditOriginal(null);
-  }, [selectedPolygonFeature, polygonEditCoords, polygonEditOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, updateSurveyFeature, upsertSurveyFeature, activeLayerNames]);
+    setPolygonEditOrigGeom(null);
+    setPolygonEditOrigAttrs(null);
+  }, [selectedPolygonFeature, polygonEditCoords, polygonEditOriginal, polygonEditOrigGeom, polygonEditOrigAttrs, getSurveyFeatureForHld, findHldFeatureOriginal, updateSurveyFeature, upsertSurveyFeature, activeLayerNames, surveyFeatures, pushUndo]);
 
   // ── Polygon cancel handler — discard changes and exit editing ──────────
   const handlePolygonCancel = useCallback(() => {
     setSelectedPolygonFeature(null);
     setPolygonEditCoords(null);
     setPolygonEditOriginal(null);
+    setPolygonEditOrigGeom(null);
+    setPolygonEditOrigAttrs(null);
   }, []);
 
   // ── Handle empty map area click (for add point / deselect) ───────────
@@ -2120,11 +2381,19 @@ export default function MapScreen() {
   // original_hld_feature = null indicates this is an engineer-created point.
   const handleEmptyMapClick = useCallback(
     (lng: number, lat: number) => {
+      // ── Draw Segment mode: empty-area taps place the next path point ──
+      // (A→B→C→D…). Must be checked BEFORE deselecting the line below.
+      if (lineToolMode === 'continue-line' && selectedLineFeature && tempLineCoords) {
+        handleContinueLineTap('', '', [lng, lat]);
+        return;
+      }
       // Clear line selection when tapping empty area
       setSelectedLineFeature(null);
       setSelectedPolygonFeature(null);
       setPolygonEditCoords(null);
       setPolygonEditOriginal(null);
+      setPolygonEditOrigGeom(null);
+      setPolygonEditOrigAttrs(null);
       if (geoMode === 'add_point') {
         if (!addPointTargetLayer) {
           console.warn('[AddPoint] No target layer selected — tap a layer chip first');
@@ -2153,6 +2422,9 @@ export default function MapScreen() {
             setSurveyForm({
               layerId: addPointTargetLayer,
               featureId: sf.id,         // Use the SurveyFeature ID, not a synthetic HLD ID
+              // New points have no HLD row — photos attach via the survey
+              // feature photo endpoint (backend supports it).
+              photoTargetId: sf.id,
               initialValues: sf.survey_attributes as Record<string, unknown>,
               isNewPoint: true,
             });
@@ -2165,7 +2437,7 @@ export default function MapScreen() {
         autoOverlayOnEdit();
       }
     },
-    [geoMode, addPointTargetLayer, activeLayerNames, upsertSurveyFeature, autoOverlayOnEdit],
+    [geoMode, addPointTargetLayer, activeLayerNames, upsertSurveyFeature, autoOverlayOnEdit, lineToolMode, selectedLineFeature, tempLineCoords, handleContinueLineTap],
   );
 
   // Clear line selection when geoMode changes away from select (entering add_point)
@@ -2186,33 +2458,84 @@ export default function MapScreen() {
     }
   }, [selectedLineFeature]);
 
-  // ── Save SurveyForm data — update the SurveyFeature's attributes via the store ──
+  // ── Save SurveyForm data — update (or create) the SurveyFeature via the store ──
   // The HLD GeoJSON is never touched. The SurveyFeature gets the engineer's edits.
+  // featureId can be:
+  //   A) A SurveyFeature ID (new-point flow OR an already-surveyed point)
+  //   B) An HLD feature ID (existing point with no survey feature yet) → create one
   const handleSurveyFormSave = useCallback(
-    (featureId: string, layerId: string, properties: Record<string, unknown>) => {
-      // featureId here is the SurveyFeature ID (set in handleEmptyMapClick)
-      // Update the SurveyFeature's survey_attributes via the store
-      updateSurveyFeature(featureId, layerId, {
-        survey_attributes: properties,
-        survey_status: 'modified',
-      });
+    async (featureId: string, layerId: string, properties: Record<string, unknown>) => {
+      // ── Case A: featureId is already a SurveyFeature id → update directly ──
+      const existingById = surveyFeatures[layerId]?.find((s) => s.id === featureId);
+      if (existingById) {
+        updateSurveyFeature(featureId, layerId, {
+          survey_attributes: properties,
+          survey_status: 'modified',
+        });
+        setSurveyForm(null);
+        console.log(`[SurveyForm] Saved attributes to SurveyFeature ${featureId.slice(-8)}`);
+        return;
+      }
 
-      // Close the form
+      // ── Case B: featureId is an HLD id → find linked SurveyFeature or create one ──
+      const linked = getSurveyFeatureForHld(featureId);
+      if (linked) {
+        updateSurveyFeature(linked.id, layerId, {
+          survey_attributes: properties,
+          survey_status: 'modified',
+        });
+        setSurveyForm(null);
+        console.log(`[SurveyForm] Saved attributes to SurveyFeature ${linked.id.slice(-8)}`);
+        return;
+      }
+
+      // ── Case C: no SurveyFeature exists yet — create one from the HLD feature ──
+      const { geometry: origGeom, attributes: origAttrs } = findHldFeatureOriginal(featureId, layerId);
+      if (!origGeom) {
+        console.warn(`[SurveyForm] Original geometry not found for ${featureId.slice(-8)} — skipping create`);
+        setSurveyForm(null);
+        return;
+      }
+      const layerName = activeLayerNames[layerId] ?? layerId.toUpperCase();
+      const sf = await upsertSurveyFeature(
+        featureId,
+        layerId,
+        layerName,
+        origGeom,
+        properties,
+        origGeom,
+        origAttrs,
+        'Survey details captured via survey form',
+      );
+      if (sf) {
+        updateSurveyFeature(sf.id, layerId, {
+          survey_attributes: properties,
+          survey_status: 'modified',
+        });
+      } else {
+        console.warn('[SurveyForm] Failed to create SurveyFeature — no backend (imported project?)');
+      }
       setSurveyForm(null);
-      console.log(`[SurveyForm] Saved attributes to SurveyFeature ${featureId.slice(-8)}`);
+      console.log(`[SurveyForm] Created SurveyFeature for HLD ${featureId.slice(-8)}`);
     },
-    [updateSurveyFeature],
+    [surveyFeatures, updateSurveyFeature, getSurveyFeatureForHld, findHldFeatureOriginal, upsertSurveyFeature, activeLayerNames],
   );
 
-  // ── Dismiss new point form — delete the SurveyFeature (engineer-created, no HLD) ──
+  // ── Dismiss survey form ────────────────────────────────────────────────
+  // For NEW points (engineer-created, no HLD parent) dismissing deletes the
+  // SurveyFeature (discard behavior). For EXISTING features we only close the
+  // form — any pre-existing survey data must be preserved.
   const handleSurveyFormDismiss = useCallback(() => {
     if (!surveyForm) return;
-    const { featureId, layerId } = surveyForm;
+    const { featureId, layerId, isNewPoint } = surveyForm;
 
-    // Delete the SurveyFeature (featureId is the SurveyFeature ID for new points)
-    deleteSurveyFeature(featureId, layerId);
+    if (isNewPoint) {
+      deleteSurveyFeature(featureId, layerId);
+      console.log('[SurveyForm] Dismissed — SurveyFeature removed');
+    } else {
+      console.log('[SurveyForm] Closed — keeping existing SurveyFeature');
+    }
     setSurveyForm(null);
-    console.log('[SurveyForm] Dismissed — SurveyFeature removed');
   }, [surveyForm, deleteSurveyFeature]);
 
   // ── Save notes for current feature ───────────────────────────────────────
@@ -2242,9 +2565,9 @@ export default function MapScreen() {
     } else if (geomType === 'Polygon') {
       handlePolygonEditStart(feature);
     } else {
-      handleStartEdit(feature);
+      handlePointSurveyForm(feature);
     }
-  }, [selectedFeaturePopup, handleLineEditFromPopup, handlePolygonEditStart, handleStartEdit]);
+  }, [selectedFeaturePopup, handleLineEditFromPopup, handlePolygonEditStart, handlePointSurveyForm]);
 
   // ── View features for a specific layer — opens overlay on map ─────────────
   const handleViewLayerFeatures = useCallback((layerId: string) => {
@@ -2277,26 +2600,7 @@ export default function MapScreen() {
       closeLayerFeaturePanel();
     }
 
-    // First try to find in demo features (rich metadata)
-    const found = demoFeatures.find((f) => f.feature.id === featureId);
-    if (found) {
-      selectFeature(found.feature.id, {
-        id: found.feature.id,
-        name: String(
-          found.feature.properties?.name ??
-            found.feature.properties?.address ??
-            found.feature.layer_name + ' #' + found.feature.id.slice(-3)
-        ),
-        layerName: found.feature.layer_name,
-        layerId: found.feature.layer_id,  // Pass layerId for schema lookup
-        status: found.feature.status,
-      });
-      setSelectedMapFeatureId(found.feature.id);
-      setViewMode('map');
-      return;
-    }
-
-    // Fallback for imported/unknown features — search in mapLayerData (which has augmented IDs)
+    // Search in mapLayerData (which has augmented IDs) for the feature
     for (const layer of mapLayerData) {
       for (const feat of layer.features) {
         const fid = (feat.properties as any)?.id ?? (feat.properties as any)?._id ?? '';
@@ -2361,7 +2665,7 @@ export default function MapScreen() {
           )}
 
           {/* Loading overlay when a real project is active but data is being fetched */}
-          {storeActiveProject && !storeActiveProject.id.startsWith('demo-') && !storeActiveProject.id.startsWith('imported-') && !hasImportedData && (
+          {storeActiveProject && !storeActiveProject.id.startsWith('imported-') && !hasImportedData && (
             <View style={[styles.loadingOverlay, { backgroundColor: colors.background + 'CC' }]}>
               <View style={[styles.loadingBox, { backgroundColor: colors.surface }]}>
                 <Text style={{ fontSize: 32, marginBottom: 8 }}>📡</Text>
@@ -2407,83 +2711,24 @@ export default function MapScreen() {
                 handleDeleteFeature(featureId, layerId);
                 return;
               }
-              // ── Delete Section: intercept clicks for vertex selection ──
-              if (lineToolMode === 'delete-section' && selectedLineFeature && tempLineCoords) {
-                const expectedPreview = `temp-preview-${selectedLineFeature.layerId}`;
-                if (layerId === expectedPreview ||
-                    (featureId === selectedLineFeature.id && layerId === selectedLineFeature.layerId)) {
-                  let bestIdx = 0; let bestDist = Infinity;
-                  tempLineCoords.forEach(([vlng, vlat], i) => {
-                    const d = (lngLat[0] - vlng) ** 2 + (lngLat[1] - vlat) ** 2;
-                    if (d < bestDist) { bestDist = d; bestIdx = i; }
-                  });
-                  if (bestDist <= 0.00045 ** 2) {
-                    setDeleteSectionRange((prev) => {
-                      if (!prev) return [bestIdx, bestIdx];
-                      return [prev[0], bestIdx];
-                    });
-                  }
-                  return;
-                }
+              // ── Delete Section: dedicated vertex-snapping handler ──
+              if (lineToolMode === 'delete-section') {
+                handleDeleteSectionTap(featureId, layerId, lngLat);
+                return;
               }
 
-              // ── Continue Line: intercept clicks for vertex anchor + point connection ──
-              if (lineToolMode === 'continue-line' && selectedLineFeature && tempLineCoords) {
-                const expectedPreview = `temp-preview-${selectedLineFeature.layerId}`;
-                if (continueLineAnchor === null) {
-                  // ── Step 1: Select anchor vertex ──
-                  if (layerId === expectedPreview ||
-                      (featureId === selectedLineFeature.id && layerId === selectedLineFeature.layerId)) {
-                    let bestIdx = 0; let bestDist = Infinity;
-                    tempLineCoords.forEach(([vlng, vlat], i) => {
-                      const d = (lngLat[0] - vlng) ** 2 + (lngLat[1] - vlat) ** 2;
-                      if (d < bestDist) { bestDist = d; bestIdx = i; }
-                    });
-                    if (bestDist <= 0.00045 ** 2) {
-                      setContinueLineAnchor(bestIdx);
-                      console.log(`[Continue] Anchor set at vertex ${bestIdx}`);
-                    }
-                    return;
-                  }
-                } else {
-                  // ── Step 2: Connect to a Point feature ──
-                  // Use the click coordinates directly (lngLat from MapLibreMap).
-                  // Skip clicks on the line's own layer or non-Point features.
-                  if (layerId === expectedPreview ||
-                      (featureId === selectedLineFeature.id && layerId === selectedLineFeature.layerId)) {
-                    return; // Ignore clicks on the line itself after anchor is set
-                  }
-                  // Verify the clicked layer is a Point layer (not LineString/Polygon).
-                  // Uses resolveGeometryType which handles all layer ID formats (demo, imported, survey-*).
-                  const geomType = resolveGeometryType(layerId.replace(/^survey-/, ''));
-                  if (geomType !== 'Point') {
-                    console.log(`[Continue] Ignored click on non-Point layer "${layerId}" (${geomType})`);
-                    return;
-                  }
-                  const [ptLng, ptLat] = lngLat;
-                  const newCoords = [...tempLineCoords];
-                  // Extend line: append/prepend straight segment from anchor to clicked point.
-                  // Preserves full original line geometry.
-                  if (continueLineAnchor === newCoords.length - 1) {
-                    newCoords.push([ptLng, ptLat]);
-                  } else if (continueLineAnchor === 0) {
-                    newCoords.unshift([ptLng, ptLat]);
-                  } else {
-                    newCoords.splice(continueLineAnchor + 1);
-                    newCoords.push([ptLng, ptLat]);
-                  }
-                  setTempLineCoords(newCoords);
-                  console.log(`[Continue] Connected vertex ${continueLineAnchor} to [${ptLng.toFixed(6)}, ${ptLat.toFixed(6)}]`);
-                  return;
-                }
+              // ── Continue Line: dedicated vertex-anchor + connect handler ──
+              if (lineToolMode === 'continue-line') {
+                handleContinueLineTap(featureId, layerId, lngLat);
+                return;
               }
               handleMapFeatureClick(featureId, layerId, lngLat, screenPt);
             }}
             onEmptyAreaClick={handleEmptyMapClick}
             onFeatureDragEnd={handleFeatureDragEnd}
-            onVertexDragEnd={lineMoveMode && tempLineCoords && lineToolMode !== 'continue-line' ? handleVertexDragEnd : undefined}
+            onVertexDragEnd={lineMoveMode && tempLineCoords && lineToolMode === null ? handleVertexDragEnd : undefined}
             vertexDragTarget={memoizedVertexTarget}
-            polygonEditTarget={selectedPolygonFeature ? { featureId: selectedPolygonFeature.id, layerId: selectedPolygonFeature.layerId } : null}
+            polygonEditTarget={selectedPolygonFeature ? { featureId: `temp-preview-${selectedPolygonFeature.id}`, layerId: `temp-preview-${selectedPolygonFeature.layerId}` } : null}
             onPolygonVertexDragEnd={handlePolygonVertexDragEnd}
             draggableLayerIds={draggableLayerIds}
             dragMode={dragMode}
@@ -2491,6 +2736,8 @@ export default function MapScreen() {
             height="100%"
             mapStyle={currentBasemapStyle}
             flyToCenter={flyToCenter}
+            flyToUserTarget={flyToUserTarget}
+            userLocation={userLocation}
           />
 
           {/* Geometry Editor - editing toolbar OR add_point toolbar */}
@@ -2634,7 +2881,8 @@ export default function MapScreen() {
               onDeleteFeature={handleLineDelete}
               continueMode={lineToolMode === 'continue-line'}
               onContinue={handleContinueToggle}
-              continueLineStep={continueLineAnchor === null ? 0 : tempLineCoords && tempLineCoords.length > (tempLineOriginal?.length ?? 0) ? 2 : 1}
+              continueLineStep={continueLineAnchor === null ? 0 : continueLinePoints >= 1 ? 2 : 1}
+              continueLineSegments={continueLinePoints}
             />
           )}
 
@@ -2654,7 +2902,7 @@ export default function MapScreen() {
                 setPopupScreenCoords(null);
               }}
               onOpenDetails={() =>
-                router.push(`/feature/${selectedFeaturePopup.id}?projectId=${activeProject?.id ?? 'demo-proj-1'}`)
+                router.push(`/feature/${selectedFeaturePopup.id}?projectId=${activeProject?.id ?? ''}`)
               }
               onDismiss={() => {
                 selectFeature(null);
@@ -2662,9 +2910,10 @@ export default function MapScreen() {
                 setPopupScreenCoords(null);
               }}
               featureGeometryType={(resolveGeometryType(selectedFeaturePopup.layerId ?? '') as 'Point' | 'LineString' | 'Polygon')}
-              onStartEdit={
-                (displayMode === 'hld' || displayMode === 'overlay' || selectedFeaturePopup?.layerId?.startsWith('survey-')) ? handlePopupEdit : undefined
-              }
+              // Edit (→ line/polygon/point toolbar) is available for EVERY feature
+              // in all display modes — all line features get Reroute, Del Section,
+              // Delete (logical), Draw Segment, and Undo via the LineSelectionToolbar.
+              onStartEdit={handlePopupEdit}
               notesDraft={notesDraft}
               onNotesChange={setNotesDraft}
               onSaveNotes={handleSaveNotes}
@@ -2759,7 +3008,7 @@ export default function MapScreen() {
                 </View>
                 <TouchableOpacity
                   style={[styles.openBtn, { backgroundColor: colors.primary }]}
-                  onPress={() => router.push(`/feature/${item.feature.id}?projectId=${activeProject?.id ?? 'demo-proj-1'}`)}
+                  onPress={() => router.push(`/feature/${item.feature.id}?projectId=${activeProject?.id ?? ''}`)}
                 >
                   <Text style={[styles.openBtnText, { color: colors.onPrimary }]}>Open Feature</Text>
                   <ChevronRight size={14} stroke={colors.onPrimary} />
@@ -2886,7 +3135,20 @@ export default function MapScreen() {
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.fab, { backgroundColor: colors.surface }]}
-            onPress={() => setFollowUser(!followUser)}
+            onPress={() => {
+              // Fly to the device's GPS position (if we have a fix) and keep following
+              if (userLocation) {
+                setFlyToUserTarget({
+                  lng: userLocation.longitude,
+                  lat: userLocation.latitude,
+                  zoom: 17,
+                  ts: Date.now(),
+                });
+                setFollowUser(true);
+              } else {
+                setFollowUser(!followUser);
+              }
+            }}
             activeOpacity={0.8}
           >
             <Crosshair size={20} stroke={followUser ? colors.primary : colors.textSecondary} />

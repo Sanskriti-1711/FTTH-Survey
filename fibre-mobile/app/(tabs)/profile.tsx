@@ -72,7 +72,7 @@ export default function ProfileScreen() {
               {user?.full_name ?? 'Engineer'}
             </Text>
             <Text style={[styles.userEmail, { color: colors.textSecondary }]}>
-              {user?.email ?? 'demo@fibre360.com'}
+              {user?.email ?? 'Not signed in'}
             </Text>
             <StatusBadge status={user?.role?.toLowerCase() ?? 'engineer'} />
           </View>

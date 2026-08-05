@@ -61,9 +61,10 @@ export function useNetworkStatus() {
 
         return () => unsubscribe();
       } catch (err) {
-        // NetInfo not linked — keep demo mode
-        console.warn('[useNetworkStatus] @react-native-community/netinfo unavailable, falling back to demo:', err);
-        store.setConnectivitySource('demo');
+        // NetInfo not linked — assume online; the API layer will surface real errors
+        console.warn('[useNetworkStatus] @react-native-community/netinfo unavailable, assuming online:', err);
+        store.setOnline(true);
+        store.setConnectivitySource('real');
       }
     }
   }, []);

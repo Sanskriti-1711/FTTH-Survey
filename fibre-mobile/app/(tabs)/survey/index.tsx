@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -14,9 +14,9 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useThemeStore } from '../../../lib/stores/theme';
-import { useAuthStore } from '../../../lib/stores/auth';
 import { useSurveyStore } from '../../../lib/stores/survey';
-import { Card, Badge } from '../../../components/ui/Card';
+import { useProjectStore } from '../../../lib/stores/project';
+import { Card } from '../../../components/ui/Card';
 import { Button } from '../../../components/ui/Button';
 import { StatusBadge, ProgressBar } from '../../../components/ui/StatusBadge';
 import { Toast } from '../../../components/ui/Toast';
@@ -34,7 +34,6 @@ import {
   Flag,
 } from 'lucide-react-native';
 import type { Feature, GeoJSONFeature } from '../../../lib/utils/types';
-import { DEMO_FEATURES, DEMO_GEOJSON_FEATURES } from '../../../lib/stores/demo-data';
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -94,8 +93,8 @@ const SURVEY_STATUS_FLOW = [
 
 export default function SurveyScreen() {
   const colors = useThemeStore((s) => s.colors);
-  const { demoMode } = useAuthStore();
   const store = useSurveyStore();
+  const { activeProject, projectGeojsons, projectLayers, fetchProjectGeojsons } = useProjectStore();
 
   // Navigation state
   const [selectedFeature, setSelectedFeature] = useState<Feature | null>(null);
@@ -137,25 +136,49 @@ export default function SurveyScreen() {
     setToastVisible(true);
   };
 
-  // ── Demo Data ───────────────────────────────────────────────────────
+  // ── Feature List (from active project's real GeoJSON) ───────────────
 
-  const [allFeatures, setAllFeatures] = useState<Feature[]>([]);
-
-  useEffect(() => {
-    if (demoMode) {
-      const features = Object.values(DEMO_FEATURES).flat();
-      setAllFeatures(features);
+  // Build a flat Feature[] from the active project's GeoJSON layers.
+  // useMemo keeps the object references stable between renders so that
+  // getFeatureGeoJSON's index lookup works after a feature is selected.
+  const allFeatures: Feature[] = useMemo(() => {
+    if (!activeProject || Object.keys(projectGeojsons).length === 0) return [];
+    const list: Feature[] = [];
+    for (const [layerId, geojsonFeatures] of Object.entries(projectGeojsons)) {
+      const layerName =
+        projectLayers.find((l) => l.layer_id === layerId)?.layer_name ??
+        layerId.toUpperCase();
+      geojsonFeatures.forEach((gf, i) => {
+        list.push({
+          id: `imp-feat-${layerId}-${i + 1}`,
+          layer_name: layerName,
+          layer_id: layerId,
+          properties: gf.properties ?? {},
+          field_schema: null,
+          field_measurements: null,
+          comparison_notes: '',
+          status: 'assigned' as const,
+          photo_url: null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        });
+      });
     }
-  }, [demoMode]);
+    return list;
+  }, [activeProject, projectGeojsons, projectLayers]);
 
   // Get feature geojson for coordinate display
-  const getFeatureGeoJSON = (feature: Feature): GeoJSONFeature | null => {
-    if (!demoMode) return null;
-    const layerGeoJSONs = DEMO_GEOJSON_FEATURES[feature.layer_id];
-    if (!layerGeoJSONs) return null;
-    const idx = allFeatures.filter((f) => f.layer_id === feature.layer_id).indexOf(feature);
-    return layerGeoJSONs[idx] ?? layerGeoJSONs[0] ?? null;
-  };
+  const getFeatureGeoJSON = useCallback(
+    (feature: Feature): GeoJSONFeature | null => {
+      const layerGeoJSONs = projectGeojsons[feature.layer_id];
+      if (!layerGeoJSONs) return null;
+      const idx = allFeatures
+        .filter((f) => f.layer_id === feature.layer_id)
+        .indexOf(feature);
+      return layerGeoJSONs[idx] ?? layerGeoJSONs[0] ?? null;
+    },
+    [allFeatures, projectGeojsons]
+  );
 
   // Safely extract coordinates from any geometry type
   const getCoordDisplay = (geojson: GeoJSONFeature | null): string => {
@@ -201,7 +224,7 @@ export default function SurveyScreen() {
 
   const layerOptions = [
     { label: 'All Layers', value: 'all' },
-    ...Object.keys(DEMO_FEATURES).map((key) => ({
+    ...Object.keys(projectGeojsons).map((key) => ({
       label: key.toUpperCase(),
       value: key,
     })),
@@ -209,12 +232,12 @@ export default function SurveyScreen() {
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    if (demoMode) {
-      const features = Object.values(DEMO_FEATURES).flat();
-      setAllFeatures(features);
+    if (activeProject?.id) {
+      // Refetch the project's GeoJSON layers — this is what drives the list
+      await fetchProjectGeojsons(activeProject.id);
     }
     setRefreshing(false);
-  }, [demoMode]);
+  }, [activeProject?.id, fetchProjectGeojsons]);
 
   const handleSelectFeature = (feature: Feature) => {
     setSelectedFeature(feature);
@@ -381,9 +404,6 @@ export default function SurveyScreen() {
           {/* Header */}
           <View style={styles.headerRow}>
             <Text style={[styles.title, { color: colors.textPrimary }]}>Survey Editor</Text>
-            {demoMode && (
-              <Badge label="Demo" color={colors.warning} bgColor={colors.warning + '20'} size="sm" />
-            )}
           </View>
 
           {/* Search */}
@@ -569,7 +589,7 @@ export default function SurveyScreen() {
               style={[styles.moduleToggle, { backgroundColor: activeModule === 'trench' ? colors.primary + '20' : 'transparent' }]}
               onPress={() => setActiveModule(activeModule === 'trench' ? null : 'trench')}
             >
-              <ChevronRight size={16} stroke={colors.primary} style={{ transform: activeModule === 'trench' ? [{ rotate: '90deg' }] : [] }} />
+              <ChevronRight size={16} stroke={colors.primary} style={activeModule === 'trench' ? { transform: [{ rotate: '90deg' }] } : undefined} />
             </TouchableOpacity>
           }
         >
@@ -709,7 +729,7 @@ export default function SurveyScreen() {
               style={[styles.moduleToggle, { backgroundColor: activeModule === 'risk' ? colors.primary + '20' : 'transparent' }]}
               onPress={() => setActiveModule(activeModule === 'risk' ? null : 'risk')}
             >
-              <ChevronRight size={16} stroke={colors.primary} style={{ transform: activeModule === 'risk' ? [{ rotate: '90deg' }] : [] }} />
+              <ChevronRight size={16} stroke={colors.primary} style={activeModule === 'risk' ? { transform: [{ rotate: '90deg' }] } : undefined} />
             </TouchableOpacity>
           }
         >
@@ -805,7 +825,7 @@ export default function SurveyScreen() {
               style={[styles.moduleToggle, { backgroundColor: activeModule === 'hazard' ? colors.primary + '20' : 'transparent' }]}
               onPress={() => setActiveModule(activeModule === 'hazard' ? null : 'hazard')}
             >
-              <ChevronRight size={16} stroke={colors.primary} style={{ transform: activeModule === 'hazard' ? [{ rotate: '90deg' }] : [] }} />
+              <ChevronRight size={16} stroke={colors.primary} style={activeModule === 'hazard' ? { transform: [{ rotate: '90deg' }] } : undefined} />
             </TouchableOpacity>
           }
         >
@@ -865,7 +885,7 @@ export default function SurveyScreen() {
               style={[styles.moduleToggle, { backgroundColor: activeModule === 'evidence' ? colors.primary + '20' : 'transparent' }]}
               onPress={() => setActiveModule(activeModule === 'evidence' ? null : 'evidence')}
             >
-              <ChevronRight size={16} stroke={colors.primary} style={{ transform: activeModule === 'evidence' ? [{ rotate: '90deg' }] : [] }} />
+              <ChevronRight size={16} stroke={colors.primary} style={activeModule === 'evidence' ? { transform: [{ rotate: '90deg' }] } : undefined} />
             </TouchableOpacity>
           }
         >
@@ -873,15 +893,27 @@ export default function SurveyScreen() {
             <View style={styles.moduleContent}>
               {/* Evidence Type Quick Add */}
               <View style={styles.evidenceTypes}>
-                <TouchableOpacity style={[styles.evidenceBtn, { backgroundColor: colors.primary + '15', borderColor: colors.primary }]}>
+                <TouchableOpacity
+                  style={[styles.evidenceBtn, { backgroundColor: colors.primary + '15', borderColor: colors.primary }]}
+                  onPress={() => {
+                    if (!selectedFeature) return;
+                    router.push({ pathname: '/camera', params: { featureId: selectedFeature.id } });
+                  }}
+                >
                   <Camera size={20} stroke={colors.primary} />
                   <Text style={[styles.evidenceBtnText, { color: colors.primary }]}>Photo</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[styles.evidenceBtn, { backgroundColor: colors.warning + '15', borderColor: colors.warning }]}>
+                <TouchableOpacity
+                  style={[styles.evidenceBtn, { backgroundColor: colors.warning + '15', borderColor: colors.warning }]}
+                  onPress={() => setEvidenceDescription((prev) => (prev ? prev + '\n' : '') + 'Measurement: ')}
+                >
                   <Ruler size={20} stroke={colors.warning} />
                   <Text style={[styles.evidenceBtnText, { color: colors.warning }]}>Measure</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={[styles.evidenceBtn, { backgroundColor: colors.success + '15', borderColor: colors.success }]}>
+                <TouchableOpacity
+                  style={[styles.evidenceBtn, { backgroundColor: colors.success + '15', borderColor: colors.success }]}
+                  onPress={() => setEvidenceDescription((prev) => (prev ? prev + '\n' : '') + 'Note: ')}
+                >
                   <ClipboardList size={20} stroke={colors.success} />
                   <Text style={[styles.evidenceBtnText, { color: colors.success }]}>Note</Text>
                 </TouchableOpacity>

@@ -1,14 +1,13 @@
 // ── Line Selection Toolbar ──────────────────────────────────────────────────
 // Bottom toolbar that appears when a LINE feature is tapped on the map.
-// Move + Save buttons are wired. Remaining 7 buttons are disabled placeholders.
 //
-// Active actions:
-//   Move — toggles Move Mode (displays draggable vertex handles)
+// Actions:
+//   Reroute — toggles Reroute Mode (displays draggable vertex handles)
+//   Del Section — removes a section of the line between two selected vertices
+//   Delete — logical delete of the feature (survey layer stays intact)
+//   Draw Segment — extends the line from a selected vertex to a new point
+//   Undo — reverts the most recent edit
 //   Save — persists the temporary geometry to the survey-features store
-//
-// Placeholder actions (disabled — wiring comes in a future phase):
-//   Split · Draw Alternative · Delete Section · Change Type
-//   Delete Feature · Continue · Undo
 
 import React, { useEffect, useRef } from 'react';
 import {
@@ -35,9 +34,9 @@ interface LineSelectionToolbarProps {
   undoCount?: number;
   /** Called when the Undo button is tapped */
   onUndo?: () => void;
-  /** Whether Move Mode is currently active */
+  /** Whether Reroute Mode is currently active */
   moveMode?: boolean;
-  /** Called when user taps the Move button */
+  /** Called when user taps the Reroute button */
   onToggleMove?: () => void;
   /** Called when user taps the Save button */
   onSave?: () => void;
@@ -53,12 +52,14 @@ interface LineSelectionToolbarProps {
   onDeleteFeature?: () => void;
   /** Whether there are unsaved geometry changes in Move Mode */
   hasUnsavedChanges?: boolean;
-  /** Whether Continue Line mode is active */
+  /** Whether Draw Segment mode is active */
   continueMode?: boolean;
-  /** Called when user taps the Continue button */
+  /** Called when user taps the Draw Segment button */
   onContinue?: () => void;
   /** Current step in continue-line: 0=idle, 1=anchor set, 2=connected */
   continueLineStep?: number;
+  /** How many segments have been appended so far in Draw Segment mode */
+  continueLineSegments?: number;
 }
 
 // ── Action definitions ─────────────────────────────────────────────────────
@@ -69,20 +70,15 @@ interface ActionDef {
   icon: string;
   danger?: boolean;
   accent?: boolean;
-  /** Whether this button is enabled (not a placeholder) */
-  enabled?: boolean;
 }
 
 const ACTIONS: ActionDef[] = [
-  { id: 'move', label: 'Move', icon: '↔️', enabled: true },
-  { id: 'split', label: 'Split', icon: '✂️' },
-  { id: 'draw_alt', label: 'Draw Alt', icon: '📐' },
-  { id: 'del_section', label: 'Del Section', icon: '🪓', danger: true, enabled: true },
-  { id: 'change_type', label: 'Change Type', icon: '🔄' },
-  { id: 'del_feature', label: 'Delete', icon: '🗑️', danger: true, enabled: true },
-  { id: 'continue', label: 'Continue', icon: '▶️', accent: true, enabled: true },
+  { id: 'move', label: 'Reroute', icon: '↔️' },
+  { id: 'del_section', label: 'Del Section', icon: '🪓', danger: true },
+  { id: 'del_feature', label: 'Delete', icon: '🗑️', danger: true },
+  { id: 'continue', label: 'Draw Segment', icon: '▶️', accent: true },
   { id: 'undo', label: 'Undo', icon: '↩️' },
-  { id: 'save', label: 'Save', icon: '💾', accent: true, enabled: true },
+  { id: 'save', label: 'Save', icon: '💾', accent: true },
 ];
 
 // ── Component ───────────────────────────────────────────────────────────────
@@ -104,6 +100,7 @@ export default function LineSelectionToolbar({
   continueMode = false,
   onContinue,
   continueLineStep = 0,
+  continueLineSegments = 0,
 }: LineSelectionToolbarProps) {
   const colors = useThemeStore((s) => s.colors);
   const slideAnim = useRef(new Animated.Value(0)).current;
@@ -151,9 +148,9 @@ export default function LineSelectionToolbar({
             </Text>
             <Text style={[styles.headerSubtitle, { color: colors.textTertiary }]} numberOfLines={1}>
               {selectedFeature?.layerName ?? 'Line Layer'} · LineString
-              {moveMode && ' · Move Mode'}
+              {moveMode && ' · Reroute Mode'}
               {deleteSectionMode && ` · Del Section ${deleteSectionStep === 0 ? '' : deleteSectionStep === 1 ? '(select end)' : '(confirm)'}`}
-              {continueMode && ` · Continue ${continueLineStep === 1 ? '(select point)' : continueLineStep === 2 ? '(connected)' : ''}`}
+              {continueMode && ` · Draw Segment ${continueLineStep === 1 ? '(select point)' : continueLineStep === 2 ? continueLineSegments > 1 ? `(${continueLineSegments} segments)` : '(connected)' : ''}`}
               {moveMode && hasUnsavedChanges && ' · Unsaved'}
             </Text>
           </View>
@@ -184,7 +181,7 @@ export default function LineSelectionToolbar({
           const showBadge = isUndo && undoCount > 0;
 
           // ── Determine button state ──
-          const isEnabled = action.enabled === true;
+          const isEnabled = true;
           const isMoveActive = isMove && moveMode;
           const isSaveActive = isSave && hasUnsavedChanges;
           const isDeleteActive = isDeleteSection && deleteSectionMode;
@@ -197,21 +194,19 @@ export default function LineSelectionToolbar({
           let opacity = 0.45; // disabled placeholder look
           let iconColor = undefined;
 
-          if (isEnabled) {
-            opacity = 1;
-            textColor = colors.textSecondary;
-            if (isMoveActive || isDeleteActive || isContinueActive) {
-              bgColor = '#FF8C00' + '20';
-              borderColor = '#FF8C00';
-              textColor = '#FF8C00';
-            } else if (isSaveActive) {
-              bgColor = colors.primary + '20';
-              borderColor = colors.primary;
-              textColor = colors.primary;
-            } else if (isSave && !hasUnsavedChanges) {
-              // Save is enabled but nothing to save — dim it
-              opacity = 0.5;
-            }
+          opacity = 1;
+          textColor = colors.textSecondary;
+          if (isMoveActive || isDeleteActive || isContinueActive) {
+            bgColor = '#FF8C00' + '20';
+            borderColor = '#FF8C00';
+            textColor = '#FF8C00';
+          } else if (isSaveActive) {
+            bgColor = colors.primary + '20';
+            borderColor = colors.primary;
+            textColor = colors.primary;
+          } else if (isSave && !hasUnsavedChanges) {
+            // Save is enabled but nothing to save — dim it
+            opacity = 0.5;
           }
 
           return (
@@ -242,7 +237,7 @@ export default function LineSelectionToolbar({
                   style={[styles.actionLabel, { color: textColor }]}
                   numberOfLines={1}
                 >
-                  {isMove && moveMode ? 'Move: ON' : isDeleteSection && deleteSectionMode ? (deleteSectionStep === 2 ? 'Confirm' : 'Del: ON') : isContinue && continueMode ? 'Cont: ON' : action.label}
+                  {isMove && moveMode ? 'Reroute: ON' : isDeleteSection && deleteSectionMode ? (deleteSectionStep === 2 ? 'Confirm' : 'Del: ON') : isContinue && continueMode ? 'Drawing: ON' : action.label}
                 </Text>
               </TouchableOpacity>
 
@@ -255,35 +250,34 @@ export default function LineSelectionToolbar({
                 </View>
               )}
 
-              {isEnabled && isDeleteSection && (
+              {isDeleteSection && (
                 <Text style={[styles.soonLabel, { color: deleteSectionMode ? '#FF8C00' : colors.textTertiary }]}>
                   {deleteSectionMode ? (deleteSectionStep === 1 ? 'Tap end' : deleteSectionStep === 2 ? 'Confirm' : 'Ready') : 'Tap to start'}
                 </Text>
               )}
-              {isEnabled && isContinue && (
+              {isContinue && (
                 <Text style={[styles.soonLabel, { color: continueMode ? '#FF8C00' : colors.textTertiary }]}>
-                  {continueMode ? (continueLineStep === 0 ? 'Tap vertex' : continueLineStep === 1 ? 'Tap point' : 'Connected') : 'Tap to start'}
+                  {continueMode ? (continueLineStep === 0 ? 'Tap vertex' : continueLineStep === 1 ? 'Tap point' : 'Tap to extend') : 'Tap to start'}
                 </Text>
               )}
-              {isEnabled && isDeleteFeature && (
+              {isDeleteFeature && (
                 <Text style={[styles.soonLabel, { color: colors.textTertiary }]}>
                   Logical delete
                 </Text>
               )}
-              {!isEnabled && (
-                <Text style={[styles.soonLabel, { color: colors.textTertiary }]}>
-                  Soon
-                </Text>
-              )}
-              {/* Status label for enabled buttons */}
-              {isEnabled && isMove && (
+              {isMove && (
                 <Text style={[styles.soonLabel, { color: moveMode ? '#FF8C00' : colors.textTertiary }]}>
                   {moveMode ? 'Active' : 'Tap to start'}
                 </Text>
               )}
-              {isEnabled && isSave && (
+              {isSave && (
                 <Text style={[styles.soonLabel, { color: hasUnsavedChanges ? colors.primary : colors.textTertiary }]}>
                   {hasUnsavedChanges ? 'Unsaved' : 'No changes'}
+                </Text>
+              )}
+              {isUndo && (
+                <Text style={[styles.soonLabel, { color: undoCount > 0 ? colors.primary : colors.textTertiary }]}>
+                  {undoCount > 0 ? `${undoCount} to undo` : 'Nothing to undo'}
                 </Text>
               )}
             </View>
@@ -294,11 +288,15 @@ export default function LineSelectionToolbar({
       {/* ── Hint text ──────────────────────────────────────────────────── */}
       <Text style={[styles.hintText, { color: colors.textTertiary }]}>
         {moveMode
-          ? 'Drag vertex handles to adjust the line · Tap Save to persist · Tap Move again to cancel'
+          ? 'Drag vertex handles to adjust the line · Tap Save to persist · Tap Reroute again to cancel'
           : deleteSectionMode
             ? deleteSectionStep === 0 ? 'Tap the line near a vertex to select start point'
             : deleteSectionStep === 1 ? 'Tap the line near another vertex to select end point'
             : 'Tap Confirm to remove the section, or ✕ to cancel'
+          : continueMode
+            ? continueLineStep === 0 ? 'Tap the line to choose the start vertex'
+            : continueLineStep === 1 ? 'Tap a point to draw the first segment'
+            : 'Keep tapping to extend the path (A→B→C→D…) · Save to finish'
           : 'Tap empty area or ✕ to deselect'}
       </Text>
     </Animated.View>

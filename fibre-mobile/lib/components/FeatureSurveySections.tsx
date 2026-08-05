@@ -20,6 +20,7 @@ import {
 } from 'react-native';
 import { useThemeStore } from '../stores/theme';
 import { useSurveyStore } from '../stores/survey';
+import { router } from 'expo-router';
 import {
   Camera, Ruler, ClipboardList, CheckCircle, Flag,
   ChevronRight, AlertTriangle,
@@ -263,7 +264,7 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
               style={[styles.moduleToggle, { backgroundColor: activeModule === 'trench' ? colors.primary + '20' : 'transparent' }]}
               onPress={() => toggleModule('trench')}
             >
-              <ChevronRight size={16} stroke={colors.primary} style={{ transform: activeModule === 'trench' ? [{ rotate: '90deg' }] : [] }} />
+              <ChevronRight size={16} stroke={colors.primary} style={activeModule === 'trench' ? { transform: [{ rotate: '90deg' }] } : undefined} />
             </TouchableOpacity>
           </View>
 
@@ -395,7 +396,7 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
             style={[styles.moduleToggle, { backgroundColor: activeModule === 'risk' ? colors.primary + '20' : 'transparent' }]}
             onPress={() => toggleModule('risk')}
           >
-            <ChevronRight size={16} stroke={colors.primary} style={{ transform: activeModule === 'risk' ? [{ rotate: '90deg' }] : [] }} />
+            <ChevronRight size={16} stroke={colors.primary} style={activeModule === 'risk' ? { transform: [{ rotate: '90deg' }] } : undefined} />
           </TouchableOpacity>
         </View>
 
@@ -488,7 +489,7 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
             style={[styles.moduleToggle, { backgroundColor: activeModule === 'hazard' ? colors.primary + '20' : 'transparent' }]}
             onPress={() => toggleModule('hazard')}
           >
-            <ChevronRight size={16} stroke={colors.primary} style={{ transform: activeModule === 'hazard' ? [{ rotate: '90deg' }] : [] }} />
+            <ChevronRight size={16} stroke={colors.primary} style={activeModule === 'hazard' ? { transform: [{ rotate: '90deg' }] } : undefined} />
           </TouchableOpacity>
         </View>
 
@@ -549,22 +550,31 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
             style={[styles.moduleToggle, { backgroundColor: activeModule === 'evidence' ? colors.primary + '20' : 'transparent' }]}
             onPress={() => toggleModule('evidence')}
           >
-            <ChevronRight size={16} stroke={colors.primary} style={{ transform: activeModule === 'evidence' ? [{ rotate: '90deg' }] : [] }} />
+            <ChevronRight size={16} stroke={colors.primary} style={activeModule === 'evidence' ? { transform: [{ rotate: '90deg' }] } : undefined} />
           </TouchableOpacity>
         </View>
 
         {activeModule === 'evidence' && (
           <View style={styles.moduleContent}>
             <View style={styles.evidenceTypes}>
-              <TouchableOpacity style={[styles.evidenceBtn, { backgroundColor: colors.primary + '15', borderColor: colors.primary }]}>
+              <TouchableOpacity
+                style={[styles.evidenceBtn, { backgroundColor: colors.primary + '15', borderColor: colors.primary }]}
+                onPress={() => router.push({ pathname: '/camera', params: { featureId } })}
+              >
                 <Camera size={20} stroke={colors.primary} />
                 <Text style={[styles.evidenceBtnText, { color: colors.primary }]}>Photo</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={[styles.evidenceBtn, { backgroundColor: colors.warning + '15', borderColor: colors.warning }]}>
+              <TouchableOpacity
+                style={[styles.evidenceBtn, { backgroundColor: colors.warning + '15', borderColor: colors.warning }]}
+                onPress={() => setEvidenceDescription((prev) => (prev ? prev + '\n' : '') + 'Measurement: ')}
+              >
                 <Ruler size={20} stroke={colors.warning} />
                 <Text style={[styles.evidenceBtnText, { color: colors.warning }]}>Measure</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={[styles.evidenceBtn, { backgroundColor: colors.success + '15', borderColor: colors.success }]}>
+              <TouchableOpacity
+                style={[styles.evidenceBtn, { backgroundColor: colors.success + '15', borderColor: colors.success }]}
+                onPress={() => setEvidenceDescription((prev) => (prev ? prev + '\n' : '') + 'Note: ')}
+              >
                 <ClipboardList size={20} stroke={colors.success} />
                 <Text style={[styles.evidenceBtnText, { color: colors.success }]}>Note</Text>
               </TouchableOpacity>
@@ -612,7 +622,7 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
             style={[styles.moduleToggle, { backgroundColor: activeModule === 'status' ? colors.primary + '20' : 'transparent' }]}
             onPress={() => toggleModule('status')}
           >
-            <ChevronRight size={16} stroke={colors.primary} style={{ transform: activeModule === 'status' ? [{ rotate: '90deg' }] : [] }} />
+            <ChevronRight size={16} stroke={colors.primary} style={activeModule === 'status' ? { transform: [{ rotate: '90deg' }] } : undefined} />
           </TouchableOpacity>
         </View>
 

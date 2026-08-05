@@ -12,7 +12,6 @@ import { router } from 'expo-router';
 import { useThemeStore } from '../../lib/stores/theme';
 import { useAuthStore } from '../../lib/stores/auth';
 import { useProjectStore } from '../../lib/stores/project';
-import { useMapStore } from '../../lib/stores/map';
 import { useOfflineStore } from '../../lib/stores/offline';
 import { Card, StatCard } from '../../components/ui/Card';
 import { StatusBadge, ProgressBar } from '../../components/ui/StatusBadge';
@@ -35,20 +34,16 @@ import type { AssignmentJob } from '../../lib/utils/types';
 
 export default function HomeScreen() {
   const colors = useThemeStore((s) => s.colors);
-  const { user, demoMode } = useAuthStore();
+  const { user } = useAuthStore();
   const { projects, assignments, stats, fetchAssignments, fetchProjects } = useProjectStore();
-  const { loadDemoLayers } = useMapStore();
   const [refreshing, setRefreshing] = useState(false);
 
   const loadData = useCallback(async () => {
     if (user?.id) {
       await fetchAssignments(user.id);
       await fetchProjects();
-      if (demoMode) {
-        loadDemoLayers();
-      }
     }
-  }, [user?.id, demoMode]);
+  }, [user?.id]);
 
   useEffect(() => {
     loadData();
@@ -89,11 +84,6 @@ export default function HomeScreen() {
             <Text style={[styles.name, { color: colors.textPrimary }]}>
               {user?.full_name ?? 'Engineer'}
             </Text>
-            {demoMode && (
-              <View style={[styles.demoBadge, { backgroundColor: colors.secondary }]}>
-                <Text style={styles.demoBadgeText}>DEMO</Text>
-              </View>
-            )}
           </View>
           <View style={styles.headerRight}>
             <TouchableOpacity
@@ -378,14 +368,6 @@ const styles = StyleSheet.create({
   headerRight: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   greeting: { fontSize: 14 },
   name: { fontSize: 22, fontWeight: '700' },
-  demoBadge: {
-    marginTop: 4,
-    alignSelf: 'flex-start',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  demoBadgeText: { fontSize: 10, fontWeight: '700', color: '#FFFFFF', letterSpacing: 0.5 },
   iconBtn: {
     width: 40,
     height: 40,

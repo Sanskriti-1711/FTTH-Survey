@@ -17,7 +17,7 @@ import {
 } from 'react-native';
 import { useThemeStore } from '../stores/theme';
 import { Spacing, Radius } from '../theme/colors';
-import { getLayerSchema } from '../stores/demo-data';
+import { getLayerSchema } from '../stores/layer-schemas';
 import type { FieldSchemaField } from '../utils/types';
 import X from 'lucide-react-native/icons/x';
 import Check from 'lucide-react-native/icons/check';

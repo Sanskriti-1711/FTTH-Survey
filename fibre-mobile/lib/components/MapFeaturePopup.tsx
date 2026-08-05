@@ -17,7 +17,7 @@ import {
 } from 'react-native';
 import { useThemeStore } from '../stores/theme';
 import { Spacing, Radius } from '../theme/colors';
-import { getLayerSchema } from '../stores/demo-data';
+import { getLayerSchema } from '../stores/layer-schemas';
 import MapPin from 'lucide-react-native/icons/map-pin';
 import X from 'lucide-react-native/icons/x';
 import ChevronRight from 'lucide-react-native/icons/chevron-right';
