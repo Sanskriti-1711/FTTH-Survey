@@ -10,6 +10,7 @@ import { router } from 'expo-router';
 import { saveTokens } from '../lib/api/client';
 import { getProject } from '../lib/api/projects';
 import { useProjectStore } from '../lib/stores/project';
+import { useSurveyFeaturesStore } from '../lib/stores/survey-features';
 import { useAuthStore } from '../lib/stores/auth';
 
 // ── Web Deep-Link Screen ─────────────────────────────────────────────────
@@ -37,6 +38,7 @@ export default function DeepLinkScreen() {
         const params = new URLSearchParams(window.location.search);
         const token = params.get('token');
         const projectId = params.get('project');
+        const featureId = params.get('feature');
 
         if (!token || !projectId) {
           router.replace('/(auth)/login');
@@ -73,6 +75,13 @@ export default function DeepLinkScreen() {
         const project = await getProject(projectId);
         if (cancelled) return;
         useProjectStore.getState().setActiveProject(project);
+
+        // 3b) Optional ?feature= focus: open the map in Overlay mode and
+        //     highlight the single survey feature the planner clicked on.
+        if (featureId) {
+          useSurveyFeaturesStore.setState({ displayMode: 'overlay' });
+          useSurveyFeaturesStore.getState().setFocusFeature(featureId);
+        }
 
         // 4) Mark the auth session as restored so the Stack settles.
         useAuthStore.setState({ isRestoring: false });

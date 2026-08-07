@@ -29,6 +29,11 @@ interface SurveyFeaturesState {
   /** Display mode: 'hld' = blue only, 'survey' = orange only, 'overlay' = both */
   displayMode: LayerDisplayMode;
 
+  /** Survey feature to focus/highlight when the map opens (deep-link target). */
+  focusFeatureId: string | null;
+  /** Request the map to fly to + highlight a specific survey feature. */
+  setFocusFeature: (featureId: string | null) => void;
+
   /** Load all survey features for a project from the backend */
   fetchSurveyFeatures: (projectId: string) => Promise<void>;
 
@@ -74,6 +79,7 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
   isLoading: false,
   error: null,
   displayMode: 'hld', // Default: show HLD only (blue)
+  focusFeatureId: null,
 
   fetchSurveyFeatures: async (projectId: string) => {
     if (projectId.startsWith('imported-')) {
@@ -251,6 +257,8 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
   },
 
   setDisplayMode: (mode) => set({ displayMode: mode }),
+
+  setFocusFeature: (featureId) => set({ focusFeatureId: featureId }),
 
   clearSurveyFeatures: () => set({ surveyFeatures: {}, isLoaded: false, error: null }),
 

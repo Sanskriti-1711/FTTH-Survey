@@ -230,8 +230,11 @@ export default function MapScreen() {
   const { recordPointMove } = useSurveyStore();
   const {
     surveyFeatures,
+    isLoaded: surveyFeaturesLoaded,
     displayMode,
     setDisplayMode,
+    focusFeatureId,
+    setFocusFeature,
     fetchSurveyFeatures,
     clearSurveyFeatures,
     upsertSurveyFeature,
@@ -649,6 +652,42 @@ export default function MapScreen() {
     }
   }, [storeActiveProject?.id, fetchSurveyFeatures, clearSurveyFeatures]);
 
+  // ── Deep-link focus: fly to + highlight one survey feature ────────────
+  // When the planner opens a survey change via the Job Approval page, the
+  // deeplink sets displayMode='overlay' + focusFeatureId. Once the survey
+  // features are loaded, select the target (the map auto-flies to it) and
+  // clear the focus so it only happens once.
+  useEffect(() => {
+    if (!focusFeatureId) return;
+    if (!surveyFeaturesLoaded) return;
+
+    // Find the target feature across all layers
+    let found: { sf: (typeof surveyFeatures)[string][number]; layerId: string } | null = null;
+    for (const [layerId, list] of Object.entries(surveyFeatures)) {
+      const sf = list.find((x) => String(x.id) === String(focusFeatureId));
+      if (sf) {
+        found = { sf, layerId };
+        break;
+      }
+    }
+    if (!found) return;
+
+    // Make sure survey layers are visible (overlay mode shows both)
+    setDisplayMode('overlay');
+
+    const layerName = String(found.layerId).replace('imp-', '').toUpperCase();
+    setSelectedMapFeatureId(String(found.sf.id));
+    selectFeature(String(found.sf.id), {
+      id: String(found.sf.id),
+      name: `Survey: ${layerName} #${String(found.sf.id).slice(-4)}`,
+      layerName: `Survey: ${layerName}`,
+      status: found.sf.survey_status === 'removed' ? 'removed' : 'modified',
+      layerId: found.layerId,
+    });
+    setPopupScreenCoords(null);
+    setFocusFeature(null);
+  }, [focusFeatureId, surveyFeaturesLoaded, surveyFeatures, setDisplayMode, setFocusFeature, selectFeature]);
+
   // ── Draggable layer IDs — HLD point layers + survey point layers ──
   // HLD layers: from activeGeojsonRef (blue points)
   // Survey layers: from surveyFeatures store (orange points) — prefixed with 'survey-'
@@ -730,6 +769,20 @@ export default function MapScreen() {
 
   const activeProject = storeActiveProject ?? projects[0] ?? null;
   const mapProjectName = activeProject?.name ?? 'Survey Map';
+
+  // ── Survey progress summary (shown under the title in the header) ──────
+  const surveyChangeCount = useMemo(() => {
+    let total = 0;
+    for (const list of Object.values(surveyFeatures)) total += list.length;
+    return total;
+  }, [surveyFeatures]);
+
+  const surveySummaryLabel =
+    surveyChangeCount > 0
+      ? `${surveyChangeCount} survey change${surveyChangeCount === 1 ? '' : 's'} · ${
+          displayMode === 'survey' ? 'Survey view' : displayMode === 'overlay' ? 'Overlay view' : 'HLD view'
+        }`
+      : '';
 
   // ── Build feature list for list view (from the active project's layers) ──
   const mergedFeatureList = useMemo(() => {
@@ -2631,9 +2684,16 @@ export default function MapScreen() {
       <View style={styles.header}>
         <View style={styles.headerLeft}>
           <MapIcon size={20} stroke={colors.primary} />
-          <Text style={[styles.title, { color: colors.textPrimary }]} numberOfLines={1}>
-            {mapProjectName}
-          </Text>
+          <View style={styles.headerTitleWrap}>
+            <Text style={[styles.title, { color: colors.textPrimary }]} numberOfLines={1}>
+              {mapProjectName}
+            </Text>
+            {surveySummaryLabel ? (
+              <Text style={[styles.headerSubtitle, { color: colors.textSecondary }]} numberOfLines={1}>
+                {surveySummaryLabel}
+              </Text>
+            ) : null}
+          </View>
         </View>
         <View style={styles.headerRight}>
           <TouchableOpacity
@@ -3221,6 +3281,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   title: { fontSize: 17, fontWeight: '600' },
+  headerTitleWrap: { flex: 1, minWidth: 0 },
+  headerSubtitle: { fontSize: 11, marginTop: 1 },
 
   // ── Map View ───────────────────────────────────────────────────────────
   mapContainer: { flex: 1, position: 'relative' },
