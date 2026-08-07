@@ -47,6 +47,7 @@ export default function RootLayout() {
       <Stack screenOptions={{ headerShown: false, animation: 'slide_from_right' }}>
         <Stack.Screen name="(auth)" />
         <Stack.Screen name="(tabs)" />
+        <Stack.Screen name="deeplink" />
         <Stack.Screen name="feature/[featureId]" options={{ animation: 'slide_from_bottom' }} />
         <Stack.Screen name="project/[projectId]" />
         <Stack.Screen name="project/import" options={{ animation: 'slide_from_bottom' }} />
