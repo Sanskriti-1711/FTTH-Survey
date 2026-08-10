@@ -20,7 +20,7 @@ export interface Project {
   name: string;
   description: string;
   region: string;
-  status: 'draft' | 'in_progress' | 'active' | 'completed' | 'archived';
+  status: 'draft' | 'in_progress' | 'assigned' | 'active' | 'completed' | 'archived';
   standard_completion: number;
   created_at: string;
   updated_at: string;
@@ -187,7 +187,7 @@ export interface Layer {
 
 export interface AssignmentJob {
   id: string;
-  project: { id: string; name: string };
+  project: { id: string; name: string; status?: string };
   scope: 'project' | 'layer' | 'feature';
   scope_display: string;
   assignee: { id: string; email: string; full_name: string };

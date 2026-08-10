@@ -32,7 +32,7 @@ import type { AssignmentJob } from '../../lib/utils/types';
 export default function HomeScreen() {
   const colors = useThemeStore((s) => s.colors);
   const { user } = useAuthStore();
-  const { projects, assignments, stats, fetchAssignments, fetchProjects } = useProjectStore();
+  const { projects, assignments, stats, fetchAssignments, fetchProjects, acceptSurveyCopy } = useProjectStore();
   const [refreshing, setRefreshing] = useState(false);
 
   const loadData = useCallback(async () => {
@@ -222,6 +222,9 @@ export default function HomeScreen() {
             <AssignmentCard
               key={job.id}
               job={job}
+              onAccept={() => {
+                acceptSurveyCopy(job.project.id).then(() => loadData());
+              }}
               onPress={() => {
                 if (job.scope === 'feature' && job.feature) {
                   router.push(`/feature/${job.feature.id}?projectId=${job.project.id}`);
@@ -253,6 +256,7 @@ function ProjectCard({
   const statusColor = {
     draft: colors.textTertiary,
     in_progress: colors.warning,
+    assigned: colors.warning,
     active: colors.success,
     completed: colors.primary,
     archived: colors.textTertiary,
@@ -292,9 +296,11 @@ function ProjectCard({
 function AssignmentCard({
   job,
   onPress,
+  onAccept,
 }: {
   job: AssignmentJob;
   onPress: () => void;
+  onAccept?: () => void;
 }) {
   const colors = useThemeStore((s) => s.colors);
 
@@ -302,6 +308,11 @@ function AssignmentCard({
     job.feature_count > 0
       ? (job.status === 'approved' ? 1 : job.status === 'under_review' ? 0.75 : job.status === 'assigned' ? 0.25 : 0)
       : 0;
+
+  // Survey copies arrive with project.status === 'assigned' until the
+  // engineer accepts them. Show an Accept action on project-scope cards.
+  const needsAccept =
+    !!onAccept && job.scope === 'project' && job.project.status === 'assigned';
 
   return (
     <TouchableOpacity
@@ -322,6 +333,27 @@ function AssignmentCard({
       </View>
 
       <ProgressBar progress={progress} showLabel />
+
+      {needsAccept && (
+        <TouchableOpacity
+          onPress={(e) => {
+            e.stopPropagation();
+            onAccept();
+          }}
+          style={{
+            marginTop: 10,
+            paddingVertical: 9,
+            borderRadius: 8,
+            alignItems: 'center',
+            backgroundColor: colors.primary,
+          }}
+          activeOpacity={0.8}
+        >
+          <Text style={{ color: '#FFFFFF', fontSize: 13, fontWeight: '700' }}>
+            Accept Survey Project
+          </Text>
+        </TouchableOpacity>
+      )}
 
       <View style={styles.jobFooter}>
         <Text style={[styles.jobDate, { color: colors.textTertiary }]}>

@@ -18,6 +18,19 @@ export async function getProject(projectId: string): Promise<Project> {
   return apiFetch<Project>(`/api/projects/${projectId}/`);
 }
 
+// Engineer accepts their assigned Survey copy → status becomes active.
+export async function acceptProject(projectId: string): Promise<{
+  project_id: string;
+  name: string;
+  status: string;
+  source_ftth_project_id: string | null;
+}> {
+  return apiFetch(`/api/projects/${projectId}/accept/`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
 export async function getLatestProjects(): Promise<Project[]> {
   return apiFetch<Project[]>('/api/projects/latest/');
 }

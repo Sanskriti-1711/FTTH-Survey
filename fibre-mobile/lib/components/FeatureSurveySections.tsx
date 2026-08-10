@@ -9,7 +9,7 @@
 //
 // Used by: feature/[featureId].tsx detail screen
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -82,6 +82,19 @@ const SURVEY_STATUS_FLOW = [
   'not_started', 'visited', 'verified', 'modified',
   'needs_review', 'rejected', 'approved', 'completed',
 ] as const;
+
+/** Format an ISO timestamp as a short date for the "Saved …" badge */
+function formatSavedDate(iso: string): string {
+  try {
+    return new Date(iso).toLocaleDateString(undefined, {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+    });
+  } catch {
+    return iso.slice(0, 10);
+  }
+}
 
 // ── Props ─────────────────────────────────────────────────────────────────
 
@@ -158,6 +171,138 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
   const [surveyStatus, setSurveyStatus] = useState<string>('not_started');
   const [fieldNotes, setFieldNotes] = useState('');
 
+  // ── Previously-saved data (prefill) ───────────────────────────────────
+  // Each module's form is backed by a dedicated backend record (trench,
+  // risk, hazard, evidence, status). On mount we fetch the feature's
+  // existing records and pre-fill the form states so engineers continue
+  // their survey instead of re-entering everything from scratch. The
+  // "Saved <date>" chip next to a module title indicates data was loaded.
+  const [savedDates, setSavedDates] = useState<{
+    trench?: string;
+    risk?: string;
+    hazard?: string;
+    evidence?: string;
+    status?: string;
+  }>({});
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      if (!featureId) return;
+      try {
+        // ── Reset module states first so a reused component instance never
+        //    shows the previous feature's values (e.g. featureId changed).
+        setSelectedTrenchType(null);
+        setTrenchAttrs({ depth: '', width: '', surface_type: '', road_crossing: false, footpath_crossing: false, rail_crossing: false, river_crossing: false, private_property: false, traffic_sensitive: false, permit_required: false, notes: '' });
+        setRiskCategory('');
+        setRiskSeverity('medium');
+        setRiskProbability('possible');
+        setRiskMitigation('');
+        setRiskNotes('');
+        setSelectedHazard('');
+        setHazardMitigation('');
+        setHazardNotes('');
+        setEvidenceDescription('');
+        setEvidenceWeather('');
+        setSurveyStatus('not_started');
+        setFieldNotes('');
+        setSavedDates({});
+
+        // Fire all fetchers in parallel; each is independent.
+        await Promise.allSettled([
+          store.fetchTrenchSurveys(featureId),
+          store.fetchRisks(featureId),
+          store.fetchHazards(),
+          store.fetchEvidence(),
+          store.fetchStatuses(featureId),
+          store.fetchChanges(featureId),
+        ]);
+        if (cancelled) return;
+
+        const st = useSurveyStore.getState();
+        const saved: NonNullable<typeof savedDates> = {};
+
+        // ── Trench ──
+        const trench = st.trenchSurveys
+          .filter((t) => t.feature === featureId)
+          .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+        if (trench) {
+          const tt = trench.trench_type as TrenchType;
+          if (TRENCH_TYPES[tt]) setSelectedTrenchType(tt);
+          setTrenchAttrs({
+            depth: trench.depth_mm != null ? String(trench.depth_mm) : '',
+            width: trench.width_mm != null ? String(trench.width_mm) : '',
+            surface_type: trench.surface_type ?? '',
+            road_crossing: trench.road_crossing,
+            footpath_crossing: trench.footpath_crossing,
+            rail_crossing: trench.rail_crossing,
+            river_crossing: trench.river_crossing,
+            private_property: trench.private_property,
+            traffic_sensitive: trench.traffic_sensitive,
+            permit_required: trench.permit_required,
+            notes: trench.notes ?? '',
+          });
+          saved.trench = formatSavedDate(trench.created_at);
+        }
+
+        // ── Risk ──
+        const risk = st.riskAssessments
+          .filter((r) => r.feature === featureId)
+          .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+        if (risk) {
+          setRiskCategory(risk.category ?? '');
+          setRiskSeverity(risk.severity ?? 'medium');
+          setRiskProbability(risk.probability ?? 'possible');
+          setRiskMitigation(risk.mitigation ?? '');
+          setRiskNotes(risk.notes ?? '');
+          saved.risk = formatSavedDate(risk.created_at);
+        }
+
+        // ── Hazard ──
+        const hazard = st.hazards
+          .filter((h) => h.feature === featureId)
+          .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+        if (hazard) {
+          setSelectedHazard(hazard.hazard_type ?? '');
+          setHazardMitigation(hazard.mitigation_template ?? '');
+          setHazardNotes(hazard.notes ?? '');
+          saved.hazard = formatSavedDate(hazard.created_at);
+        }
+
+        // ── Evidence ──
+        const evidence = st.evidence
+          .filter((e) => e.feature === featureId)
+          .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+        if (evidence) {
+          setEvidenceDescription(evidence.description ?? '');
+          setEvidenceWeather(evidence.weather ?? '');
+          saved.evidence = formatSavedDate(evidence.created_at);
+        }
+
+        // ── Status ──
+        const status = st.statuses
+          .filter((s) => s.feature === featureId)
+          .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+        if (status) {
+          setSurveyStatus(status.status ?? 'not_started');
+          setFieldNotes(status.notes ?? '');
+          saved.status = formatSavedDate(status.created_at);
+        }
+
+        setSavedDates(saved);
+        console.log('[SurveySections] Pre-filled survey data for feature', featureId.slice(-8));
+      } catch (err) {
+        console.warn('[SurveySections] Failed to pre-fill survey data:', err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [featureId]);
+
   // ── Handlers ─────────────────────────────────────────────────────────
 
   const handleSaveTrench = async () => {
@@ -180,6 +325,7 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
         notes: trenchAttrs.notes,
       });
       showToast('Trench classification saved', 'success');
+      setSavedDates((p) => ({ ...p, trench: formatSavedDate(new Date().toISOString()) }));
       setActiveModule(null);
     } catch { showToast('Failed to save trench', 'error'); }
   };
@@ -197,6 +343,7 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
         status: 'open',
       });
       showToast('Risk assessment saved', 'success');
+      setSavedDates((p) => ({ ...p, risk: formatSavedDate(new Date().toISOString()) }));
       setActiveModule(null);
     } catch { showToast('Failed to save risk', 'error'); }
   };
@@ -212,6 +359,7 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
         is_active: true,
       });
       showToast('Hazard recorded', 'success');
+      setSavedDates((p) => ({ ...p, hazard: formatSavedDate(new Date().toISOString()) }));
       setActiveModule(null);
     } catch { showToast('Failed to save hazard', 'error'); }
   };
@@ -226,6 +374,7 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
         captured_at: new Date().toISOString(),
       });
       showToast('Field evidence saved', 'success');
+      setSavedDates((p) => ({ ...p, evidence: formatSavedDate(new Date().toISOString()) }));
       setEvidenceDescription('');
       setEvidenceWeather('');
       setActiveModule(null);
@@ -236,6 +385,7 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
     try {
       await store.updateStatus(featureId, surveyStatus, fieldNotes);
       showToast('Status updated to ' + surveyStatus.replace(/_/g, ' '), 'success');
+      setSavedDates((p) => ({ ...p, status: formatSavedDate(new Date().toISOString()) }));
     } catch { showToast('Failed to update status', 'error'); }
   };
 
@@ -244,6 +394,17 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
   const toggleModule = (name: string) => {
     setActiveModule(activeModule === name ? null : name);
   };
+
+  /** Small green chip: "Saved {date}" — shown when an existing backend record was pre-filled */
+  const renderSavedChip = (date?: string) =>
+    date ? (
+      <View style={[styles.savedChip, { backgroundColor: colors.success + '18' }]}>
+        <CheckCircle size={10} stroke={colors.success} />
+        <Text style={[styles.savedChipText, { color: colors.success }]} numberOfLines={1}>
+          Saved {date}
+        </Text>
+      </View>
+    ) : null;
 
   // ── Render ──────────────────────────────────────────────────────────────
 
@@ -257,9 +418,10 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
               <Text style={{ fontSize: 20, marginRight: 6 }}>🏗️</Text>
               <View>
                 <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>Trench Classification</Text>
-                <Text style={[styles.sectionSubtitle, { color: colors.textTertiary }]}>Select trench type & configure attributes</Text>
-              </View>
+              <Text style={[styles.sectionSubtitle, { color: colors.textTertiary }]}>Select trench type & configure attributes</Text>
             </View>
+            {renderSavedChip(savedDates.trench)}
+          </View>
             <TouchableOpacity
               style={[styles.moduleToggle, { backgroundColor: activeModule === 'trench' ? colors.primary + '20' : 'transparent' }]}
               onPress={() => toggleModule('trench')}
@@ -391,6 +553,7 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
               <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>Risk Assessment</Text>
               <Text style={[styles.sectionSubtitle, { color: colors.textTertiary }]}>Evaluate risks for this feature</Text>
             </View>
+            {renderSavedChip(savedDates.risk)}
           </View>
           <TouchableOpacity
             style={[styles.moduleToggle, { backgroundColor: activeModule === 'risk' ? colors.primary + '20' : 'transparent' }]}
@@ -484,6 +647,7 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
               <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>Hazards</Text>
               <Text style={[styles.sectionSubtitle, { color: colors.textTertiary }]}>Identify site hazards & record mitigations</Text>
             </View>
+            {renderSavedChip(savedDates.hazard)}
           </View>
           <TouchableOpacity
             style={[styles.moduleToggle, { backgroundColor: activeModule === 'hazard' ? colors.primary + '20' : 'transparent' }]}
@@ -545,6 +709,7 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
               <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>Field Evidence</Text>
               <Text style={[styles.sectionSubtitle, { color: colors.textTertiary }]}>Record observations, photos, and measurements</Text>
             </View>
+            {renderSavedChip(savedDates.evidence)}
           </View>
           <TouchableOpacity
             style={[styles.moduleToggle, { backgroundColor: activeModule === 'evidence' ? colors.primary + '20' : 'transparent' }]}
@@ -617,6 +782,7 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
               <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>Survey Status</Text>
               <Text style={[styles.sectionSubtitle, { color: colors.textTertiary }]}>Update feature workflow status</Text>
             </View>
+            {renderSavedChip(savedDates.status)}
           </View>
           <TouchableOpacity
             style={[styles.moduleToggle, { backgroundColor: activeModule === 'status' ? colors.primary + '20' : 'transparent' }]}
@@ -697,7 +863,7 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
       </View>
 
       {/* Change History */}
-      {store.changes.length > 0 && (
+      {store.changes.some((c) => c.feature === featureId) && (
         <View style={[styles.sectionCard, { backgroundColor: colors.surface }]}>
           <View style={styles.sectionHeader}>
             <View style={styles.sectionHeaderLeft}>
@@ -705,7 +871,7 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
               <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>Recent Changes</Text>
             </View>
           </View>
-          {store.changes.slice(0, 5).map((change) => (
+          {store.changes.filter((c) => c.feature === featureId).slice(0, 5).map((change) => (
             <View key={change.id} style={styles.changeRow}>
               <View style={styles.changeLeft}>
                 <Text style={[styles.changeField, { color: colors.textPrimary }]}>{change.field_name}</Text>
@@ -747,6 +913,19 @@ const styles = StyleSheet.create({
   sectionTitle: { fontSize: 16, fontWeight: '700' },
   sectionSubtitle: { fontSize: 11, marginTop: 1 },
   moduleToggle: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+
+  // ── "Saved …" chip ───────────────────────────────────────────────────
+  savedChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    marginLeft: 'auto',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: Radius.full,
+    marginRight: 6,
+  },
+  savedChipText: { fontSize: 9, fontWeight: '600' },
   moduleContent: { marginTop: Spacing.md, paddingTop: Spacing.md, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#E5E7EB' },
 
   trenchGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.sm },

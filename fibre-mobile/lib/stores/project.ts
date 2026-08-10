@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { Project, AssignmentJob, Feature, GeoJSONFeature, Layer } from '../utils/types';
 import * as projectsApi from '../api/projects';
 import * as assignmentsApi from '../api/assignments';
+import { useAuthStore } from './auth';
 
 // ── Project Store ─────────────────────────────────────────────────────────
 
@@ -34,6 +35,7 @@ interface ProjectState {
   fetchProjectGeojsons: (projectId: string) => Promise<void>;
   fetchProjects: () => Promise<void>;
   fetchAssignments: (engineerId: string) => Promise<void>;
+  acceptSurveyCopy: (projectId: string) => Promise<void>;
   setActiveProject: (project: Project | null) => void;
   importSurveyPackage: (projectId: string, file: { uri: string; name: string; type: string }) => Promise<void>;
   setProjectGeojsons: (geojsons: Record<string, GeoJSONFeature[]>) => void;
@@ -151,6 +153,29 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to fetch assignments';
       set({ error: message, isLoading: false });
+    }
+  },
+
+  acceptSurveyCopy: async (projectId: string) => {
+    try {
+      const result = await projectsApi.acceptProject(projectId);
+      // Refresh the project list + assignments so the status badge updates.
+      set((st) => ({
+        projects: st.projects.map((p) =>
+          p.id === projectId
+            ? { ...p, status: result.status as Project['status'] }
+            : p
+        ),
+      }));
+      const { user } = useAuthStore.getState();
+      if (user?.id) {
+        const data = await assignmentsApi.getJobsForEngineer(user.id, { page_size: 50 });
+        set({ assignments: data.results, stats: data.stats });
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to accept project';
+      console.warn('[acceptSurveyCopy]', message);
+      set({ error: message });
     }
   },
 

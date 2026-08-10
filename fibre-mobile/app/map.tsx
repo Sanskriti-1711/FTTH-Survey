@@ -199,6 +199,61 @@ function buildMapLayerData(
   });
 }
 
+// ── Snap-to-object: find the nearest point feature within a radius ─────────
+// Used by the Draw Segment tool so the final vertex of a drawn path lands
+// EXACTLY on a nearby object/pdp/mfg point (e.g. a newly created premise),
+// making the connection readable by LLD automation.
+function findNearestSnapPoint(
+  layers: MapLayerData[],
+  lng: number,
+  lat: number,
+  radiusM = 15
+): {
+  id: string;
+  layerId: string;
+  name: string;
+  lng: number;
+  lat: number;
+  properties: Record<string, unknown>;
+} | null {
+  let best: {
+    id: string;
+    layerId: string;
+    name: string;
+    lng: number;
+    lat: number;
+    properties: Record<string, unknown>;
+  } | null = null;
+  let bestDist = radiusM;
+
+  for (const layer of layers) {
+    if (layer.id.startsWith('temp-preview-')) continue;
+    for (const feat of layer.features) {
+      if (feat.geometry?.type !== 'Point') continue;
+      const [flng, flat] = feat.geometry.coordinates as [number, number];
+      const props = feat.properties ?? {};
+      const fid = String(props._id ?? props.id ?? '');
+      if (!fid) continue;
+      const avgLat = (lat + flat) / 2;
+      const dx = (lng - flng) * 111320 * Math.cos((avgLat * Math.PI) / 180);
+      const dy = (lat - flat) * 110540;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = {
+          id: fid,
+          layerId: layer.id,
+          name: layer.name,
+          lng: flng,
+          lat: flat,
+          properties: props as Record<string, unknown>,
+        };
+      }
+    }
+  }
+  return best;
+}
+
 // ── Resolve geometry type from layer ID ────────────────────────────────────
 function resolveGeometryType(layerId: string): string {
   const normalized = layerId
@@ -334,6 +389,17 @@ export default function MapScreen() {
   // Number of points appended so far (0 = none yet). Drives the toolbar step UI
   // and lets the connect handler append A→B→C→D instead of re-truncating.
   const [continueLinePoints, setContinueLinePoints] = useState(0);
+  // The object point the draw-segment path snapped to (if any). When the final
+  // vertex lands on/near an object/pdp/mfg point, this captures its details so
+  // they merge into the line's SurveyFeature on save (LLD automation chain).
+  const [continueSnapTarget, setContinueSnapTarget] = useState<{
+    id: string;
+    layerId: string;
+    name: string;
+    lng: number;
+    lat: number;
+    properties: Record<string, unknown>;
+  } | null>(null);
   // Dedupe guard: the native map fires BOTH the Map onPress AND the
   // GeoJSONSource onPress for a single tap, so handleContinueLineTap can
   // fire twice with the same lngLat. Without this guard every tap would
@@ -1714,6 +1780,7 @@ export default function MapScreen() {
     setLineToolMode(null);
     setContinueLineAnchor(null);
     setContinueLinePoints(0);
+    setContinueSnapTarget(null);
     lastContinueTapRef.current = null;
     setDeleteSectionRange(null);
   }, []);
@@ -1735,6 +1802,7 @@ export default function MapScreen() {
       setLineToolMode(null);
       setContinueLineAnchor(null);
       setContinueLinePoints(0);
+      setContinueSnapTarget(null);
       lastContinueTapRef.current = null;
       setDeleteSectionRange(null);
       console.log('[MoveMode] Exited — temp changes discarded');
@@ -1808,6 +1876,33 @@ export default function MapScreen() {
     const existingSurvey = getSurveyFeatureForHld(featureId);
     const { geometry: origGeom, attributes: origAttrs } = findHldFeatureOriginal(featureId, layerId);
 
+    // ── Merge the snapped object's details into the line's attributes ──
+    // When the draw-segment path ended on an object point (premise/pdp/mfg),
+    // record the connection + key attributes so LLD automation can trace a
+    // continuous route: PDP → path → premise. Only the line carries the
+    // reference (object points don't hold connected-line data).
+    let surveyAttrs: Record<string, unknown> = existingSurvey
+      ? (existingSurvey.survey_attributes ?? origAttrs ?? {})
+      : (origAttrs ?? {});
+    if (continueSnapTarget) {
+      const cleanProps = Object.fromEntries(
+        Object.entries(continueSnapTarget.properties ?? {}).filter(([k]) => !k.startsWith('_'))
+      );
+      surveyAttrs = {
+        ...surveyAttrs,
+        connected_object_id: continueSnapTarget.id,
+        // Store the RAW base layer id (strip survey-/imp- prefixes) so LLD
+        // automation gets a clean layer reference: e.g. 'objects' not 'survey-objects'.
+        connected_object_layer: continueSnapTarget.layerId
+          .replace(/^survey-/, '')
+          .replace(/^imp-/, ''),
+        connected_object_name: continueSnapTarget.name,
+        connected_object_lng: continueSnapTarget.lng,
+        connected_object_lat: continueSnapTarget.lat,
+        ...cleanProps, // merge the object's own attributes (premise_id, address, etc.)
+      };
+    }
+
     if (existingSurvey) {
       // Update existing survey feature
       pushUndo({
@@ -1826,6 +1921,7 @@ export default function MapScreen() {
       });
       updateSurveyFeature(existingSurvey.id, layerId, {
         survey_geometry: surveyGeometry,
+        survey_attributes: surveyAttrs,
         survey_status: 'modified',
       });
     } else {
@@ -1833,9 +1929,11 @@ export default function MapScreen() {
       upsertSurveyFeature(
         featureId, layerId, layerName,
         surveyGeometry,
-        origAttrs ?? {},
+        surveyAttrs,
         origGeom, origAttrs,
-        `Moved line vertices (original: ${tempLineOriginal.length} vertices, new: ${tempLineCoords.length} vertices)`,
+        continueSnapTarget
+          ? `Drew segment to ${continueSnapTarget.name} #${continueSnapTarget.id.slice(-6)} (${tempLineOriginal.length} → ${tempLineCoords.length} vertices)`
+          : `Moved line vertices (original: ${tempLineOriginal.length} vertices, new: ${tempLineCoords.length} vertices)`,
       ).then((sf) => {
         if (sf) {
           pushUndo({
@@ -1862,10 +1960,11 @@ export default function MapScreen() {
     setLineToolMode(null);
     setContinueLineAnchor(null);
     setContinueLinePoints(0);
+    setContinueSnapTarget(null);
     lastContinueTapRef.current = null;
     setDeleteSectionRange(null);
-    console.log(`[MoveMode] Saved line geometry for ${featureId.slice(-8)} — SurveyFeature ${existingSurvey ? 'updated' : 'created'}`);
-  }, [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature]);
+    console.log(`[MoveMode] Saved line geometry for ${featureId.slice(-8)} — SurveyFeature ${existingSurvey ? 'updated' : 'created'}${continueSnapTarget ? ` (snapped to ${continueSnapTarget.name})` : ''}`);
+  }, [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, continueSnapTarget]);
 
   // ── Delete Section handlers ────────────────────────────────────────────
 
@@ -1916,6 +2015,7 @@ export default function MapScreen() {
       setLineToolMode(null);
       setContinueLineAnchor(null);
       setContinueLinePoints(0);
+      setContinueSnapTarget(null);
       lastContinueTapRef.current = null;
       setTempLineCoords(null);
       setTempLineOriginal(null);
@@ -1946,6 +2046,7 @@ export default function MapScreen() {
     setLineToolMode('continue-line');
     setContinueLineAnchor(null);
     setContinueLinePoints(0);
+    setContinueSnapTarget(null);
     lastContinueTapRef.current = null;
     autoOverlayOnEdit();
   }, [selectedLineFeature, lineToolMode, importFeatureIdMap, autoOverlayOnEdit]);
@@ -2035,7 +2136,7 @@ export default function MapScreen() {
         },
       });
     }
-    setLineMoveMode(false); setLineToolMode(null); setDeleteSectionRange(null); setContinueLineAnchor(null); setContinueLinePoints(0); lastContinueTapRef.current = null; setTempLineCoords(null); setTempLineOriginal(null);
+    setLineMoveMode(false); setLineToolMode(null); setDeleteSectionRange(null); setContinueLineAnchor(null); setContinueLinePoints(0); setContinueSnapTarget(null); lastContinueTapRef.current = null; setTempLineCoords(null); setTempLineOriginal(null);
   }, [deleteSectionRange, tempLineCoords, tempLineOriginal, selectedLineFeature, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, activeProject]);
 
   // ── Delete Section: tap handler ────────────────────────────────────────
@@ -2155,12 +2256,33 @@ export default function MapScreen() {
         const [elng, elat] = tempLineCoords[endIdx];
         connectLng = elng;
         connectLat = elat;
+        // Connecting to a line vertex, not an object point — clear any prior snap
+        setContinueSnapTarget(null);
         console.log(`[Continue] Connected to vertex ${endIdx}`);
       } else {
-        // Tapping elsewhere → connect to the exact tapped location.
-        connectLng = lngLat[0];
-        connectLat = lngLat[1];
-        console.log(`[Continue] Connected to [${connectLng.toFixed(6)}, ${connectLat.toFixed(6)}]`);
+        // Tapping elsewhere → snap to a nearby object point (within ~15m)
+        // so the final vertex lands EXACTLY on the object it connects to
+        // (e.g. a newly created premise). This makes the path readable by
+        // LLD automation. If nothing is nearby, use the tapped spot.
+        const snap = findNearestSnapPoint(mapLayerData, lngLat[0], lngLat[1]);
+        if (snap) {
+          connectLng = snap.lng;
+          connectLat = snap.lat;
+          setContinueSnapTarget({
+            id: snap.id,
+            layerId: snap.layerId,
+            name: snap.name,
+            lng: snap.lng,
+            lat: snap.lat,
+            properties: { ...snap.properties },
+          });
+          console.log(`[Continue] ✨ Snap → ${snap.name} #${snap.id.slice(-6)} at [${connectLng.toFixed(6)}, ${connectLat.toFixed(6)}]`);
+        } else {
+          connectLng = lngLat[0];
+          connectLat = lngLat[1];
+          setContinueSnapTarget(null);
+          console.log(`[Continue] Connected to [${connectLng.toFixed(6)}, ${connectLat.toFixed(6)}]`);
+        }
       }
 
       // Build the new path:
@@ -2186,7 +2308,7 @@ export default function MapScreen() {
       setContinueLinePoints((p) => p + 1);
       console.log(`[Continue] Segment ${continueLinePoints + 1} drawn — path ${tempLineCoords.length} → ${newCoords.length} vertices`);
     },
-    [lineToolMode, selectedLineFeature, tempLineCoords, continueLineAnchor, continueLinePoints],
+    [lineToolMode, selectedLineFeature, tempLineCoords, continueLineAnchor, continueLinePoints, mapLayerData],
   );
 
   // ── Check if temp line has unsaved changes ──
@@ -2952,6 +3074,7 @@ export default function MapScreen() {
               onContinue={handleContinueToggle}
               continueLineStep={continueLineAnchor === null ? 0 : continueLinePoints >= 1 ? 2 : 1}
               continueLineSegments={continueLinePoints}
+              continueSnapLabel={continueSnapTarget ? `Snapped to ${continueSnapTarget.name} #${continueSnapTarget.id.slice(-6)}` : undefined}
             />
           )}
 

@@ -32,13 +32,35 @@ import {
   AlertTriangle,
   Camera,
   MapPin,
-  Crosshair,
   Edit3,
-  Move,
   ClipboardList,
 } from 'lucide-react-native';
 import { useSurveyFeaturesStore } from '../../lib/stores/survey-features';
 import type { Feature, GeoJSONFeature, FieldSchemaField } from '../../lib/utils/types';
+
+/**
+ * Seed the Field Measurements form with existing values so engineers see
+ * what was previously captured instead of blank fields. Priority:
+ *   1. Explicitly saved field_measurements (win always)
+ *   2. Matching schema editable-field values from the feature's properties
+ *      (HLD attributes / survey_attributes) as a starting point
+ */
+function seedMeasurements(
+  layerId: string | null,
+  props: Record<string, unknown> | null | undefined,
+  existing: Record<string, unknown> | null | undefined
+): Record<string, unknown> {
+  const base: Record<string, unknown> = { ...(existing ?? {}) };
+  if (!layerId || !props) return base;
+  const schema = getLayerSchema(layerId);
+  if (!schema) return base;
+  for (const field of schema.editableFields) {
+    if (base[field.key] === undefined && props[field.key] !== undefined) {
+      base[field.key] = props[field.key];
+    }
+  }
+  return base;
+}
 
 // ── Feature Detail Screen ─────────────────────────────────────────────────
 
@@ -73,7 +95,7 @@ export default function FeatureDetailScreen() {
           const data = await apiGetFeatureDetail(routeProjectId, featureId as string);
           setFeature(data.feature);
           setGeojson(data.geojson);
-          setMeasurements((data.feature.field_measurements as Record<string, unknown>) ?? {});
+          setMeasurements(seedMeasurements(data.feature.layer_id, data.feature.properties, data.feature.field_measurements as Record<string, unknown>));
           setNotes(data.feature.comparison_notes ?? '');
         } catch {
           // API failed — try to find imported feature from project store
@@ -81,7 +103,7 @@ export default function FeatureDetailScreen() {
           if (found) {
             setFeature(found.feature);
             setGeojson(found.geojson);
-            setMeasurements({});
+            setMeasurements(seedMeasurements(found.feature.layer_id, found.feature.properties, null));
             setNotes('');
           } else {
             // Try survey features store
@@ -89,7 +111,7 @@ export default function FeatureDetailScreen() {
             if (surveyFound) {
               setFeature(surveyFound.feature);
               setGeojson(surveyFound.geojson);
-              setMeasurements({});
+              setMeasurements(seedMeasurements(surveyFound.feature.layer_id, surveyFound.feature.properties, null));
               setNotes('');
             } else {
               showToast('Failed to load feature details', 'error');
@@ -102,7 +124,7 @@ export default function FeatureDetailScreen() {
         if (found) {
           setFeature(found.feature);
           setGeojson(found.geojson);
-          setMeasurements({});
+          setMeasurements(seedMeasurements(found.feature.layer_id, found.feature.properties, null));
           setNotes('');
         } else {
           // Try survey features store
@@ -110,7 +132,7 @@ export default function FeatureDetailScreen() {
           if (surveyFound) {
             setFeature(surveyFound.feature);
             setGeojson(surveyFound.geojson);
-            setMeasurements({});
+            setMeasurements(seedMeasurements(surveyFound.feature.layer_id, surveyFound.feature.properties, null));
             setNotes('');
           } else {
             setLoading(false);
@@ -455,63 +477,49 @@ export default function FeatureDetailScreen() {
           </View>
         )}
 
-        {/* GPS Accuracy Requirement (from schema) */}
-        {feature.layer_id && (() => {
-          const schema = getLayerSchema(feature.layer_id);
-          if (!schema?.gpsAccuracyM) return null;
-          return (
-            <View style={[styles.gpsAccuracy, { backgroundColor: colors.primary + '08' }]}>
-              <Crosshair size={14} stroke={colors.primary} />
-              <Text style={[styles.gpsAccuracyText, { color: colors.textPrimary }]}>
-                GPS accuracy required: within <Text style={{ fontWeight: '700', color: colors.primary }}>{schema.gpsAccuracyM}m</Text>
-              </Text>
-            </View>
-          );
-        })()}
+        {/* GPS Accuracy Requirement (from schema) — LayerEditor shows the same requirement inside Field Measurements, so this banner is redundant */}
 
-        {/* Required Photos indicator */}
-        {feature.layer_id && (() => {
-          const schema = getLayerSchema(feature.layer_id);
-          if (!schema?.requiredPhotos?.length) return null;
-          return (
-            <View style={[styles.photoReq, { backgroundColor: colors.warning + '08' }]}>
-              <Camera size={14} stroke={colors.warning} />
-              <Text style={[styles.photoReqText, { color: colors.textPrimary }]}>
-                <Text style={{ fontWeight: '700', color: colors.warning }}>{schema.requiredPhotos.length} photo{schema.requiredPhotos.length !== 1 ? 's' : ''} required:</Text> {schema.requiredPhotos.join(', ')}
-              </Text>
-            </View>
-          );
-        })()}
+        {/* Required Photos indicator (from schema) — LayerEditor shows the same inside Field Measurements */}
 
-        {/* Geometry Editing Notice */}
-        {feature.layer_id && (() => {
-          const schema = getLayerSchema(feature.layer_id);
-          if (!schema?.allowGeometryEdit) return null;
-          return (
-            <View style={[styles.geometryNotice, { backgroundColor: colors.success + '08' }]}>
-              <Move size={14} stroke={colors.success} />
-              <Text style={[styles.geometryText, { color: colors.textPrimary }]}>
-                <Text style={{ fontWeight: '700', color: colors.success }}>Geometry editable</Text> — switch to drag mode on the map to adjust position
-              </Text>
-            </View>
-          );
-        })()}
+        {/* Geometry Editing Notice (from schema) — LayerEditor shows the same inside Field Measurements */}
 
-        {/* Reference Properties */}
-        {feature.properties && Object.keys(feature.properties).length > 0 && (
-          <Card title="Reference Data" variant="outlined">
-            {Object.entries(feature.properties as Record<string, unknown>).map(
-              ([key, value]) => (
+        {/* Reference Properties — only non-schema fields (schema read-only/editable
+            fields are already displayed with proper labels inside Field Measurements) */}
+        {feature.properties && Object.keys(feature.properties).length > 0 && (() => {
+          const schema = feature.layer_id ? getLayerSchema(feature.layer_id) : null;
+          const schemaKeys = new Set([
+            ...(schema?.readOnlyFields ?? []).map((f) => f.key),
+            ...(schema?.editableFields ?? []).map((f) => f.key),
+          ]);
+          // Skip injected live-geometry props + internal ids (redundant noise)
+          const excessKeys = new Set([
+            'id', '_id', '_layer_id', '_layer_name', '_is_survey',
+            'latitude', 'longitude', 'vertex_count',
+            'start_lat', 'start_lng', 'end_lat', 'end_lng',
+          ]);
+          const entries = Object.entries(feature.properties as Record<string, unknown>).filter(
+            ([key, value]) =>
+              !key.startsWith('_') &&
+              !excessKeys.has(key) &&
+              !schemaKeys.has(key) &&
+              value !== null &&
+              value !== undefined &&
+              String(value).trim() !== ''
+          );
+          if (entries.length === 0) return null;
+          return (
+            <Card title="Reference Data" variant="outlined">
+              {entries.map(([key, value]) => (
                 <View key={key} style={styles.propRow}>
                   <Text style={[styles.propKey, { color: colors.textSecondary }]}>{key}</Text>
                   <Text style={[styles.propValue, { color: colors.textPrimary }]}>
                     {String(value).slice(0, 100)}
                   </Text>
                 </View>
-              )
-            )}
-          </Card>
-        )}
+              ))}
+            </Card>
+          );
+        })()}
 
         {/* Dynamic Form — LayerEditor replaces legacy schema renderer */}
         <Card title="Field Measurements" variant="default">
@@ -713,51 +721,6 @@ const styles = StyleSheet.create({
     borderRadius: Radius.full,
   },
   addPhotoText: { fontSize: 12, fontWeight: '600' },
-  // ── GPS Accuracy bar ───────────────────────────────────────────────
-  gpsAccuracy: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: Spacing.md,
-    borderRadius: Radius.md,
-    marginBottom: Spacing.sm,
-    gap: Spacing.sm,
-  },
-  gpsAccuracyText: {
-    fontSize: 12,
-    flex: 1,
-  },
-
-  // ── Photo Requirements bar ─────────────────────────────────────────
-  photoReq: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: Spacing.md,
-    borderRadius: Radius.md,
-    marginBottom: Spacing.sm,
-    gap: Spacing.sm,
-  },
-  photoReqText: {
-    fontSize: 12,
-    flex: 1,
-  },
-
-  // ── Geometry Notice ────────────────────────────────────────────────
-  geometryNotice: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: Spacing.md,
-    borderRadius: Radius.md,
-    marginBottom: Spacing.lg,
-    gap: Spacing.sm,
-  },
-  geometryText: {
-    fontSize: 12,
-    flex: 1,
-  },
-
   // ── Survey Modules Header ─────────────────────────────────────────
   surveyModulesHeader: {
     flexDirection: 'row',
