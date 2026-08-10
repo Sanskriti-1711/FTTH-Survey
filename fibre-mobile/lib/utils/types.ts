@@ -20,7 +20,18 @@ export interface Project {
   name: string;
   description: string;
   region: string;
-  status: 'draft' | 'in_progress' | 'assigned' | 'active' | 'completed' | 'archived';
+  status:
+    | 'draft'
+    | 'in_progress'
+    | 'assigned'
+    | 'active'
+    | 'submitted'
+    | 'under_review'
+    | 'reviewed'
+    | 'accepted'
+    | 'redo'
+    | 'completed'
+    | 'archived';
   standard_completion: number;
   created_at: string;
   updated_at: string;

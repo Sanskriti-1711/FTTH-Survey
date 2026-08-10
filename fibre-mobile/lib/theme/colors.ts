@@ -79,10 +79,17 @@ export const Touch = {
 // ── Status Colors Map ─────────────────────────────────────────────────────
 export const StatusColors = {
   pending: { bg: '#E5E7EB', text: '#6B7280', dot: '#9CA3AF' },
+  draft: { bg: '#E5E7EB', text: '#6B7280', dot: '#9CA3AF' },
   assigned: { bg: '#DBEAFE', text: '#1D4ED8', dot: '#3B82F6' },
+  active: { bg: '#D1FAE5', text: '#047857', dot: '#10B981' },
+  submitted: { bg: '#EDE9FE', text: '#6D28D9', dot: '#8B5CF6' },
   under_review: { bg: '#FEF3C7', text: '#B45309', dot: '#F59E0B' },
-  approved: { bg: '#D1FAE5', text: '#047857', dot: '#10B981' },
+  reviewed: { bg: '#CFFAFE', text: '#0E7490', dot: '#06B6D4' },
+  accepted: { bg: '#D1FAE5', text: '#047857', dot: '#10B981' },
   redo: { bg: '#FEE2E2', text: '#B91C1C', dot: '#EF4444' },
+  completed: { bg: '#D1FAE5', text: '#047857', dot: '#10B981' },
+  archived: { bg: '#E5E7EB', text: '#6B7280', dot: '#9CA3AF' },
+  approved: { bg: '#D1FAE5', text: '#047857', dot: '#10B981' },
   in_progress: { bg: '#DBEAFE', text: '#1D4ED8', dot: '#3B82F6' },
   complete: { bg: '#D1FAE5', text: '#047857', dot: '#10B981' },
   flagged: { bg: '#FEF3C7', text: '#B45309', dot: '#F59E0B' },

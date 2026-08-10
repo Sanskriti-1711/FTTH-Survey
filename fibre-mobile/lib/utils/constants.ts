@@ -102,7 +102,13 @@ export const FEATURE_STATUSES = [
 export const PROJECT_STATUSES = [
   'draft',
   'in_progress',
+  'assigned',
   'active',
+  'submitted',
+  'under_review',
+  'reviewed',
+  'accepted',
+  'redo',
   'completed',
   'archived',
 ] as const;

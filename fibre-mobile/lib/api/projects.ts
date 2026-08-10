@@ -31,6 +31,38 @@ export async function acceptProject(projectId: string): Promise<{
   });
 }
 
+// Engineer submits their finished Survey copy → status becomes submitted.
+export async function submitProject(projectId: string): Promise<{
+  project_id: string;
+  name: string;
+  status: string;
+  source_ftth_project_id: string | null;
+}> {
+  return apiFetch(`/api/projects/${projectId}/submit/`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+// Admin review actions on a submitted Survey copy.
+export type ReviewAction = 'start_review' | 'reviewed' | 'accept' | 'redo' | 'complete';
+
+export async function reviewProject(
+  projectId: string,
+  action: ReviewAction
+): Promise<{
+  project_id: string;
+  name: string;
+  status: string;
+  action: string;
+  source_ftth_project_id: string | null;
+}> {
+  return apiFetch(`/api/projects/${projectId}/review/`, {
+    method: 'POST',
+    body: JSON.stringify({ action }),
+  });
+}
+
 export async function getLatestProjects(): Promise<Project[]> {
   return apiFetch<Project[]>('/api/projects/latest/');
 }

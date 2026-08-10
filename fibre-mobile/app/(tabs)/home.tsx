@@ -12,12 +12,11 @@ import { router } from 'expo-router';
 import { useThemeStore } from '../../lib/stores/theme';
 import { useAuthStore } from '../../lib/stores/auth';
 import { useProjectStore } from '../../lib/stores/project';
-import { useOfflineStore } from '../../lib/stores/offline';
 import { Card, StatCard } from '../../components/ui/Card';
-import { StatusBadge, ProgressBar } from '../../components/ui/StatusBadge';
+import { StatusBadge } from '../../components/ui/StatusBadge';
 import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
-import { Spacing, Radius } from '../../lib/theme/colors';
+import { Spacing, Radius, StatusColors, type StatusKey } from '../../lib/theme/colors';
 import {
   Camera,
   Upload,
@@ -25,22 +24,22 @@ import {
   ChevronRight,
   FileArchive,
 } from 'lucide-react-native';
-import type { AssignmentJob } from '../../lib/utils/types';
+import type { Project } from '../../lib/utils/types';
+import type { ReviewAction } from '../../lib/api/projects';
 
 // ── Home Screen ───────────────────────────────────────────────────────────
 
 export default function HomeScreen() {
   const colors = useThemeStore((s) => s.colors);
   const { user } = useAuthStore();
-  const { projects, assignments, stats, fetchAssignments, fetchProjects, acceptSurveyCopy } = useProjectStore();
+  const isAdmin = user?.role === 'SUBADMIN';
+  const { projects, fetchProjects, acceptSurveyCopy, submitSurveyCopy, reviewSurveyProject } = useProjectStore();
   const [refreshing, setRefreshing] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<Project['status'] | 'all'>('all');
 
   const loadData = useCallback(async () => {
-    if (user?.id) {
-      await fetchAssignments(user.id);
-      await fetchProjects();
-    }
-  }, [user?.id]);
+    await fetchProjects();
+  }, [fetchProjects]);
 
   useEffect(() => {
     loadData();
@@ -52,9 +51,17 @@ export default function HomeScreen() {
     setRefreshing(false);
   };
 
-  const completedToday = stats?.approved ?? 0;
-  const pendingSubmissions = stats?.under_review ?? 0;
-  const activeAssignments = assignments?.length ?? 0;
+  // Status counts derived from the single "My Projects" list — the separate
+  // assignments feed is gone, the flags on the cards are the source of truth.
+  const activeAssignments = projects.filter(
+    (p) => p.status === 'active' || p.status === 'assigned' || p.status === 'redo'
+  ).length;
+  const completedToday = projects.filter(
+    (p) => p.status === 'accepted' || p.status === 'completed'
+  ).length;
+  const pendingSubmissions = projects.filter(
+    (p) => p.status === 'submitted' || p.status === 'under_review' || p.status === 'reviewed'
+  ).length;
 
   const getGreeting = () => {
     const hour = new Date().getHours();
@@ -62,6 +69,45 @@ export default function HomeScreen() {
     if (hour < 17) return 'Good afternoon';
     return 'Good evening';
   };
+
+  // Admins: surface projects that need their attention first (submitted →
+  // under review → reviewed), so the review queue is never buried by newer
+  // projects. Engineers keep the plain newest-first ordering.
+  const visibleProjects = isAdmin
+    ? [...projects].sort((a, b) => {
+        const rank = (p: Project) =>
+          ['submitted', 'under_review', 'reviewed'].includes(p.status) ? 0 : p.status === 'redo' ? 1 : 2;
+        const r = rank(a) - rank(b);
+        if (r !== 0) return r;
+        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      })
+    : projects;
+
+  // Role-aware filter chips — engineers filter their workflow, admins their queue.
+  const filterChips: { key: Project['status'] | 'all'; label: string }[] = isAdmin
+    ? [
+        { key: 'all', label: 'All' },
+        { key: 'submitted', label: 'Submitted' },
+        { key: 'under_review', label: 'Under Review' },
+        { key: 'reviewed', label: 'Reviewed' },
+        { key: 'accepted', label: 'Accepted' },
+        { key: 'redo', label: 'Redo' },
+      ]
+    : [
+        { key: 'all', label: 'All' },
+        { key: 'assigned', label: 'Assigned' },
+        { key: 'active', label: 'Active' },
+        { key: 'submitted', label: 'Submitted' },
+        { key: 'redo', label: 'Redo' },
+      ];
+
+  const filteredProjects =
+    statusFilter === 'all'
+      ? visibleProjects
+      : visibleProjects.filter((p) => p.status === statusFilter);
+
+  const activeFilterLabel =
+    filterChips.find((c) => c.key === statusFilter)?.label ?? 'matching';
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]}>
@@ -171,6 +217,50 @@ export default function HomeScreen() {
           </TouchableOpacity>
         </View>
 
+        {/* Status filter chips — only useful once there are projects to filter */}
+        {projects.length > 0 && (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.filterRow}
+          style={{ marginBottom: Spacing.md }}
+        >
+          {filterChips.map((chip) => {
+            const isActive = statusFilter === chip.key;
+            const count =
+              chip.key === 'all'
+                ? projects.length
+                : projects.filter((p) => p.status === chip.key).length;
+            const chipColor =
+              chip.key === 'all' ? colors.primary : (StatusColors[chip.key as StatusKey]?.dot ?? colors.primary);
+            return (
+              <TouchableOpacity
+                key={chip.key}
+                onPress={() => setStatusFilter(chip.key)}
+                style={[
+                  styles.filterChip,
+                  {
+                    borderColor: isActive ? chipColor : colors.textTertiary + '55',
+                    backgroundColor: isActive ? chipColor : 'transparent',
+                  },
+                ]}
+                activeOpacity={0.7}
+              >
+                <Text
+                  style={[
+                    styles.filterChipText,
+                    { color: isActive ? '#FFFFFF' : colors.textSecondary },
+                  ]}
+                >
+                  {chip.label}
+                  {count > 0 ? ` (${count})` : ''}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+        )}
+
         {projects.length === 0 ? (
           <EmptyState
             title="No Projects Yet"
@@ -184,59 +274,31 @@ export default function HomeScreen() {
               />
             }
           />
+        ) : filteredProjects.length === 0 ? (
+          <EmptyState
+            title={`No ${activeFilterLabel} Projects`}
+            description="Nothing matches this status filter yet"
+          />
         ) : (
-          projects.slice(0, 5).map((proj) => (
+          filteredProjects.map((proj) => (
             <ProjectCard
               key={proj.id}
               project={proj}
+              isAdmin={isAdmin}
               onPress={() => {
+                // Engineers must accept an assigned project before working on it.
+                // Admins may open any project (review + inspect).
+                if (!isAdmin && proj.status === 'assigned') return;
                 useProjectStore.getState().setActiveProject(proj);
                 router.push('/map');
               }}
+              onAccept={() => acceptSurveyCopy(proj.id).then(() => loadData())}
+              onSubmit={() => submitSurveyCopy(proj.id).then(() => loadData())}
+              onReview={(action) => reviewSurveyProject(proj.id, action).then(() => loadData())}
             />
           ))
         )}
 
-        {/* Active Assignments */}
-        <View style={styles.sectionHeader}>
-          <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>
-            Active Assignments
-          </Text>
-        </View>
-
-        {assignments.length === 0 ? (
-          <EmptyState
-            title="No Active Assignments"
-            description="Your assigned survey jobs will appear here"
-            action={
-              <Button
-                title="Open Map"
-                variant="secondary"
-                size="sm"
-                onPress={() => router.push('/map')}
-              />
-            }
-          />
-        ) : (
-          assignments.slice(0, 5).map((job) => (
-            <AssignmentCard
-              key={job.id}
-              job={job}
-              onAccept={() => {
-                acceptSurveyCopy(job.project.id).then(() => loadData());
-              }}
-              onPress={() => {
-                if (job.scope === 'feature' && job.feature) {
-                  router.push(`/feature/${job.feature.id}?projectId=${job.project.id}`);
-                } else {
-                  const fullProject = projects.find((p) => p.id === job.project.id);
-                  useProjectStore.getState().setActiveProject(fullProject ?? null);
-                  router.push('/map');
-                }
-              }}
-            />
-          ))
-        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -246,21 +308,60 @@ export default function HomeScreen() {
 
 function ProjectCard({
   project,
+  isAdmin = false,
   onPress,
+  onAccept,
+  onSubmit,
+  onReview,
 }: {
   project: import('../../lib/utils/types').Project;
+  isAdmin?: boolean;
   onPress: () => void;
+  onAccept?: () => void;
+  onSubmit?: () => void;
+  onReview?: (action: ReviewAction) => void;
 }) {
   const colors = useThemeStore((s) => s.colors);
+  const [confirmingAction, setConfirmingAction] = useState<ReviewAction | null>(null);
 
-  const statusColor = {
-    draft: colors.textTertiary,
-    in_progress: colors.warning,
-    assigned: colors.warning,
-    active: colors.success,
-    completed: colors.primary,
-    archived: colors.textTertiary,
-  }[project.status] ?? colors.textTertiary;
+  // Engineer actions: accept on first assignment, submit when work is done.
+  const showAccept = !isAdmin && !!onAccept && project.status === 'assigned';
+  const showSubmit = !isAdmin && !!onSubmit && (project.status === 'active' || project.status === 'redo');
+
+  // Admin review actions — shown only to sub-admins on review-able statuses.
+  const reviewActions: { label: string; action: ReviewAction; color: string; confirm?: boolean }[] = [];
+  if (isAdmin && onReview) {
+    if (project.status === 'submitted') {
+      reviewActions.push({ label: 'Start Review', action: 'start_review', color: colors.primary });
+    }
+    if (project.status === 'under_review') {
+      reviewActions.push({ label: 'Mark Reviewed', action: 'reviewed', color: colors.success });
+      reviewActions.push({ label: 'Request Redo', action: 'redo', color: StatusColors.redo.dot, confirm: true });
+    }
+    if (project.status === 'reviewed') {
+      reviewActions.push({ label: 'Accept Project', action: 'accept', color: colors.success });
+      reviewActions.push({ label: 'Request Redo', action: 'redo', color: StatusColors.redo.dot, confirm: true });
+    }
+    if (project.status === 'accepted') {
+      reviewActions.push({ label: 'Mark Completed', action: 'complete', color: colors.primary, confirm: true });
+    }
+  }
+
+  const handleReviewPress = (e: any, btn: { action: ReviewAction; confirm?: boolean }) => {
+    e.stopPropagation();
+    // Destructive actions require a second tap to confirm.
+    if (btn.confirm) {
+      if (confirmingAction === btn.action) {
+        setConfirmingAction(null);
+        onReview?.(btn.action);
+      } else {
+        setConfirmingAction(btn.action);
+      }
+      return;
+    }
+    setConfirmingAction(null);
+    onReview?.(btn.action);
+  };
 
   return (
     <TouchableOpacity
@@ -273,68 +374,16 @@ function ProjectCard({
           <Text style={[styles.jobName, { color: colors.textPrimary }]} numberOfLines={1}>
             {project.name}
           </Text>
-          <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginTop: 2 }}>
-            <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
-            <Text style={[styles.jobMeta, { color: colors.textSecondary }]}>
-              {project.status.replace('_', ' ')} · {project.region}
-            </Text>
-          </View>
-        </View>
-        <ChevronRight size={16} stroke={colors.textTertiary} />
-      </View>
-      <View style={styles.jobFooter}>
-        <Text style={[styles.jobDate, { color: colors.textTertiary }]}>
-          Created: {new Date(project.created_at).toLocaleDateString()}
-        </Text>
-      </View>
-    </TouchableOpacity>
-  );
-}
-
-// ── Assignment Card ───────────────────────────────────────────────────────
-
-function AssignmentCard({
-  job,
-  onPress,
-  onAccept,
-}: {
-  job: AssignmentJob;
-  onPress: () => void;
-  onAccept?: () => void;
-}) {
-  const colors = useThemeStore((s) => s.colors);
-
-  const progress =
-    job.feature_count > 0
-      ? (job.status === 'approved' ? 1 : job.status === 'under_review' ? 0.75 : job.status === 'assigned' ? 0.25 : 0)
-      : 0;
-
-  // Survey copies arrive with project.status === 'assigned' until the
-  // engineer accepts them. Show an Accept action on project-scope cards.
-  const needsAccept =
-    !!onAccept && job.scope === 'project' && job.project.status === 'assigned';
-
-  return (
-    <TouchableOpacity
-      style={[styles.jobCard, { backgroundColor: colors.surface }]}
-      onPress={onPress}
-      activeOpacity={0.7}
-    >
-      <View style={styles.jobHeader}>
-        <View style={styles.jobInfo}>
-          <Text style={[styles.jobName, { color: colors.textPrimary }]} numberOfLines={1}>
-            {job.project.name}
-          </Text>
-          <Text style={[styles.jobMeta, { color: colors.textSecondary }]}>
-            {job.scope_display} · {job.feature_count} feature{job.feature_count !== 1 ? 's' : ''}
+          <Text style={[styles.jobMeta, { color: colors.textSecondary }]} numberOfLines={1}>
+            {project.region || 'Field Survey'}
           </Text>
         </View>
-        <StatusBadge status={job.status} />
+        <View style={{ alignItems: 'flex-end', gap: 6 }}>
+          <StatusBadge status={project.status} />
+          <ChevronRight size={16} stroke={colors.textTertiary} />
+        </View>
       </View>
-
-      <ProgressBar progress={progress} showLabel />
-
-      {needsAccept && (
+      {showAccept && (
         <TouchableOpacity
           onPress={(e) => {
             e.stopPropagation();
@@ -354,12 +403,52 @@ function AssignmentCard({
           </Text>
         </TouchableOpacity>
       )}
-
+      {showSubmit && (
+        <TouchableOpacity
+          onPress={(e) => {
+            e.stopPropagation();
+            onSubmit();
+          }}
+          style={{
+            marginTop: 10,
+            paddingVertical: 9,
+            borderRadius: 8,
+            alignItems: 'center',
+            backgroundColor: colors.secondary ?? colors.primary,
+          }}
+          activeOpacity={0.8}
+        >
+          <Text style={{ color: '#FFFFFF', fontSize: 13, fontWeight: '700' }}>
+            {project.status === 'redo' ? 'Resubmit Survey' : 'Submit for Review'}
+          </Text>
+        </TouchableOpacity>
+      )}
+      {reviewActions.length > 0 && (
+        <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
+          {reviewActions.map((btn) => (
+            <TouchableOpacity
+              key={btn.action}
+              onPress={(e) => handleReviewPress(e, btn)}
+              style={{
+                flex: 1,
+                paddingVertical: 9,
+                borderRadius: 8,
+                alignItems: 'center',
+                backgroundColor: confirmingAction === btn.action ? colors.warning : btn.color,
+              }}
+              activeOpacity={0.8}
+            >
+              <Text style={{ color: '#FFFFFF', fontSize: 13, fontWeight: '700' }}>
+                {confirmingAction === btn.action ? 'Tap again to confirm' : btn.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
       <View style={styles.jobFooter}>
         <Text style={[styles.jobDate, { color: colors.textTertiary }]}>
-          Assigned: {new Date(job.created_at).toLocaleDateString()}
+          Created: {new Date(project.created_at).toLocaleDateString()}
         </Text>
-        <ChevronRight size={16} stroke={colors.textTertiary} />
       </View>
     </TouchableOpacity>
   );
@@ -430,6 +519,18 @@ const styles = StyleSheet.create({
   },
   sectionTitle: { fontSize: 17, fontWeight: '600' },
   seeAll: { fontSize: 14, fontWeight: '500' },
+  filterRow: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingVertical: 2,
+  },
+  filterChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: Radius.full,
+    borderWidth: 1.5,
+  },
+  filterChipText: { fontSize: 13, fontWeight: '600' },
   jobCard: {
     borderRadius: Radius.lg,
     padding: Spacing.lg,
@@ -456,9 +557,4 @@ const styles = StyleSheet.create({
     marginTop: Spacing.md,
   },
   jobDate: { fontSize: 12 },
-  statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
 });

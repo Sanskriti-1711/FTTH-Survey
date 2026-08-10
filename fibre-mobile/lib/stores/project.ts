@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { Project, AssignmentJob, Feature, GeoJSONFeature, Layer } from '../utils/types';
 import * as projectsApi from '../api/projects';
+import type { ReviewAction } from '../api/projects';
 import * as assignmentsApi from '../api/assignments';
 import { useAuthStore } from './auth';
 
@@ -36,6 +37,8 @@ interface ProjectState {
   fetchProjects: () => Promise<void>;
   fetchAssignments: (engineerId: string) => Promise<void>;
   acceptSurveyCopy: (projectId: string) => Promise<void>;
+  submitSurveyCopy: (projectId: string) => Promise<void>;
+  reviewSurveyProject: (projectId: string, action: ReviewAction) => Promise<void>;
   setActiveProject: (project: Project | null) => void;
   importSurveyPackage: (projectId: string, file: { uri: string; name: string; type: string }) => Promise<void>;
   setProjectGeojsons: (geojsons: Record<string, GeoJSONFeature[]>) => void;
@@ -51,7 +54,37 @@ interface ProjectState {
   ) => Promise<void>;
 }
 
-export const useProjectStore = create<ProjectState>((set, get) => ({
+export const useProjectStore = create<ProjectState>((set, get) => {
+  /** Shared project-status transition (accept / submit): apply the backend
+   *  transition, then refresh the projects list + assignments in place so the
+   *  status flags update everywhere without a full reload. */
+  const applyProjectTransition = async (
+    projectId: string,
+    apiFn: (id: string) => Promise<{ status: string }>,
+    label: string,
+  ) => {
+    try {
+      const result = await apiFn(projectId);
+      set((st) => ({
+        projects: st.projects.map((p) =>
+          p.id === projectId
+            ? { ...p, status: result.status as Project['status'] }
+            : p
+        ),
+      }));
+      const { user } = useAuthStore.getState();
+      if (user?.id) {
+        const data = await assignmentsApi.getJobsForEngineer(user.id, { page_size: 50 });
+        set({ assignments: data.results, stats: data.stats });
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : `Failed to ${label}`;
+      console.warn(`[${label}]`, message);
+      set({ error: message });
+    }
+  };
+
+  return {
   projects: [],
   activeProject: null,
   assignments: [],
@@ -156,28 +189,18 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
   },
 
-  acceptSurveyCopy: async (projectId: string) => {
-    try {
-      const result = await projectsApi.acceptProject(projectId);
-      // Refresh the project list + assignments so the status badge updates.
-      set((st) => ({
-        projects: st.projects.map((p) =>
-          p.id === projectId
-            ? { ...p, status: result.status as Project['status'] }
-            : p
-        ),
-      }));
-      const { user } = useAuthStore.getState();
-      if (user?.id) {
-        const data = await assignmentsApi.getJobsForEngineer(user.id, { page_size: 50 });
-        set({ assignments: data.results, stats: data.stats });
-      }
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Failed to accept project';
-      console.warn('[acceptSurveyCopy]', message);
-      set({ error: message });
-    }
-  },
+  acceptSurveyCopy: (projectId: string) =>
+    applyProjectTransition(projectId, projectsApi.acceptProject, 'accept project'),
+
+  submitSurveyCopy: (projectId: string) =>
+    applyProjectTransition(projectId, projectsApi.submitProject, 'submit project'),
+
+  reviewSurveyProject: (projectId: string, action: ReviewAction) =>
+    applyProjectTransition(
+      projectId,
+      (id) => projectsApi.reviewProject(id, action),
+      `review project (${action})`,
+    ),
 
   setActiveProject: (project) => set({ activeProject: project }),
 
@@ -286,6 +309,6 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       // Don't throw — this is fire-and-forget
     }
   },
-
-}));
+  };
+});
 
