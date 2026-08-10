@@ -5,7 +5,7 @@ import { Platform } from 'react-native';
 // Web: if the URL carries the deep-link params (?token=&project=) from the
 // platform, hand off to /deeplink (preserving the query string so the
 // deeplink screen can read it) which activates the project and opens the
-// Map tab. Otherwise (and always on native) go to the login screen.
+// map. Otherwise (and always on native) go to the login screen.
 
 export default function RootIndex() {
   if (Platform.OS === 'web' && typeof window !== 'undefined') {

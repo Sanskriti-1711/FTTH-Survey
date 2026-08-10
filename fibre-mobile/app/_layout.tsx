@@ -48,8 +48,8 @@ export default function RootLayout() {
         <Stack.Screen name="(auth)" />
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="deeplink" />
+        <Stack.Screen name="map" options={{ animation: 'fade' }} />
         <Stack.Screen name="feature/[featureId]" options={{ animation: 'slide_from_bottom' }} />
-        <Stack.Screen name="project/[projectId]" />
         <Stack.Screen name="project/import" options={{ animation: 'slide_from_bottom' }} />
         <Stack.Screen name="camera" options={{ animation: 'slide_from_bottom' }} />
       </Stack>

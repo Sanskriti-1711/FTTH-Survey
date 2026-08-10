@@ -19,14 +19,11 @@ import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { Spacing, Radius } from '../../lib/theme/colors';
 import {
-  Map,
   Camera,
-  ClipboardList,
   Upload,
   Bell,
   ChevronRight,
   FileArchive,
-  Eye,
 } from 'lucide-react-native';
 import type { AssignmentJob } from '../../lib/utils/types';
 
@@ -119,30 +116,12 @@ export default function HomeScreen() {
         {/* Quick Actions */}
         <View style={styles.actionsRow}>
           <TouchableOpacity
-            style={[styles.actionBtn, { backgroundColor: colors.primary }]}
-            onPress={() => router.push('/(tabs)/survey')}
-            activeOpacity={0.8}
-          >
-            <ClipboardList size={24} stroke={colors.onPrimary} />
-            <Text style={[styles.actionText, { color: colors.onPrimary }]}>Survey</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
             style={[styles.actionBtn, { backgroundColor: colors.secondary }]}
             onPress={() => router.push('/camera')}
             activeOpacity={0.8}
           >
             <Camera size={24} color="#FFFFFF" />
             <Text style={[styles.actionText, { color: '#FFFFFF' }]}>Photo</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.actionBtn, { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.outline }]}
-            onPress={() => router.push('/(tabs)/map')}
-            activeOpacity={0.8}
-          >
-            <Map size={24} stroke={colors.primary} />
-            <Text style={[styles.actionText, { color: colors.textPrimary }]}>Map</Text>
           </TouchableOpacity>
         </View>
 
@@ -212,7 +191,7 @@ export default function HomeScreen() {
               project={proj}
               onPress={() => {
                 useProjectStore.getState().setActiveProject(proj);
-                router.push('/(tabs)/map');
+                router.push('/map');
               }}
             />
           ))
@@ -223,9 +202,6 @@ export default function HomeScreen() {
           <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>
             Active Assignments
           </Text>
-          <TouchableOpacity onPress={() => router.push('/(tabs)/survey')}>
-            <Text style={[styles.seeAll, { color: colors.primary }]}>See All</Text>
-          </TouchableOpacity>
         </View>
 
         {assignments.length === 0 ? (
@@ -234,10 +210,10 @@ export default function HomeScreen() {
             description="Your assigned survey jobs will appear here"
             action={
               <Button
-                title="Go to Surveys"
+                title="Open Map"
                 variant="secondary"
                 size="sm"
-                onPress={() => router.push('/(tabs)/survey')}
+                onPress={() => router.push('/map')}
               />
             }
           />
@@ -250,7 +226,9 @@ export default function HomeScreen() {
                 if (job.scope === 'feature' && job.feature) {
                   router.push(`/feature/${job.feature.id}?projectId=${job.project.id}`);
                 } else {
-                  router.push(`/project/${job.project.id}`);
+                  const fullProject = projects.find((p) => p.id === job.project.id);
+                  useProjectStore.getState().setActiveProject(fullProject ?? null);
+                  router.push('/map');
                 }
               }}
             />

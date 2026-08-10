@@ -10,29 +10,30 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
-import { useThemeStore } from '../../lib/stores/theme';
-import { useMapStore } from '../../lib/stores/map';
-import { useProjectStore } from '../../lib/stores/project';
-import { useSurveyStore } from '../../lib/stores/survey';
-import { useSurveyFeaturesStore, SURVEY_COLOR } from '../../lib/stores/survey-features';
-import { recalculateDependentProperties } from '../../lib/utils/spatial';
+import { useThemeStore } from '../lib/stores/theme';
+import { useMapStore } from '../lib/stores/map';
+import { useProjectStore } from '../lib/stores/project';
+import { useSurveyStore } from '../lib/stores/survey';
+import { useSurveyFeaturesStore, SURVEY_COLOR } from '../lib/stores/survey-features';
+import { recalculateDependentProperties } from '../lib/utils/spatial';
 // Geometry operation utilities removed — all edits now route through survey-features store
-import GeometryEditor from '../../lib/components/GeometryEditor';
-import type { GeometryMode, EditingFeature } from '../../lib/components/GeometryEditor';
-import LineSelectionToolbar from '../../lib/components/LineSelectionToolbar';
-import PolygonToolbar from '../../lib/components/PolygonToolbar';
-import SurveyChangesPanel from '../../lib/components/SurveyChangesPanel';
-import SurveyForm from '../../lib/components/SurveyForm';
-import type { SurveyFormData } from '../../lib/components/SurveyForm';
-import { Card, Badge } from '../../components/ui/Card';
-import { StatusBadge } from '../../components/ui/StatusBadge';
-import MapLibreMap, { BASEMAPS } from '../../lib/components/MapLibreMap';
-import MapLegend, { buildLayerGroups, DEFAULT_LAYER_GROUPS } from '../../lib/components/MapLegend';
-import MapFeaturePopup from '../../lib/components/MapFeaturePopup';
+import GeometryEditor from '../lib/components/GeometryEditor';
+import type { GeometryMode, EditingFeature } from '../lib/components/GeometryEditor';
+import LineSelectionToolbar from '../lib/components/LineSelectionToolbar';
+import PolygonToolbar from '../lib/components/PolygonToolbar';
+import SurveyChangesPanel from '../lib/components/SurveyChangesPanel';
+import SurveyForm from '../lib/components/SurveyForm';
+import type { SurveyFormData } from '../lib/components/SurveyForm';
+import { Card, Badge } from '../components/ui/Card';
+import { StatusBadge } from '../components/ui/StatusBadge';
+import MapLibreMap, { BASEMAPS } from '../lib/components/MapLibreMap';
+import MapLegend, { buildLayerGroups, DEFAULT_LAYER_GROUPS } from '../lib/components/MapLegend';
+import MapFeaturePopup from '../lib/components/MapFeaturePopup';
 import * as Location from 'expo-location';
-import type { MapLayerData, BasemapStyle } from '../../lib/components/MapLibreMap';
-import type { GeoJSONFeature, LayerDisplayMode, SurveyFeatureData } from '../../lib/utils/types';
-import { Spacing, Radius } from '../../lib/theme/colors';
+import type { MapLayerData, BasemapStyle } from '../lib/components/MapLibreMap';
+import type { GeoJSONFeature, LayerDisplayMode, SurveyFeatureData } from '../lib/utils/types';
+import { Spacing, Radius } from '../lib/theme/colors';
+import ArrowLeft from 'lucide-react-native/icons/arrow-left';
 import X from 'lucide-react-native/icons/x';
 import ChevronRight from 'lucide-react-native/icons/chevron-right';
 import MapPin from 'lucide-react-native/icons/map-pin';
@@ -2683,6 +2684,14 @@ export default function MapScreen() {
       {/* Header */}
       <View style={styles.header}>
         <View style={styles.headerLeft}>
+          {/* Back to Home — the map is now opened from a project, not a tab */}
+          <TouchableOpacity
+            onPress={() => (router.canGoBack() ? router.back() : router.replace('/(tabs)/home'))}
+            style={styles.backBtn}
+            hitSlop={8}
+          >
+            <ArrowLeft size={22} stroke={colors.textPrimary} />
+          </TouchableOpacity>
           <MapIcon size={20} stroke={colors.primary} />
           <View style={styles.headerTitleWrap}>
             <Text style={[styles.title, { color: colors.textPrimary }]} numberOfLines={1}>
@@ -3272,6 +3281,7 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.md,
   },
   headerLeft: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm, flex: 1 },
+  backBtn: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', marginRight: Spacing.xs },
   headerRight: { flexDirection: 'row', gap: Spacing.xs },
   headerBtn: {
     width: 36,

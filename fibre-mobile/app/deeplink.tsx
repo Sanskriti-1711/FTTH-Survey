@@ -17,7 +17,7 @@ import { useAuthStore } from '../lib/stores/auth';
 // The platform opens the web build as:
 //   http://localhost:8081/?token=<jwt>&project=<projectId>
 // This screen (web only) saves the token, activates the project and routes
-// straight to the Map tab so the engineer sees the same MapLibre views
+// straight to the project map so the engineer sees the same MapLibre views
 // (🔵 HLD / 🟠 Survey / 🔀 Overlay) as on the mobile app.
 //
 // Native: never used — index.tsx only redirects here when the web URL
@@ -87,9 +87,9 @@ export default function DeepLinkScreen() {
         useAuthStore.setState({ isRestoring: false });
 
         // 5) Strip the query params (keeps the JWT out of the URL bar) then
-        //    go to the Map tab.
+        //    open the map for the activated project.
         window.history.replaceState({}, '', window.location.pathname);
-        router.replace('/(tabs)/map');
+        router.replace('/map');
       } catch (e: unknown) {
         const message = e instanceof Error ? e.message : 'Failed to open project';
         console.warn('[DeepLink] failed:', message);

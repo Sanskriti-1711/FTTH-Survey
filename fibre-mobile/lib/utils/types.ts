@@ -265,9 +265,9 @@ export interface LayerFieldConfig {
 export type RootStackParamList = {
   '(auth)': undefined;
   '(tabs)': undefined;
+  map: undefined;
   'feature/[featureId]': { featureId: string };
   'project/import': { projectId: string };
-  'project/[projectId]': { projectId: string };
   gallery: undefined;
   'gallery/[featureId]': { featureId: string };
   export: undefined;

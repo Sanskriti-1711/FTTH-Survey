@@ -209,7 +209,7 @@ export default function ProjectImportScreen() {
           size="lg"
           loading={isLoading && step !== 'done'}
           disabled={(isLoading || !file) && step !== 'done'}
-          onPress={step === 'done' ? () => router.replace('/(tabs)/map') : handleImport}
+          onPress={step === 'done' ? () => router.replace('/map') : handleImport}
         />
       </View>
 

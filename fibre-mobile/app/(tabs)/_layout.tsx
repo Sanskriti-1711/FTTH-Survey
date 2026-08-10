@@ -3,10 +3,11 @@ import { Platform, StyleSheet } from 'react-native';
 import { Tabs } from 'expo-router';
 import { useThemeStore } from '../../lib/stores/theme';
 import { Radius } from '../../lib/theme/colors';
-import { Home, ClipboardList, Map, User } from 'lucide-react-native';
+import { Home, User } from 'lucide-react-native';
 
 // ── Tab Layout ────────────────────────────────────────────────────────────
-// Home, Survey, Map, and Profile tabs only
+// Home and Profile tabs only. The Map opens from a project (stack route),
+// and the Survey form lives inside the feature detail screen.
 
 export default function TabLayout() {
   const colors = useThemeStore((s) => s.colors);
@@ -39,20 +40,6 @@ export default function TabLayout() {
         options={{
           title: 'Home',
           tabBarIcon: ({ color, size }) => <Home size={size} color={color} />,
-        }}
-      />
-      <Tabs.Screen
-        name="survey"
-        options={{
-          title: 'Survey',
-          tabBarIcon: ({ color, size }) => <ClipboardList size={size} color={color} />,
-        }}
-      />
-      <Tabs.Screen
-        name="map"
-        options={{
-          title: 'Map',
-          tabBarIcon: ({ color, size }) => <Map size={size} color={color} />,
         }}
       />
       <Tabs.Screen
