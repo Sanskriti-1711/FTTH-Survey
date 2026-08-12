@@ -67,3 +67,4 @@ crash_log.txt
 
 # ── Built APKs (release builds — regenerated, ~150MB each) ───────
 *.apk
+fibre-mobile/.ci-build/

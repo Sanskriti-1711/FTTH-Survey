@@ -1,0 +1,52 @@
+name: Expo Web Build Check
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+# Type-check + web-export the Expo app on every commit so broken web builds
+# (e.g. the Metro "DependencyGraph" crash or missing demo-data import seen
+# earlier) are caught in CI instead of at deploy time.
+#
+# The check runs in fibre-mobile/ where package.json lives. It does NOT
+# commit the export output — expo export writes to a CI-only directory that
+# is gitignored.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: expo-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck-and-export:
+    name: tsc + expo export
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: fibre-mobile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: fibre-mobile/.nvmrc
+          cache: npm
+          cache-dependency-path: fibre-mobile/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript check
+        run: npm run typecheck
+
+      - name: Expo web export
+        run: npx expo export --platform web --output-dir .ci-build
+        env:
+          EXPO_NO_TELEMETRY: '1'
