@@ -2,8 +2,6 @@
 
 > **Scope:** First design the Android app interface and architecture. A follow-up step will wire it to the Django backend through a dedicated `survey` app.
 
-> **Last Updated:** July 24, 2026 — Appendix added mapping the current React Native codebase to the Android design.
-
 ---
 
 ## 1. Overview
@@ -173,18 +171,11 @@ AuthNavGraph
         *   Secondary: "Save Draft".
         *   Primary: "Mark Complete" (submits for review).
         *   Tertiary: "Flag / Redo".
-*   **Survey Modules (expandable cards):**
-    *   Trench Classification (11 trench types, depth/width, crossings, toggles, notes)
-    *   Risk Assessment (16 categories, severity/probability 4-level selectors, mitigation text)
-    *   Hazard Register (11 hazard types, 12 mitigation templates)
-    *   Field Evidence (photo/measure/note, description, weather conditions)
-    *   Survey Status & Notes (8-step status flow, field notes, flag)
 *   **APIs:**
     *   `GET /api/projects/{project_id}/features/{feature_id}/`
     *   `PATCH /api/features/{feature_id}/field-measurements/`
     *   `POST /api/features/{feature_id}/upload-photo/` (multipart)
     *   `POST /api/features/submit/`
-    *   Survey module endpoints under `/api/survey/`
 
 ---
 
@@ -194,7 +185,7 @@ AuthNavGraph
 *   **Purpose:** Visualize assigned features and current location.
 *   **Layout:**
     *   Full-screen MapLibre map.
-    *   Floating action buttons (bottom-right): My Location, Layer Toggle, Basemap Switcher.
+    *   Floating action buttons (bottom-right): My Location, Layer Toggle.
     *   Bottom sheet for selected feature details.
 *   **Layers:**
     *   Project boundary / layer polygons (GeoJSON from microservice or local GeoPackage).
@@ -203,7 +194,6 @@ AuthNavGraph
 *   **Interactions:**
     *   Tap pin → show bottom sheet with feature summary + "Open" button.
     *   Long-press → optional manual GPS override (stored as `field_measurements.gps`).
-*   **Dual View Modes:** Map view + List view with layer filter chips and feature cards.
 
 ---
 
@@ -305,9 +295,6 @@ AuthNavGraph
 | `SyncBanner` | Inline banner for offline/pending sync |
 | `EmptyState` | Illustrated empty state for empty lists |
 | `MapPin` | Custom MapLibre marker by status |
-| `StatCard` | Inline stat display with value and title |
-| `Toast` | Animated slide-in notification (4 types) |
-| `ModuleCard` | Expandable card for survey sub-modules |
 
 ---
 
@@ -375,84 +362,6 @@ data class SyncQueueItem(
     val retryCount: Int = 0,
     val createdAt: Instant
 )
-
-// ── Survey Module Entities ───────────────────────────────────────────────
-
-@Entity
-data class LocalGpsTrace(
-    @PrimaryKey val id: String,
-    val engineer: String,
-    val project: String?,
-    val startedAt: String,
-    val endedAt: String?,
-    val totalDistanceM: Double?,
-    val pointCount: Int,
-    val isDirty: Boolean = false
-)
-
-@Entity
-data class LocalTrenchSurvey(
-    @PrimaryKey val id: String,
-    val feature: String,
-    val trenchType: String,
-    val depthMm: Int?,
-    val widthMm: Int?,
-    val surfaceType: String?,
-    val roadCrossing: Boolean = false,
-    val footpathCrossing: Boolean = false,
-    val railCrossing: Boolean = false,
-    val riverCrossing: Boolean = false,
-    val privateProperty: Boolean = false,
-    val trafficSensitive: Boolean = false,
-    val permitRequired: Boolean = false,
-    val notes: String,
-    val isDirty: Boolean = false
-)
-
-@Entity
-data class LocalRiskAssessment(
-    @PrimaryKey val id: String,
-    val feature: String,
-    val category: String,
-    val severity: String,  // low, medium, high, critical
-    val probability: String, // rare, possible, likely, certain
-    val mitigation: String,
-    val notes: String,
-    val status: String, // open, closed, accepted, escalated
-    val isDirty: Boolean = false
-)
-
-@Entity
-data class LocalHazard(
-    @PrimaryKey val id: String,
-    val feature: String?,
-    val hazardType: String,
-    val mitigationTemplate: String?,
-    val notes: String,
-    val isActive: Boolean = true,
-    val isDirty: Boolean = false
-)
-
-@Entity
-data class LocalFieldEvidence(
-    @PrimaryKey val id: String,
-    val feature: String?,
-    val evidenceType: String, // photo, video, voice_note, measurement, document, sketch
-    val description: String,
-    val weather: String,
-    val latitude: Double?,
-    val longitude: Double?,
-    val isDirty: Boolean = false
-)
-
-@Entity
-data class LocalSurveyStatus(
-    @PrimaryKey val id: String,
-    val feature: String,
-    val status: String, // not_started, visited, verified, modified, needs_review, rejected, approved, completed
-    val notes: String,
-    val isDirty: Boolean = false
-)
 ```
 
 ### 7.2 Existing Backend Endpoints Used
@@ -467,13 +376,6 @@ data class LocalSurveyStatus(
 | Feature Save | PATCH | `/api/features/{id}/field-measurements/` | Save form data |
 | Photo Upload | POST | `/api/features/{id}/upload-photo/` | Upload photo |
 | Feature Submit | POST | `/api/features/submit/` | Submit for review |
-| Feature Approve | POST | `/api/features/approve/` | Approve features |
-| Feature Reject | POST | `/api/features/reject/` | Reject with reason |
-| Project Import | POST | `/api/projects/{id}/import/upload/` | Upload GeoPackage |
-| Project Import | POST | `/api/projects/{id}/import/discover/` | Discover layers |
-| Project Import | POST | `/api/projects/{id}/import/import/` | Execute import |
-| Project Import | POST | `/api/projects/{id}/import/status/` | Check import progress |
-| Project Complete | GET | `/api/projects/{id}/completion/` | Completion %
 
 ### 7.3 Proposed New `survey` Django App Endpoints
 
@@ -485,13 +387,6 @@ To reduce mobile chatter and enable offline-first sync, add a `survey` app:
 | POST | `/api/survey/sync/` | Batch upload offline changes |
 | POST | `/api/survey/features/{id}/submit/` | Submit a single feature for review |
 | POST | `/api/survey/features/bulk-submit/` | Submit multiple features at once |
-| GET/POST | `/api/survey/gps-traces/` | List/create GPS traces |
-| GET/POST | `/api/survey/trenches/` | List/create trench surveys |
-| GET/POST | `/api/survey/risks/` | List/create risk assessments |
-| GET/POST | `/api/survey/hazards/` | List/create hazards |
-| GET/POST | `/api/survey/evidence/` | List/create field evidence |
-| GET/POST | `/api/survey/status/` | Get/update survey status |
-| POST | `/api/survey/sync/process/` | Process pending sync items |
 
 This new app can delegate to existing models (`projects.Feature`, `assignments.AssignmentJob`) while keeping mobile-specific logic isolated.
 
@@ -527,9 +422,9 @@ This new app can delegate to existing models (`projects.Feature`, `assignments.A
 |-------|-------------|
 | 1. Foundation | Android project setup, theme, navigation, DI, base components |
 | 2. Auth & Sync | Login, JWT storage, Room entities, sync worker, dashboard |
-| 3. Survey Flow | Project/layer/feature lists, dynamic form, detail screen with 5 survey modules |
-| 4. Map & Camera | MapLibre integration, camera capture, photo gallery, basemap switching |
-| 5. Backend `survey` app | New Django app, bulk sync endpoints, survey module endpoints |
+| 3. Survey Flow | Project/layer/feature lists, dynamic form, detail screen |
+| 4. Map & Camera | MapLibre integration, camera capture, photo gallery |
+| 5. Backend `survey` app | New Django app, bulk sync endpoints, tests |
 | 6. Polish | Offline edge cases, tablet layout, QA |
 
 ---
@@ -540,53 +435,6 @@ This new app can delegate to existing models (`projects.Feature`, `assignments.A
 2. Is **Google Play Services** available on target devices, or must the app remain fully Play Services-free?
 3. Should the app support **biometric login** in addition to email/password?
 4. Which **Android minimum SDK** is required? (Recommended: API 26 / Android 8.0)
-
----
-
-## Appendix: Current React Native Feature Mapping
-
-The following table maps each existing React Native screen/structure to the corresponding Android design counterpart, based on the comprehensive codebase scan (`DOCS/report.md`).
-
-| RN Screen | Android Screen | Key Differences / Notes |
-|-----------|---------------|----------------------|
-| `login.tsx` | `LoginScreen` | RN has inline register toggle + demo mode button. Android should add biometric option. |
-| `home.tsx` | `HomeScreen` | RN has Quick Import card, 8 tabs. Android should add Recent Activity section & real NetInfo. |
-| `survey/index.tsx` (list) | `ProjectListScreen` + `LayerDetailScreen` | RN combines list + detail in one file (780+ lines). Android should split into proper MVVM. |
-| `survey/index.tsx` (detail) | `FeatureDetailScreen` | RN has 5 expandable survey modules (trench, risk, hazard, evidence, status). Android should use Compose `LazyColumn` with expandable cards. |
-| `feature/[featureId].tsx` | `FeatureDetailScreen` (alt) | RN duplicate of survey detail. Android should have a single canonical `FeatureDetailScreen`. |
-| `project/[projectId].tsx` | `ProjectDetailScreen` | RN shows layers with per-layer progress. Android should add per-feature status filtering. |
-| `project/import.tsx` | `ImportScreen` | RN has client-side ZIP parsing via `jszip`. Android should use native GeoPackage Android library. |
-| `map.tsx` | `MapScreen` | RN map is web-only (CDN MapLibre GL). Android must use MapLibre Native Android. RN has basemap switcher + layer panel + bottom sheet + dual list view. |
-| `camera.tsx` | `CameraScreen` | RN uses `expo-image-picker`. Android should use CameraX for smoother integration. |
-| `gps.tsx` | `GPSTraceScreen` | RN has Start/Pause/Stop, Haversine distance calc, trace log. Android should implement as `WorkManager` foreground service. |
-| `sync.tsx` | `SyncQueueScreen` | RN sync is simulated (mock progress). Android should use real `WorkManager` + `SyncWorker`. |
-| `offline.tsx` | `StorageScreen` | RN has manual online/offline toggle. Android should use `ConnectivityManager` listeners. |
-| `profile.tsx` | `ProfileScreen` + `SettingsScreen` | RN has theme toggle, sync controls, logout. Android should add offline maps settings. |
-| `gallery.tsx` | `PhotoGalleryScreen` | RN partially implemented. Android should implement fully with Room-backed photos. |
-| `export.tsx` | `ExportScreen` | RN partially implemented. Android should generate reports locally. |
-
-### RN Store → Android Repository Mapping
-
-| RN Zustand Store | Android Equivalent | Data |
-|-----------------|-------------------|------|
-| `auth.ts` | `AuthRepository` + `DataStore` | User, JWT tokens, session |
-| `project.ts` | `ProjectRepository` + Room `LocalProject` | Projects, assignments, GeoJSON layers |
-| `survey.ts` | `SurveyRepository` + multiple Room entities | Features, GPS traces, trenches, risks, hazards, evidence, statuses |
-| `map.ts` | `MapRepository` | Map state, layer visibility, selected feature |
-| `image.ts` | `PhotoRepository` + Room `LocalPhoto` | Photo queue, upload status |
-| `offline.ts` | `ConnectivityObserver` | Online/offline state, sync status |
-| `theme.ts` | `ThemeManager` (Material 3 Dynamic Colors) | Light/dark theme, mode |
-
-### Key Observations for Android Port
-
-1. **Room replaces Zustand** for all persistent data (7+ entities needed)
-2. **WorkManager replaces simulated sync** for reliable background uploads
-3. **MapLibre Native** must replace the web-only `MapLibreMap.tsx` component
-4. **CameraX** replaces `expo-image-picker` for camera capture
-5. **5 survey modules** (trench, risk, hazard, evidence, status) should be Compose `@Composable` functions with their own ViewModels
-6. **Dynamic form rendering** from `field_schema` JSON maps naturally to Compose's dynamic UI
-7. **8-tab navigation** in RN can be consolidated to 4 bottom tabs (Home, Survey, Map, Profile) with nested nav graphs for secondary screens
-8. **Demo mode** should be available in Android for testing without backend
 
 ---
 

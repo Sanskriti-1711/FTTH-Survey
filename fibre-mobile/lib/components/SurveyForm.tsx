@@ -64,6 +64,8 @@ interface SurveyFormProps {
   onDismiss: () => void;
   /** Called when the editable fields are saved */
   onSave: (featureId: string, layerId: string, properties: Record<string, unknown>) => void;
+  /** Called when the user confirms deleting this feature (not shown for new points) */
+  onDelete?: () => void;
 }
 
 // ── Constants (from FeatureSurveySections) ────────────────────────────────
@@ -316,10 +318,13 @@ function CollapsibleSection({
 
 // ── Main Component ────────────────────────────────────────────────────────
 
-export default function SurveyForm({ formData, onDismiss, onSave }: SurveyFormProps) {
+export default function SurveyForm({ formData, onDismiss, onSave, onDelete }: SurveyFormProps) {
   const colors = useThemeStore((s) => s.colors);
   const store = useSurveyStore();
   const slideAnim = useRef(new Animated.Value(0)).current;
+
+  // Delete confirm state — first tap arms, second tap deletes (prevents accidents)
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   // Active section state — which collapsible section is open
   const [activeSection, setActiveSection] = useState<string | null>('fields');
@@ -380,6 +385,7 @@ export default function SurveyForm({ formData, onDismiss, onSave }: SurveyFormPr
         }
       }
       setValues(initial);
+      setConfirmDelete(false);
       setActiveSection('fields');
 
       // Pre-fill trench type if available
@@ -1026,6 +1032,28 @@ export default function SurveyForm({ formData, onDismiss, onSave }: SurveyFormPr
 
       {/* Footer Actions */}
       <View style={[styles.footer, { borderTopColor: colors.outlineLight }]}>
+        {!formData.isNewPoint && onDelete && (
+          <TouchableOpacity
+            style={[styles.deleteBtn, {
+              borderColor: confirmDelete ? '#EF4444' : '#EF4444' + '55',
+              backgroundColor: confirmDelete ? '#EF4444' + '18' : 'transparent',
+            }]}
+            onPress={() => {
+              if (confirmDelete) {
+                setConfirmDelete(false);
+                onDelete();
+              } else {
+                setConfirmDelete(true);
+                setTimeout(() => setConfirmDelete(false), 4000);
+              }
+            }}
+            activeOpacity={0.7}
+          >
+            <Text style={[styles.deleteBtnText, { color: confirmDelete ? '#EF4444' : colors.textSecondary }]}>
+              {confirmDelete ? 'Tap again to confirm' : 'Delete'}
+            </Text>
+          </TouchableOpacity>
+        )}
         <TouchableOpacity
           style={[styles.discardBtn, { borderColor: colors.outline }]}
           onPress={onDismiss}
@@ -1107,9 +1135,22 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: Spacing.sm,
     paddingHorizontal: Spacing.md,
     paddingVertical: Spacing.sm,
     borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  deleteBtn: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+  },
+  deleteBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
   },
   discardBtn: {
     flex: 1,

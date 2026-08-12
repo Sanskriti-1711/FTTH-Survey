@@ -7,7 +7,7 @@
 //   Cancel — discards changes and exits polygon editing
 //   Undo — reverts the last vertex drag
 
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -38,6 +38,8 @@ interface PolygonToolbarProps {
   onCancel?: () => void;
   /** Whether there are unsaved geometry changes */
   hasUnsavedChanges?: boolean;
+  /** Called when user confirms deleting the polygon */
+  onDelete?: () => void;
 }
 
 // ── Action definitions ─────────────────────────────────────────────────────
@@ -54,6 +56,7 @@ interface ActionDef {
 const ACTIONS: ActionDef[] = [
   { id: 'undo', label: 'Undo', icon: '↩️', enabled: true },
   { id: 'cancel', label: 'Cancel', icon: '✕', danger: true, enabled: true },
+  { id: 'delete', label: 'Delete', icon: '🗑️', danger: true, enabled: true },
   { id: 'save', label: 'Save', icon: '💾', accent: true, enabled: true },
 ];
 
@@ -67,9 +70,12 @@ export default function PolygonToolbar({
   onSave,
   onCancel,
   hasUnsavedChanges = false,
+  onDelete,
 }: PolygonToolbarProps) {
   const colors = useThemeStore((s) => s.colors);
   const slideAnim = useRef(new Animated.Value(0)).current;
+  // Delete confirm state — first tap arms, second tap deletes
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const isVisible = selectedFeature !== null && selectedFeature.geometryType === 'Polygon';
 
@@ -134,14 +140,16 @@ export default function PolygonToolbar({
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.actionsContainer}
       >
-        {ACTIONS.map((action) => {
+        {ACTIONS.filter((a) => !(a.id === 'delete' && !onDelete)).map((action) => {
           const isUndo = action.id === 'undo';
           const isSave = action.id === 'save';
           const isCancel = action.id === 'cancel';
+          const isDelete = action.id === 'delete';
           const showBadge = isUndo && undoCount > 0;
 
           const isEnabled = action.enabled === true;
           const isSaveActive = isSave && hasUnsavedChanges;
+          const isDeleteArmed = isDelete && confirmDelete;
 
           let bgColor = colors.background;
           let borderColor = colors.outlineLight;
@@ -157,6 +165,10 @@ export default function PolygonToolbar({
               textColor = colors.primary;
             } else if (isSave && !hasUnsavedChanges) {
               opacity = 0.5;
+            } else if (isDelete) {
+              bgColor = isDeleteArmed ? '#EF4444' + '25' : '#EF4444' + '10';
+              borderColor = isDeleteArmed ? '#EF4444' : '#EF4444' + '55';
+              textColor = isDeleteArmed ? '#EF4444' : '#EF4444' + 'CC';
             }
           }
 
@@ -177,6 +189,16 @@ export default function PolygonToolbar({
                   if (isSave && onSave) onSave();
                   else if (isCancel && onCancel) onCancel();
                   else if (isUndo && onUndo) onUndo();
+                  else if (isDelete) {
+                    if (!onDelete) return;
+                    if (confirmDelete) {
+                      setConfirmDelete(false);
+                      onDelete();
+                    } else {
+                      setConfirmDelete(true);
+                      setTimeout(() => setConfirmDelete(false), 4000);
+                    }
+                  }
                 }}
               >
                 <Text style={styles.actionIcon}>{action.icon}</Text>
@@ -184,7 +206,7 @@ export default function PolygonToolbar({
                   style={[styles.actionLabel, { color: textColor }]}
                   numberOfLines={1}
                 >
-                  {action.label}
+                  {isDeleteArmed ? 'Confirm?' : action.label}
                 </Text>
               </TouchableOpacity>
 

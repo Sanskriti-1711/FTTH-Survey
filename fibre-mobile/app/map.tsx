@@ -291,6 +291,8 @@ export default function MapScreen() {
     setDisplayMode,
     focusFeatureId,
     setFocusFeature,
+    isolateFeatureId,
+    setIsolateFeature,
     fetchSurveyFeatures,
     clearSurveyFeatures,
     upsertSurveyFeature,
@@ -351,6 +353,16 @@ export default function MapScreen() {
   // 'hld' = blue only (original HLD), 'survey' = orange only (engineer edits),
   // 'overlay' = both HLD + Survey visible simultaneously
   // displayMode is managed by useSurveyFeaturesStore (declared above)
+
+  // ── Isolation hard-lock: entering review isolation disables all editing ──
+  // The planner sees a read-only view — no drag mode, no geometry tools, so
+  // the dimmed original HLD (and the survey feature) can never be modified.
+  useEffect(() => {
+    if (isolateFeatureId) {
+      setDragMode(false);
+      setGeoMode('select');
+    }
+  }, [isolateFeatureId]);
 
   // ── Geometry Editor State (simplified: select, add_point, delete_feature only) ──
   // ── Geometry Editor State (simplified: select, add_point only) ──
@@ -915,6 +927,82 @@ export default function MapScreen() {
   }, [activeLayerColors, displayMode]);
 
   const mapLayerData = useMemo(() => {
+    // ── Isolated review mode: show ONLY the target survey feature ──────
+    // plus its original HLD counterpart (dimmed blue). Everything else is
+    // hidden so the reviewer sees exactly one change at a time.
+    if (isolateFeatureId) {
+      // Find the target survey feature across all layers
+      let targetSf: (typeof surveyFeatures)[string][number] | null = null;
+      let targetLayerId = '';
+      for (const [layerId, sfList] of Object.entries(surveyFeatures)) {
+        const hit = sfList.find((sf) => String(sf.id) === String(isolateFeatureId));
+        if (hit) {
+          targetSf = hit;
+          targetLayerId = layerId;
+          break;
+        }
+      }
+      if (!targetSf) return [];
+
+      const isolated: any[] = [];
+
+      // Original HLD feature — dimmed blue, immutable (never draggable)
+      const hldId = targetSf.original_hld_feature || targetSf.hld_feature_id;
+      if (hldId) {
+        for (const [layerId, feats] of Object.entries(activeGeojson)) {
+          const orig = feats.find((f) => {
+            const pid = (f.properties as Record<string, unknown> | undefined)?.id;
+            const pfeat = (f.properties as Record<string, unknown> | undefined)?.feature_id;
+            return String(pid ?? pfeat ?? '') === String(hldId);
+          });
+          if (orig) {
+            isolated.push({
+              id: layerId,
+              name: `Original HLD: ${activeLayerNames[layerId] ?? layerId.toUpperCase()}`,
+              features: [{
+                ...orig,
+                properties: {
+                  ...(orig.properties as Record<string, unknown>),
+                  _id: String(hldId),
+                  _layer_id: layerId,
+                  _is_hld_original: true,
+                },
+              }],
+              visible: true,
+              color: 'rgba(37, 99, 235, 0.35)', // dimmed blue
+              geometryType: (orig.geometry?.type as any) ?? 'Point',
+            });
+            break;
+          }
+        }
+      }
+
+      // Survey feature — highlighted orange
+      if (targetSf.survey_status !== 'removed') {
+        isolated.push({
+          id: `survey-${targetLayerId}`,
+          name: `Survey: ${activeLayerNames[targetLayerId] ?? targetLayerId.toUpperCase()}`,
+          features: [{
+            type: 'Feature' as const,
+            geometry: targetSf.survey_geometry as { type: string; coordinates: unknown[] },
+            properties: {
+              ...targetSf.survey_attributes,
+              id: targetSf.id,
+              _id: targetSf.id,
+              _layer_id: `survey-${targetLayerId}`,
+              _is_survey: true,
+              _hld_feature_id: targetSf.original_hld_feature,
+              _survey_status: targetSf.survey_status,
+            },
+          }],
+          visible: true,
+          color: SURVEY_COLOR, // Orange
+          geometryType: ((targetSf.survey_geometry as any)?.type as any) ?? 'Point',
+        });
+      }
+      return isolated;
+    }
+
     // ── HLD layers (blue in overlay, normal otherwise) ──
     const hldLayers = displayMode === 'survey'
       ? [] // In survey-only mode, hide HLD layers
@@ -1014,7 +1102,7 @@ export default function MapScreen() {
     }
 
     return [...hldLayers, ...previewLayers, ...surveyLayers];
-  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, tempLineCoords, selectedLineFeature, selectedPolygonFeature, polygonEditCoords]);
+  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, tempLineCoords, selectedLineFeature, selectedPolygonFeature, polygonEditCoords, isolateFeatureId]);
 
   // Build visible layers from the active project's layers
   const visibleLayers = useMemo(() => {
@@ -2552,6 +2640,16 @@ export default function MapScreen() {
     setPolygonEditOrigAttrs(null);
   }, []);
 
+  // ── Delete the polygon feature currently selected ─────────────────────
+  // Routes through the shared handleDeleteFeature then clears all polygon
+  // editing state so the toolbar disappears.
+  const handlePolygonDelete = useCallback(() => {
+    if (!selectedPolygonFeature) return;
+    console.log(`[PolygonDelete] Deleting polygon ${selectedPolygonFeature.id.slice(-8)}`);
+    handleDeleteFeature(selectedPolygonFeature.id, selectedPolygonFeature.layerId);
+    handlePolygonCancel();
+  }, [selectedPolygonFeature, handleDeleteFeature, handlePolygonCancel]);
+
   // ── Handle empty map area click (for add point / deselect) ───────────
   // When adding a point, we create a SurveyFeature (not an HLD feature).
   // original_hld_feature = null indicates this is an engineer-created point.
@@ -2701,6 +2799,19 @@ export default function MapScreen() {
   // For NEW points (engineer-created, no HLD parent) dismissing deletes the
   // SurveyFeature (discard behavior). For EXISTING features we only close the
   // form — any pre-existing survey data must be preserved.
+  // ── Delete the point feature currently open in the SurveyForm ───────────
+  // Routes through the shared handleDeleteFeature (logical delete / HLD stays
+  // intact, undo recorded) then closes the form.
+  const handleSurveyFormDelete = useCallback(() => {
+    if (!surveyForm) return;
+    const { featureId, layerId } = surveyForm;
+    console.log(`[SurveyForm] Deleting point ${featureId.slice(-8)} on ${layerId}`);
+    handleDeleteFeature(featureId, layerId);
+    setSurveyForm(null);
+    setSelectedMapFeatureId(null);
+    setPopupScreenCoords(null);
+  }, [surveyForm, handleDeleteFeature]);
+
   const handleSurveyFormDismiss = useCallback(() => {
     if (!surveyForm) return;
     const { featureId, layerId, isNewPoint } = surveyForm;
@@ -2845,6 +2956,25 @@ export default function MapScreen() {
       {/* Main Content */}
       {viewMode === 'map' ? (
         <View style={styles.mapContainer}>
+          {/* Isolated Review Banner — single-feature mode from the approval queue */}
+          {isolateFeatureId && (
+            <View style={styles.isolateBanner}>
+              <Text style={styles.isolateBannerText} numberOfLines={1}>
+                🔍 Reviewing 1 change — original HLD dimmed
+              </Text>
+              <TouchableOpacity
+                onPress={() => {
+                  setIsolateFeature(null);
+                  setFocusFeature(null);
+                  setSelectedMapFeatureId(null);
+                }}
+                style={styles.isolateExitBtn}
+                hitSlop={8}
+              >
+                <Text style={styles.isolateExitText}>✕ Exit</Text>
+              </TouchableOpacity>
+            </View>
+          )}
           {/* Drag Mode Indicator */}
           {dragMode && (
             <View style={[styles.dragIndicator, { backgroundColor: colors.primary }]}>
@@ -3050,6 +3180,7 @@ export default function MapScreen() {
               onUndo={handleUndo}
               onSave={handlePolygonSave}
               onCancel={handlePolygonCancel}
+              onDelete={handlePolygonDelete}
               hasUnsavedChanges={polygonEditCoords !== null && polygonEditOriginal !== null && JSON.stringify(polygonEditCoords) !== JSON.stringify(polygonEditOriginal)}
             />
           )}
@@ -3119,6 +3250,7 @@ export default function MapScreen() {
               formData={surveyForm}
               onDismiss={handleSurveyFormDismiss}
               onSave={handleSurveyFormSave}
+              onDelete={handleSurveyFormDelete}
             />
           )}
         </View>
@@ -3236,7 +3368,8 @@ export default function MapScreen() {
               </View>
             )}
           </TouchableOpacity>
-          {/* Add Point FAB — prominent, toggles add_point mode */}
+          {/* Add Point FAB — prominent, toggles add_point mode (hidden while isolating) */}
+          {!isolateFeatureId && (
           <TouchableOpacity
             style={[styles.fab, {
               backgroundColor: geoMode === 'add_point' ? '#EC4899' : colors.surface,
@@ -3258,6 +3391,7 @@ export default function MapScreen() {
           >
             <Text style={{ fontSize: 20, color: geoMode === 'add_point' ? '#FFFFFF' : undefined }}>📍</Text>
           </TouchableOpacity>
+          )}
           {/* Survey Changes Panel Toggle — hidden when panel is open to avoid overlapping the close button */}
           {!surveyPanelVisible && (
           <TouchableOpacity
@@ -3318,6 +3452,7 @@ export default function MapScreen() {
           >
             <Text style={{ fontSize: 18 }}>{BASEMAPS[activeBasemap]?.icon ?? '🗺️'}</Text>
           </TouchableOpacity>
+          {!isolateFeatureId && (
           <TouchableOpacity
             style={[styles.fab, { backgroundColor: dragMode ? colors.primary : colors.surface }]}
             onPress={() => setDragMode(!dragMode)}
@@ -3325,6 +3460,7 @@ export default function MapScreen() {
           >
             <Move size={20} stroke={dragMode ? colors.onPrimary : colors.textSecondary} />
           </TouchableOpacity>
+          )}
           <TouchableOpacity
             style={[styles.fab, { backgroundColor: colors.surface }]}
             onPress={() => {
@@ -3621,6 +3757,43 @@ const styles = StyleSheet.create({
     right: Spacing.lg,
     bottom: Spacing.xxl * 3,
     gap: Spacing.md,
+  },
+  isolateBanner: {
+    position: 'absolute',
+    top: 12,
+    left: 12,
+    right: 12,
+    zIndex: 30,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    backgroundColor: 'rgba(17, 24, 39, 0.92)',
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  isolateBannerText: {
+    color: '#F3F4F6',
+    fontSize: 13,
+    fontWeight: '600',
+    flex: 1,
+  },
+  isolateExitBtn: {
+    backgroundColor: '#374151',
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+  },
+  isolateExitText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
   },
   fab: {
     width: 48,

@@ -34,6 +34,15 @@ interface SurveyFeaturesState {
   /** Request the map to fly to + highlight a specific survey feature. */
   setFocusFeature: (featureId: string | null) => void;
 
+  /**
+   * Review isolation: when set, the map renders ONLY this survey feature
+   * (orange, highlighted) plus its original HLD counterpart (dimmed blue,
+   * immutable). Used by the planner's approval queue "View on Map".
+   */
+  isolateFeatureId: string | null;
+  /** Enter/exit single-feature review isolation. */
+  setIsolateFeature: (featureId: string | null) => void;
+
   /** Load all survey features for a project from the backend */
   fetchSurveyFeatures: (projectId: string) => Promise<void>;
 
@@ -80,6 +89,7 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
   error: null,
   displayMode: 'hld', // Default: show HLD only (blue)
   focusFeatureId: null,
+  isolateFeatureId: null,
 
   fetchSurveyFeatures: async (projectId: string) => {
     if (projectId.startsWith('imported-')) {
@@ -260,7 +270,9 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
 
   setFocusFeature: (featureId) => set({ focusFeatureId: featureId }),
 
-  clearSurveyFeatures: () => set({ surveyFeatures: {}, isLoaded: false, error: null }),
+  setIsolateFeature: (featureId) => set({ isolateFeatureId: featureId }),
+
+  clearSurveyFeatures: () => set({ surveyFeatures: {}, isLoaded: false, error: null, isolateFeatureId: null }),
 
   surveyFeaturesToGeoJSON: (layerId: string): GeoJSONFeature[] => {
     const features = get().surveyFeatures[layerId] ?? [];

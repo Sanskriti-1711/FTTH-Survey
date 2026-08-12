@@ -77,10 +77,12 @@ export default function DeepLinkScreen() {
         useProjectStore.getState().setActiveProject(project);
 
         // 3b) Optional ?feature= focus: open the map in Overlay mode and
-        //     highlight the single survey feature the planner clicked on.
+        //     isolate to the single survey feature the planner clicked on
+        //     (the map renders only it + its dimmed original HLD).
         if (featureId) {
           useSurveyFeaturesStore.setState({ displayMode: 'overlay' });
           useSurveyFeaturesStore.getState().setFocusFeature(featureId);
+          useSurveyFeaturesStore.getState().setIsolateFeature(featureId);
         }
 
         // 4) Mark the auth session as restored so the Stack settles.
