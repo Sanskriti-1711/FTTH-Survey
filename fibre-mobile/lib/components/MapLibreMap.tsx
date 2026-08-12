@@ -1554,11 +1554,13 @@ function NativeMapView({
   );
 }
 
-// ── Web Implementation (CDN-loaded) ───────────────────────────────────────
-
+// ── Web Implementation (self-hosted) ───────────────────────────────────────
+// MapLibre GL is served locally from /public/vendor/maplibre/ (same 4.7.1
+// UMD build the web admin frontend vendors) instead of a CDN, because the
+// unpkg CDN was unreliable/blocked in some environments.
 const MAPLIBRE_VERSION = '4.7.1';
-const CSS_URL = `https://unpkg.com/maplibre-gl@${MAPLIBRE_VERSION}/dist/maplibre-gl.css`;
-const JS_URL = `https://unpkg.com/maplibre-gl@${MAPLIBRE_VERSION}/dist/maplibre-gl.js`;
+const CSS_URL = `/vendor/maplibre/maplibre-gl.css`;
+const JS_URL = `/vendor/maplibre/maplibre-gl.js`;
 
 let scriptLoadPromise: Promise<void> | null = null;
 
@@ -1590,7 +1592,7 @@ function loadMapLibreJS(): Promise<void> {
     script.src = JS_URL;
     script.onload = () => setTimeout(resolve, 100);
     script.onerror = () => {
-      console.warn('Failed to load maplibre-gl from CDN');
+      console.warn('Failed to load maplibre-gl from local /vendor/maplibre');
       resolve();
     };
     document.body.appendChild(script);
@@ -1898,7 +1900,7 @@ function WebMapView({
 
         const ml = (window as any).maplibregl;
         if (!ml) {
-          setErrorInfo({ type: 'module', message: 'maplibre-gl failed to load from CDN.' });
+          setErrorInfo({ type: 'module', message: 'maplibre-gl failed to load from local /vendor/maplibre.' });
           setStatus('error');
           return;
         }

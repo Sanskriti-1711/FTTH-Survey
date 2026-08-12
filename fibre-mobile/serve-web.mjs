@@ -17,8 +17,9 @@ import { extname, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const PORT = parseInt(process.env.PORT ?? '8081', 10);
-const ROOT = join(__dirname, 'build_output');
+const BUILD_DIR = process.argv[2] || 'build_output';
+const PORT = parseInt(process.argv[3] || process.env.PORT || '8081', 10);
+const ROOT = join(__dirname, BUILD_DIR);
 
 const MIME_TYPES = {
   '.html': 'text/html',
