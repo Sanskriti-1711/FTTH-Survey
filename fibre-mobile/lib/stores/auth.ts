@@ -8,6 +8,8 @@ import { saveTokens, clearTokens, loadStoredToken, refreshAccessToken } from '..
 interface AuthState {
   user: User | null;
   token: string | null;
+  /** When true, the app uses local demo data instead of the backend (dev only). */
+  demoMode: boolean;
   isLoading: boolean;
   isRestoring: boolean;
   error: string | null;
@@ -22,6 +24,7 @@ interface AuthState {
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   token: null,
+  demoMode: false,
   isLoading: false,
   isRestoring: true,
   error: null,

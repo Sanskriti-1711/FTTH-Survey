@@ -109,6 +109,15 @@ export default function HomeScreen() {
   const activeFilterLabel =
     filterChips.find((c) => c.key === statusFilter)?.label ?? 'matching';
 
+  // Auto-reset the filter to 'all' when the filtered list becomes empty.
+  // This handles the case where an action (accept, submit, review) removes
+  // the last project matching the current filter.
+  useEffect(() => {
+    if (statusFilter !== 'all' && filteredProjects.length === 0) {
+      setStatusFilter('all');
+    }
+  }, [statusFilter, filteredProjects.length]);
+
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]}>
       <ScrollView

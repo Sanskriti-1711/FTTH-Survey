@@ -15,6 +15,12 @@ import type {
 import * as projectsApi from '../api/projects';
 import * as featuresApi from '../api/features';
 import * as surveyApi from '../api/survey';
+import { useAuthStore } from './auth';
+import {
+  DEMO_FEATURES,
+  DEMO_LAYERS,
+  getDemoFeatureDetail,
+} from './demo-data';
 
 // ── Survey Store ──────────────────────────────────────────────────────────
 
@@ -44,12 +50,10 @@ interface SurveyState {
   evidence: FieldEvidenceData[];
   changes: SurveyChangeData[];
   statuses: SurveyStatusData[];
-  syncQueue: BackendSyncQueueItem[];      /** Track point move history: compositeKey → { hldCoords (original HLD, never changes), surveyCoords (current position), layerId } */
+  syncQueue: BackendSyncQueueItem[];
+  /** Track point move history: compositeKey -> { hldCoords (original HLD, never changes), surveyCoords (current position), layerId } */
   surveyPointGeometries: Record<string, { hldCoords: [number, number]; surveyCoords: [number, number]; layerId: string }>;
-  /** Record a point move: updates the GeoJSON point position AND creates a SurveyChange audit trail.
-   * @param dbFeatureUuid - The REAL database Feature UUID (sent to backend as feature ForeignKey)
-   * @param compositeKey - `${layerId}:${featureId}` for local state tracking
-   */
+  /** Record a point move: updates the GeoJSON point position AND creates a SurveyChange audit trail. */
   recordPointMove: (
     dbFeatureUuid: string,
     compositeKey: string,
@@ -111,7 +115,38 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
   syncQueue: [],
   surveyPointGeometries: {},
 
+  // ── Point Move Recording ─────────────────────────────────────────────
+  /** Record a point drag as a SurveyChange - NEVER mutates HLD data. */
+  recordPointMove: (
+    dbFeatureUuid: string,
+    compositeKey: string,
+    layerId: string,
+    oldLng: number,
+    oldLat: number,
+    newLng: number,
+    newLat: number
+  ) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) return;
+    const isFirstMove = !get().surveyPointGeometries[compositeKey];
+    set((st) => ({
+      surveyPointGeometries: {
+        ...st.surveyPointGeometries,
+        [compositeKey]: {
+          hldCoords: isFirstMove ? [oldLng, oldLat] : (st.surveyPointGeometries[compositeKey]?.hldCoords ?? [oldLng, oldLat]),
+          surveyCoords: [newLng, newLat],
+          layerId,
+        },
+      },
+    }));
+  },
+
   fetchLayers: async (projectId) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) {
+      set({ layers: DEMO_LAYERS, isLoading: false });
+      return;
+    }
     set({ isLoading: true, error: null });
     try {
       const data = await projectsApi.getProjectLayers(projectId);
@@ -123,6 +158,15 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
   },
 
   fetchLayerFeatures: async (projectId, layerId) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) {
+      const features = DEMO_FEATURES[layerId] ?? [];
+      set({
+        features: { ...get().features, [layerId]: features },
+        isLoading: false,
+      });
+      return;
+    }
     set({ isLoading: true, error: null });
     try {
       const data = await projectsApi.getLayerDetail(projectId, layerId);
@@ -137,6 +181,12 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
   },
 
   fetchFeatureDetail: async (projectId, featureId) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode && featureId.startsWith('demo-')) {
+      const detail = getDemoFeatureDetail(featureId);
+      set({ selectedFeature: detail.feature, isLoading: false });
+      return;
+    }
     set({ isLoading: true, error: null });
     try {
       const data = await projectsApi.getFeatureDetail(projectId, featureId);
@@ -148,6 +198,21 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
   },
 
   updateFieldMeasurements: async (featureId, measurements, notes) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) {
+      // Update locally
+      const current = get().selectedFeature;
+      if (current?.id === featureId) {
+        set({
+          selectedFeature: {
+            ...current,
+            field_measurements: measurements,
+            comparison_notes: notes ?? '',
+          },
+        });
+      }
+      return;
+    }
     try {
       await featuresApi.updateFieldMeasurements(
         featureId,
@@ -172,6 +237,11 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
   },
 
   submitFeatures: async (featureIds, engineerId) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) {
+      set({ isLoading: false });
+      return;
+    }
     set({ isLoading: true, error: null });
     try {
       await featuresApi.submitFeatures(featureIds, engineerId);
@@ -185,6 +255,8 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
 
   // ── GPS Traces ────────────────────────────────────────────────────────
   fetchGPSTraces: async () => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) { set({ gpsTraces: [], isLoading: false }); return; }
     set({ isLoading: true, error: null });
     try {
       const data = await surveyApi.listGPSTraces();
@@ -195,6 +267,12 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
   },
 
   createGPSTrace: async (data) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) {
+      const mock: GPSTrace = { id: `demo-trace-${Date.now()}`, engineer: 'demo-user', started_at: new Date().toISOString(), point_count: 0, points: [] };
+      set((s) => ({ gpsTraces: [mock, ...s.gpsTraces] }));
+      return mock;
+    }
     try {
       const trace = await surveyApi.createGPSTrace(data);
       set((s) => ({ gpsTraces: [trace, ...s.gpsTraces] }));
@@ -205,16 +283,25 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
   },
 
   batchCreateGPSPoints: async (traceId, points) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) return;
     await surveyApi.batchCreateGPSPoints(traceId, points);
   },
 
   endGPSTrace: async (traceId, distanceM) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) {
+      set((s) => ({ gpsTraces: s.gpsTraces.map((t) => t.id === traceId ? { ...t, ended_at: new Date().toISOString(), total_distance_m: distanceM } : t) }));
+      return;
+    }
     await surveyApi.updateGPSTrace(traceId, { ended_at: new Date().toISOString(), total_distance_m: distanceM });
     set((s) => ({ gpsTraces: s.gpsTraces.map((t) => t.id === traceId ? { ...t, ended_at: new Date().toISOString(), total_distance_m: distanceM } : t) }));
   },
 
   // ── Trench Surveys ────────────────────────────────────────────────────
   fetchTrenchSurveys: async (featureId) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) { set({ trenchSurveys: [], isLoading: false }); return; }
     set({ isLoading: true, error: null });
     try {
       const data = await surveyApi.listTrenchSurveys(featureId ? { feature: featureId } : undefined);
@@ -225,6 +312,12 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
   },
 
   saveTrenchSurvey: async (data) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) {
+      const mock: TrenchSurveyData = { id: `demo-trench-${Date.now()}`, engineer: 'demo-user', feature: data.feature, trench_type: data.trench_type, road_crossing: false, footpath_crossing: false, rail_crossing: false, river_crossing: false, private_property: false, traffic_sensitive: false, permit_required: false, notes: '', created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+      set((s) => ({ trenchSurveys: [mock, ...s.trenchSurveys] }));
+      return mock;
+    }
     const result = await surveyApi.createTrenchSurvey(data);
     set((s) => ({ trenchSurveys: [result, ...s.trenchSurveys] }));
     return result;
@@ -232,6 +325,8 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
 
   // ── Assets ─────────────────────────────────────────────────────────────
   fetchAssets: async () => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) { set({ assets: [], isLoading: false }); return; }
     set({ isLoading: true, error: null });
     try {
       const data = await surveyApi.listExistingAssets();
@@ -242,12 +337,20 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
   },
 
   saveAsset: async (data) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) {
+      const mock: ExistingAssetData = { id: `demo-asset-${Date.now()}`, engineer: 'demo-user', asset_type: data.asset_type, condition: data.condition, latitude: data.latitude, longitude: data.longitude, description: data.description ?? '', created_at: new Date().toISOString() };
+      set((s) => ({ assets: [mock, ...s.assets] }));
+      return;
+    }
     const result = await surveyApi.createExistingAsset(data);
     set((s) => ({ assets: [result, ...s.assets] }));
   },
 
   // ── Risks ──────────────────────────────────────────────────────────────
   fetchRisks: async (featureId) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) { set({ riskAssessments: [], isLoading: false }); return; }
     set({ isLoading: true, error: null });
     try {
       const data = await surveyApi.listRiskAssessments(featureId ? { feature: featureId } : undefined);
@@ -258,18 +361,31 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
   },
 
   saveRisk: async (data) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) {
+      const mock: RiskAssessmentData = { id: `demo-risk-${Date.now()}`, engineer: 'demo-user', category: data.category, severity: data.severity ?? 'medium', probability: data.probability ?? 'possible', mitigation: '', notes: '', status: 'open', created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+      set((s) => ({ riskAssessments: [mock, ...s.riskAssessments] }));
+      return mock;
+    }
     const result = await surveyApi.createRiskAssessment(data);
     set((s) => ({ riskAssessments: [result, ...s.riskAssessments] }));
     return result;
   },
 
   updateRisk: async (riskId, data) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) {
+      set((s) => ({ riskAssessments: s.riskAssessments.map((r) => r.id === riskId ? { ...r, ...data } : r) }));
+      return;
+    }
     const result = await surveyApi.updateRiskAssessment(riskId, data);
     set((s) => ({ riskAssessments: s.riskAssessments.map((r) => (r.id === riskId ? result : r)) }));
   },
 
   // ── Hazards ────────────────────────────────────────────────────────────
   fetchHazards: async () => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) { set({ hazards: [], isLoading: false }); return; }
     set({ isLoading: true, error: null });
     try {
       const data = await surveyApi.listHazards();
@@ -280,12 +396,20 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
   },
 
   saveHazard: async (data) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) {
+      const mock: HazardData = { id: `demo-hazard-${Date.now()}`, engineer: 'demo-user', hazard_type: data.hazard_type, mitigation_template: data.mitigation_template ?? null, notes: data.notes ?? '', is_active: true, created_at: new Date().toISOString() };
+      set((s) => ({ hazards: [mock, ...s.hazards] }));
+      return;
+    }
     const result = await surveyApi.createHazard(data);
     set((s) => ({ hazards: [result, ...s.hazards] }));
   },
 
   // ── Evidence ───────────────────────────────────────────────────────────
   fetchEvidence: async () => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) { set({ evidence: [], isLoading: false }); return; }
     set({ isLoading: true, error: null });
     try {
       const data = await surveyApi.listFieldEvidence();
@@ -296,72 +420,20 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
   },
 
   saveEvidence: async (data) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) {
+      const mock: FieldEvidenceData = { id: `demo-evidence-${Date.now()}`, engineer: 'demo-user', evidence_type: data.evidence_type ?? 'photo', description: data.description ?? '', weather: data.weather ?? '', captured_at: new Date().toISOString(), created_at: new Date().toISOString() };
+      set((s) => ({ evidence: [mock, ...s.evidence] }));
+      return;
+    }
     const result = await surveyApi.createFieldEvidence(data);
     set((s) => ({ evidence: [result, ...s.evidence] }));
   },
 
-  // ── Point Move Recording (Sprint 6) ──────────────────────────────────
-  /**
-   * Record a point drag as a SurveyChange — NEVER mutates HLD data.
-   * Stores old→new coordinates for rendering a synthetic "Survey Points" layer.
-   *
-   * @param dbFeatureUuid — The REAL database Feature UUID (sent as `feature` ForeignKey)
-   * @param compositeKey — `${layerId}:${dbFeatureUuid}` for local state tracking
-   */
-  recordPointMove: (
-    dbFeatureUuid: string,
-    compositeKey: string,
-    layerId: string,
-    oldLng: number,
-    oldLat: number,
-    newLng: number,
-    newLat: number
-  ) => {
-    // ── Track point move history: HLD original (first move) + current survey position ──
-    // IMPORTANT: Check isFirstMove BEFORE set() since zustand sets are synchronous
-    const isFirstMove = !get().surveyPointGeometries[compositeKey];
-
-    set((s) => ({
-      surveyPointGeometries: {
-        ...s.surveyPointGeometries,
-        [compositeKey]: {
-          // HLD original: set on first move, preserved forever
-          hldCoords: isFirstMove ? [oldLng, oldLat] : (s.surveyPointGeometries[compositeKey]?.hldCoords ?? [oldLng, oldLat]),
-          // Current surveyed position: always updated to latest
-          surveyCoords: [newLng, newLat],
-          layerId,
-        },
-      },
-    }));
-
-    // The oldLng/oldLat represent the "previous position":
-    // - First move: HLD original position
-    // - Subsequent moves: previous survey position (GeoJSON was already updated)
-    const reason = isFirstMove
-      ? `Moved from HLD planned position to surveyed location`
-      : `Re-adjusted survey position`;
-
-    // Create a SurveyChange record (local-first, sync later) — save to backend (fire-and-forget)
-    const saveToBackend = async () => {
-      try {
-        await get().saveChange({
-          feature: dbFeatureUuid,  // REAL DB UUID — backend ForeignKey validation passes
-          field_name: 'geometry',
-          old_value: [oldLng, oldLat],
-          new_value: [newLng, newLat],
-          reason,
-          latitude: newLat,
-          longitude: newLng,
-        });
-      } catch (err) {
-        console.warn('[Survey] Failed to sync point move to backend:', err);
-      }
-    };
-    setTimeout(saveToBackend, 0);
-  },
-
   // ── Changes ────────────────────────────────────────────────────────────
   fetchChanges: async (featureId) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) { set({ changes: [], isLoading: false }); return; }
     set({ isLoading: true, error: null });
     try {
       const data = await surveyApi.listSurveyChanges(featureId ? { feature: featureId } : undefined);
@@ -372,12 +444,20 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
   },
 
   saveChange: async (data) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) {
+      const mock: SurveyChangeData = { id: `demo-change-${Date.now()}`, engineer: 'demo-user', feature: data.feature, field_name: data.field_name, reason: data.reason ?? '', created_at: new Date().toISOString() };
+      set((s) => ({ changes: [mock, ...s.changes] }));
+      return;
+    }
     const result = await surveyApi.createSurveyChange(data);
     set((s) => ({ changes: [result, ...s.changes] }));
   },
 
   // ── Statuses ───────────────────────────────────────────────────────────
   fetchStatuses: async (featureId) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) { set({ statuses: [], isLoading: false }); return; }
     set({ isLoading: true, error: null });
     try {
       const data = await surveyApi.getSurveyStatus(featureId ? { feature: featureId } : undefined);
@@ -388,12 +468,20 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
   },
 
   updateStatus: async (featureId, status, notes) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) {
+      const mock: SurveyStatusData = { id: `demo-status-${Date.now()}`, engineer: 'demo-user', feature: featureId, status: status as SurveyStatusData['status'], notes: notes ?? '', created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+      set((s) => ({ statuses: s.statuses.some((st) => st.feature === featureId) ? s.statuses.map((st) => (st.feature === featureId ? mock : st)) : [mock, ...s.statuses] }));
+      return;
+    }
     const result = await surveyApi.updateSurveyStatus({ feature: featureId, status, notes });
     set((s) => ({ statuses: s.statuses.some((st) => st.feature === featureId) ? s.statuses.map((st) => (st.feature === featureId ? result : st)) : [result, ...s.statuses] }));
   },
 
   // ── Sync ───────────────────────────────────────────────────────────────
   fetchSyncQueue: async () => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) { set({ syncQueue: [], isLoading: false }); return; }
     set({ isLoading: true, error: null });
     try {
       const data = await surveyApi.getSyncQueue();
@@ -404,10 +492,18 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
   },
 
   pushToSyncQueue: async (items) => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) {
+      const mocks: BackendSyncQueueItem[] = items.map((item, i) => ({ id: `demo-sync-${Date.now()}-${i}`, engineer: 'demo-user', item_type: item.item_type, entity_id: item.entity_id, payload: item.payload, status: 'pending', retry_count: 0, error_message: '', created_at: new Date().toISOString() }));
+      set((s) => ({ syncQueue: [...mocks, ...s.syncQueue] }));
+      return;
+    }
     await surveyApi.pushToSyncQueue(items);
   },
 
   processSyncQueue: async () => {
+    const { demoMode } = useAuthStore.getState();
+    if (demoMode) { set({ syncQueue: [], isLoading: false }); return; }
     set({ isLoading: true });
     try {
       await surveyApi.processSyncQueue();
