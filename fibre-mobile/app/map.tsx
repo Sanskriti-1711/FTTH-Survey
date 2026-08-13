@@ -874,9 +874,15 @@ export default function MapScreen() {
       const layerName = activeLayerNames[importedKey] ?? key.toUpperCase();
       features.forEach((feat, i) => {
         const props = feat.properties ?? {};
+        // Use the real backend feature id (properties.id) so the feature
+        // detail screen can fetch field measurements, typed survey data and
+        // the survey-feature diff. Fall back to a synthetic id for features
+        // without a backend id (e.g. locally-created points).
+        const realId = (props.id ?? props._feature_id) as string | undefined;
+        const featureId = realId || `imp-feat-${key}-${i + 1}`;
         list.push({
           feature: {
-            id: `imp-feat-${key}-${i + 1}`,
+            id: featureId,
             layer_name: layerName,
             layer_id: importedKey,
             properties: props,

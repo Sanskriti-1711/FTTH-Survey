@@ -24,6 +24,7 @@ import { StatusBadge } from '../../components/ui/StatusBadge';
 import { Toast } from '../../components/ui/Toast';
 import LayerEditor from '../../lib/components/LayerEditor';
 import FeatureSurveySections from '../../lib/components/FeatureSurveySections';
+import SurveyChangeDiff from '../../lib/components/SurveyChangeDiff';
 import { Spacing, Radius } from '../../lib/theme/colors';
 import {
   ArrowLeft,
@@ -550,12 +551,16 @@ export default function FeatureDetailScreen() {
           />
         </Card>
 
-        {/* ── Survey Modules (Trench, Risk, Hazard, Evidence, Status) ── */}
+        {/* ── Survey: change diff + typed survey facts ── */}
         <View style={{ marginTop: Spacing.md }}>
           <View style={styles.surveyModulesHeader}>
             <ClipboardList size={16} stroke={colors.primary} />
-            <Text style={[styles.surveyModulesTitle, { color: colors.textPrimary }]}>Survey & Risk Management</Text>
+            <Text style={[styles.surveyModulesTitle, { color: colors.textPrimary }]}>Survey</Text>
           </View>
+          <SurveyChangeDiff
+            featureId={featureId as string}
+            projectId={routeProjectId}
+          />
           <FeatureSurveySections
             featureId={featureId as string}
             layerId={feature.layer_id}
