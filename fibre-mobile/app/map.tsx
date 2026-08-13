@@ -35,6 +35,7 @@ import type { GeoJSONFeature, LayerDisplayMode, SurveyFeatureData } from '../lib
 import { Spacing, Radius } from '../lib/theme/colors';
 import ArrowLeft from 'lucide-react-native/icons/arrow-left';
 import X from 'lucide-react-native/icons/x';
+import Plus from 'lucide-react-native/icons/plus';
 import ChevronRight from 'lucide-react-native/icons/chevron-right';
 import MapPin from 'lucide-react-native/icons/map-pin';
 import List from 'lucide-react-native/icons/list';
@@ -341,6 +342,8 @@ export default function MapScreen() {
   const [selectedMapFeatureId, setSelectedMapFeatureId] = useState<string | null>(null);
   const [activeBasemap, setActiveBasemap] = useState<string>('streets');
   const [basemapPanelVisible, setBasemapPanelVisible] = useState(false);
+  // Tools menu — the FAB column is collapsed into a single expandable menu
+  const [toolsOpen, setToolsOpen] = useState(false);
   const [featureNotes, setFeatureNotes] = useState<Record<string, string>>({});
   const [notesDraft, setNotesDraft] = useState('');
   const [popupScreenCoords, setPopupScreenCoords] = useState<{ x: number; y: number } | null>(null);
@@ -3347,140 +3350,177 @@ export default function MapScreen() {
           panel is open so they never overlap the bottom toolbars/panels */}
       {viewMode === 'map' && !selectedLineFeature && !selectedPolygonFeature && !surveyPanelVisible && !basemapPanelVisible && (
         <View style={styles.fabs}>
-          {/* Undo button — always visible, shows badge count when > 0 */}
+          {toolsOpen && (
+            <>
+              {/* Undo */}
+              <View style={styles.toolRow}>
+                <View style={[styles.fabLabelPill, { backgroundColor: colors.surface }]}>
+                  <Text style={[styles.fabLabelText, { color: colors.textSecondary }]}>Undo</Text>
+                </View>
+                <TouchableOpacity
+                  style={[styles.fab, { backgroundColor: colors.surface, opacity: undoCount > 0 ? 1 : 0.4 }]}
+                  onPress={() => { setToolsOpen(false); handleUndo(); }}
+                  disabled={undoCount === 0}
+                  activeOpacity={0.7}
+                >
+                  <Undo2 size={20} stroke={undoCount > 0 ? colors.textSecondary : colors.textTertiary} />
+                  {undoCount > 0 && (
+                    <View style={[styles.undoBadge, { backgroundColor: colors.primary }]}>
+                      <Text style={styles.undoBadgeText}>{undoCount > 99 ? '99+' : undoCount}</Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
+              </View>
+
+              {/* Add Point */}
+              {!isolateFeatureId && (
+              <View style={styles.toolRow}>
+                <View style={[styles.fabLabelPill, { backgroundColor: colors.surface }]}>
+                  <Text style={[styles.fabLabelText, { color: colors.textSecondary }]}>Add Point</Text>
+                </View>
+                <TouchableOpacity
+                  style={[styles.fab, {
+                    backgroundColor: geoMode === 'add_point' ? '#EC4899' : colors.surface,
+                    transform: [{ scale: geoMode === 'add_point' ? 1.1 : 1 }],
+                  }]}
+                  onPress={() => {
+                    setToolsOpen(false);
+                    if (geoMode === 'add_point') {
+                      setGeoMode('select');
+                      setAddPointTargetLayer('');
+                    } else {
+                      setGeoMode('add_point');
+                      if (addPointLayers.length > 0 && !addPointTargetLayer) {
+                        setAddPointTargetLayer(addPointLayers[0].id);
+                      }
+                    }
+                  }}
+                  activeOpacity={0.8}
+                >
+                  <Text style={{ fontSize: 20, color: geoMode === 'add_point' ? '#FFFFFF' : undefined }}>📍</Text>
+                </TouchableOpacity>
+              </View>
+              )}
+
+              {/* Survey Changes */}
+              <View style={styles.toolRow}>
+                <View style={[styles.fabLabelPill, { backgroundColor: colors.surface }]}>
+                  <Text style={[styles.fabLabelText, { color: colors.textSecondary }]}>Survey Changes</Text>
+                </View>
+                <TouchableOpacity
+                  style={[styles.fab, {
+                    backgroundColor: colors.surface,
+                    opacity: Object.keys(surveyFeatures).length > 0 ? 1 : 0.4,
+                  }]}
+                  onPress={() => { setToolsOpen(false); setSurveyPanelVisible(true); }}
+                  disabled={Object.keys(surveyFeatures).length === 0}
+                  activeOpacity={0.8}
+                >
+                  <Text style={{ fontSize: 16, fontWeight: '700' as any, color: colors.textSecondary }}>🟠</Text>
+                  {Object.keys(surveyFeatures).length > 0 && (
+                    <View style={[styles.undoBadge, { backgroundColor: '#FF8C00' }]}>
+                      <Text style={styles.undoBadgeText}>
+                        {(() => {
+                          let total = 0;
+                          for (const list of Object.values(surveyFeatures)) total += list.length;
+                          return total > 99 ? '99+' : total;
+                        })()}
+                      </Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
+              </View>
+
+              {/* HLD/Survey/Overlay display mode */}
+              <View style={styles.toolRow}>
+                <View style={[styles.fabLabelPill, { backgroundColor: colors.surface }]}>
+                  <Text style={[styles.fabLabelText, { color: colors.textSecondary }]}>
+                    {displayMode === 'hld' ? 'HLD View' : displayMode === 'survey' ? 'Survey View' : 'Overlay View'}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  style={[styles.fab, {
+                    backgroundColor: displayMode === 'survey' ? SURVEY_COLOR : displayMode === 'overlay' ? '#2563EB' : colors.surface,
+                  }]}
+                  onPress={() => {
+                    setToolsOpen(false);
+                    const next: LayerDisplayMode = displayMode === 'hld' ? 'survey' : displayMode === 'survey' ? 'overlay' : 'hld';
+                    setDisplayMode(next);
+                  }}
+                  activeOpacity={0.8}
+                >
+                  <Text style={{ fontSize: 16, fontWeight: '700' as any, color: displayMode === 'hld' ? colors.textSecondary : '#FFFFFF' }}>
+                    {displayMode === 'hld' ? '🔵' : displayMode === 'survey' ? '🟠' : '🔀'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Basemap */}
+              <View style={styles.toolRow}>
+                <View style={[styles.fabLabelPill, { backgroundColor: colors.surface }]}>
+                  <Text style={[styles.fabLabelText, { color: colors.textSecondary }]}>Basemap</Text>
+                </View>
+                <TouchableOpacity
+                  style={[styles.fab, { backgroundColor: colors.surface }]}
+                  onPress={() => { setToolsOpen(false); setBasemapPanelVisible(true); }}
+                  activeOpacity={0.8}
+                >
+                  <Text style={{ fontSize: 18 }}>{BASEMAPS[activeBasemap]?.icon ?? '🗺️'}</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Move */}
+              {!isolateFeatureId && (
+              <View style={styles.toolRow}>
+                <View style={[styles.fabLabelPill, { backgroundColor: colors.surface }]}>
+                  <Text style={[styles.fabLabelText, { color: colors.textSecondary }]}>Move</Text>
+                </View>
+                <TouchableOpacity
+                  style={[styles.fab, { backgroundColor: dragMode ? colors.primary : colors.surface }]}
+                  onPress={() => { setToolsOpen(false); setDragMode(!dragMode); }}
+                  activeOpacity={0.8}
+                >
+                  <Move size={20} stroke={dragMode ? colors.onPrimary : colors.textSecondary} />
+                </TouchableOpacity>
+              </View>
+              )}
+
+              {/* My Location */}
+              <View style={styles.toolRow}>
+                <View style={[styles.fabLabelPill, { backgroundColor: colors.surface }]}>
+                  <Text style={[styles.fabLabelText, { color: colors.textSecondary }]}>My Location</Text>
+                </View>
+                <TouchableOpacity
+                  style={[styles.fab, { backgroundColor: colors.surface }]}
+                  onPress={() => {
+                    setToolsOpen(false);
+                    if (userLocation) {
+                      setFlyToUserTarget({ lng: userLocation.longitude, lat: userLocation.latitude, zoom: 17, ts: Date.now() });
+                      setFollowUser(true);
+                    } else {
+                      setFollowUser(!followUser);
+                    }
+                  }}
+                  activeOpacity={0.8}
+                >
+                  <Crosshair size={20} stroke={followUser ? colors.primary : colors.textSecondary} />
+                </TouchableOpacity>
+              </View>
+            </>
+          )}
+
+          {/* Tools menu toggle — collapses the FAB column into one button */}
           <TouchableOpacity
-            style={[
-              styles.fab,
-              {
-                backgroundColor: colors.surface,
-                opacity: undoCount > 0 ? 1 : 0.4,
-              },
-            ]}
-            onPress={handleUndo}
-            disabled={undoCount === 0}
-            activeOpacity={0.7}
+            style={[styles.fab, { backgroundColor: toolsOpen ? colors.primary : colors.surface }]}
+            onPress={() => setToolsOpen((v) => !v)}
+            activeOpacity={0.8}
           >
-            <Undo2 size={20} stroke={undoCount > 0 ? colors.textSecondary : colors.textTertiary} />
-            {undoCount > 0 && (
+            {toolsOpen ? <X size={22} stroke={colors.onPrimary} /> : <Plus size={22} stroke={colors.textSecondary} />}
+            {!toolsOpen && undoCount > 0 && (
               <View style={[styles.undoBadge, { backgroundColor: colors.primary }]}>
-                <Text style={styles.undoBadgeText}>
-                  {undoCount > 99 ? '99+' : undoCount}
-                </Text>
+                <Text style={styles.undoBadgeText}>{undoCount > 99 ? '99+' : undoCount}</Text>
               </View>
             )}
-          </TouchableOpacity>
-          {/* Add Point FAB — prominent, toggles add_point mode (hidden while isolating) */}
-          {!isolateFeatureId && (
-          <TouchableOpacity
-            style={[styles.fab, {
-              backgroundColor: geoMode === 'add_point' ? '#EC4899' : colors.surface,
-              transform: [{ scale: geoMode === 'add_point' ? 1.1 : 1 }],
-            }]}
-            onPress={() => {
-              if (geoMode === 'add_point') {
-                setGeoMode('select');
-                setAddPointTargetLayer('');
-              } else {
-                setGeoMode('add_point');
-                // Auto-select first point layer
-                if (addPointLayers.length > 0 && !addPointTargetLayer) {
-                  setAddPointTargetLayer(addPointLayers[0].id);
-                }
-              }
-            }}
-            activeOpacity={0.8}
-          >
-            <Text style={{ fontSize: 20, color: geoMode === 'add_point' ? '#FFFFFF' : undefined }}>📍</Text>
-          </TouchableOpacity>
-          )}
-          {/* Survey Changes Panel Toggle — hidden when panel is open to avoid overlapping the close button */}
-          {!surveyPanelVisible && (
-          <TouchableOpacity
-            style={[
-              styles.fab,
-              {
-                backgroundColor: surveyPanelVisible ? '#FF8C00' : colors.surface,
-                opacity: Object.keys(surveyFeatures).length > 0 ? 1 : 0.4,
-              },
-            ]}
-            onPress={() => setSurveyPanelVisible(!surveyPanelVisible)}
-            disabled={Object.keys(surveyFeatures).length === 0}
-            activeOpacity={0.8}
-          >
-            <Text style={{
-              fontSize: 16,
-              fontWeight: '700' as any,
-              color: surveyPanelVisible ? '#FFFFFF' : colors.textSecondary,
-            }}>
-              🟠
-            </Text>
-            {Object.keys(surveyFeatures).length > 0 && (
-              <View style={[styles.undoBadge, { backgroundColor: '#FF8C00' }]}>
-                <Text style={styles.undoBadgeText}>
-                  {(() => {
-                    let total = 0;
-                    for (const list of Object.values(surveyFeatures)) total += list.length;
-                    return total > 99 ? '99+' : total;
-                  })()}
-                </Text>
-              </View>
-            )}
-          </TouchableOpacity>
-          )}
-          {/* HLD/Survey Display Mode Toggle — cycles hld → survey → overlay */}
-          <TouchableOpacity
-            style={[styles.fab, {
-              backgroundColor: displayMode === 'survey' ? SURVEY_COLOR : displayMode === 'overlay' ? '#2563EB' : colors.surface,
-            }]}
-            onPress={() => {
-              const next: LayerDisplayMode = displayMode === 'hld' ? 'survey' : displayMode === 'survey' ? 'overlay' : 'hld';
-              setDisplayMode(next);
-            }}
-            activeOpacity={0.8}
-          >
-            <Text style={{
-              fontSize: 16,
-              fontWeight: '700' as any,
-              color: displayMode === 'hld' ? colors.textSecondary : '#FFFFFF',
-            }}>
-              {displayMode === 'hld' ? '🔵' : displayMode === 'survey' ? '🟠' : '🔀'}
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.fab, { backgroundColor: colors.surface }]}
-            onPress={() => setBasemapPanelVisible(!basemapPanelVisible)}
-            activeOpacity={0.8}
-          >
-            <Text style={{ fontSize: 18 }}>{BASEMAPS[activeBasemap]?.icon ?? '🗺️'}</Text>
-          </TouchableOpacity>
-          {!isolateFeatureId && (
-          <TouchableOpacity
-            style={[styles.fab, { backgroundColor: dragMode ? colors.primary : colors.surface }]}
-            onPress={() => setDragMode(!dragMode)}
-            activeOpacity={0.8}
-          >
-            <Move size={20} stroke={dragMode ? colors.onPrimary : colors.textSecondary} />
-          </TouchableOpacity>
-          )}
-          <TouchableOpacity
-            style={[styles.fab, { backgroundColor: colors.surface }]}
-            onPress={() => {
-              // Fly to the device's GPS position (if we have a fix) and keep following
-              if (userLocation) {
-                setFlyToUserTarget({
-                  lng: userLocation.longitude,
-                  lat: userLocation.latitude,
-                  zoom: 17,
-                  ts: Date.now(),
-                });
-                setFollowUser(true);
-              } else {
-                setFollowUser(!followUser);
-              }
-            }}
-            activeOpacity={0.8}
-          >
-            <Crosshair size={20} stroke={followUser ? colors.primary : colors.textSecondary} />
           </TouchableOpacity>
         </View>
       )}
@@ -3807,6 +3847,26 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.15,
     shadowRadius: 4,
     elevation: 4,
+  },
+  toolRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: Spacing.sm,
+  },
+  fabLabelPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: Radius.full,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  fabLabelText: {
+    fontSize: 12,
+    fontWeight: '600',
   },
 
   // ── Undo Badge ───────────────────────────────────────────────────────
