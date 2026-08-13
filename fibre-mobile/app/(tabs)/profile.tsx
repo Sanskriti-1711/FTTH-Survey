@@ -11,6 +11,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useThemeStore } from '../../lib/stores/theme';
 import { useAuthStore } from '../../lib/stores/auth';
 import { useOfflineStore } from '../../lib/stores/offline';
+import { useSurveyStore } from '../../lib/stores/survey';
 import { Card } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
 import { StatusBadge } from '../../components/ui/StatusBadge';
@@ -35,7 +36,7 @@ export default function ProfileScreen() {
   const resolvedTheme = useThemeStore((s) => s.resolved);
   const toggleTheme = useThemeStore((s) => s.toggleTheme);
   const { user, logout } = useAuthStore();
-  const { isOnline, lastSyncAt, isSyncing, pendingSyncCount, setSyncing } = useOfflineStore();
+  const { isOnline, lastSyncAt, isSyncing, pendingSyncCount, setSyncing, setLastSync } = useOfflineStore();
 
   const handleLogout = () => {
     Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
@@ -48,12 +49,16 @@ export default function ProfileScreen() {
     ]);
   };
 
-  const handleManualSync = () => {
+  const handleManualSync = async () => {
     setSyncing(true);
-    // Simulate sync
-    setTimeout(() => {
+    try {
+      await useSurveyStore.getState().processSyncQueue();
+      setLastSync(new Date().toISOString());
+    } catch {
+      // processSyncQueue records its own error state; nothing else to do here
+    } finally {
       setSyncing(false);
-    }, 2000);
+    }
   };
 
   return (

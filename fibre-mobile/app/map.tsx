@@ -3343,8 +3343,9 @@ export default function MapScreen() {
         </View>
       )}
 
-      {/* FABs - only on map view */}
-      {viewMode === 'map' && (
+      {/* FABs - only on map view, and hidden while a feature is selected or a
+          panel is open so they never overlap the bottom toolbars/panels */}
+      {viewMode === 'map' && !selectedLineFeature && !selectedPolygonFeature && !surveyPanelVisible && !basemapPanelVisible && (
         <View style={styles.fabs}>
           {/* Undo button — always visible, shows badge count when > 0 */}
           <TouchableOpacity

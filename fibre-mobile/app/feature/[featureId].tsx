@@ -29,7 +29,6 @@ import {
   ArrowLeft,
   Save,
   CheckCircle,
-  AlertTriangle,
   Camera,
   MapPin,
   Edit3,
@@ -274,17 +273,6 @@ export default function FeatureDetailScreen() {
     );
   };
 
-  const handleFlag = () => {
-    Alert.alert('Flag Feature', 'Mark this feature as needing additional review?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Flag',
-        style: 'destructive',
-        onPress: () => showToast('Feature flagged', 'success'),
-      },
-    ]);
-  };
-
   const renderFieldSchema = (schema: FieldSchemaField[] | null) => {
     if (!schema || schema.length === 0) return null;
 
@@ -477,12 +465,6 @@ export default function FeatureDetailScreen() {
           </View>
         )}
 
-        {/* GPS Accuracy Requirement (from schema) — LayerEditor shows the same requirement inside Field Measurements, so this banner is redundant */}
-
-        {/* Required Photos indicator (from schema) — LayerEditor shows the same inside Field Measurements */}
-
-        {/* Geometry Editing Notice (from schema) — LayerEditor shows the same inside Field Measurements */}
-
         {/* Reference Properties — only non-schema fields (schema read-only/editable
             fields are already displayed with proper labels inside Field Measurements) */}
         {feature.properties && Object.keys(feature.properties).length > 0 && (() => {
@@ -617,14 +599,6 @@ export default function FeatureDetailScreen() {
           icon={<Save size={16} stroke={colors.textSecondary} />}
           onPress={handleSave}
           loading={isLoading}
-          style={{ flex: 1 }}
-        />
-        <Button
-          title="Flag"
-          variant="secondary"
-          size="sm"
-          icon={<AlertTriangle size={16} stroke={colors.primary} />}
-          onPress={handleFlag}
           style={{ flex: 1 }}
         />
         <Button

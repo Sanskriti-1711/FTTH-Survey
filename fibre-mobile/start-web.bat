@@ -43,8 +43,7 @@ echo   │  🌐  Fiber360 Expo Web Server                       │
 echo   │                                                     │
 echo   │  ➜  http://localhost:%PORT%/                         │
 echo   │                                                     │
-echo   │  ➜  Open in browser and click                       │
-echo   │      "Continue in Demo Mode"                        │
+echo   │  ➜  Open in browser and sign in                     │
 echo   │                                                     │
 echo   │  Press Ctrl+C to stop the server                    │
 echo   └─────────────────────────────────────────────────────┘
