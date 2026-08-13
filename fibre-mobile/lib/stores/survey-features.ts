@@ -12,6 +12,7 @@
 import { create } from 'zustand';
 import * as surveyApi from '../api/survey';
 import { useProjectStore } from './project';
+import type { TypedSurveyPayload } from '../api/survey';
 import type { SurveyFeatureData, GeoJSONFeature, LayerDisplayMode } from '../utils/types';
 
 // ── Color scheme for survey features (orange) ─────────────────────────────
@@ -47,7 +48,8 @@ interface SurveyFeaturesState {
   fetchSurveyFeatures: (projectId: string) => Promise<void>;
 
   /** Upsert (create-or-update) a survey feature when the engineer starts editing an HLD feature.
-   *  Pass hldFeatureId = null for brand-new engineer-created features (e.g. Add Point). */
+   *  Pass hldFeatureId = null for brand-new engineer-created features (e.g. Add Point).
+   *  typedData carries optional typed domain data (trench/risks/hazards/evidence). */
   upsertSurveyFeature: (
     hldFeatureId: string | null,
     layerId: string,
@@ -57,6 +59,7 @@ interface SurveyFeaturesState {
     originalGeometry?: Record<string, unknown> | null,
     originalAttributes?: Record<string, unknown> | null,
     changeReason?: string,
+    typedData?: TypedSurveyPayload,
   ) => Promise<SurveyFeatureData | null>;
 
   /** Update an existing survey feature's geometry or attributes */
@@ -151,6 +154,7 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
     originalGeometry,
     originalAttributes,
     changeReason,
+    typedData,
   ) => {
     const activeProject = useProjectStore.getState().activeProject;
     if (!activeProject || activeProject.id.startsWith('imported-')) {
@@ -172,6 +176,7 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
           original_geometry: originalGeometry,
           original_attributes: originalAttributes,
           change_reason: changeReason,
+          ...(typedData || {}),
         });
       } else {
         // ── Brand-new engineer-created feature (no HLD parent) → create ──
@@ -188,6 +193,7 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
           version_number: 1,
           sync_status: 'pending',
           change_reason: changeReason ?? '',
+          ...(typedData || {}),
         });
       }
 

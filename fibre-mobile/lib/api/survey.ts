@@ -263,7 +263,7 @@ export async function listSurveyFeatures(
 }
 
 export async function createSurveyFeature(
-  data: Omit<SurveyFeatureData, 'id' | 'engineer' | 'engineer_name' | 'project_name' | 'hld_feature_id' | 'created_at' | 'updated_at'>
+  data: Omit<SurveyFeatureData, 'id' | 'engineer' | 'engineer_name' | 'project_name' | 'hld_feature_id' | 'created_at' | 'updated_at'> & TypedSurveyPayload
 ): Promise<SurveyFeatureData> {
   return apiFetch('/api/survey/survey-features/', {
     method: 'POST',
@@ -317,6 +317,14 @@ export async function deleteSurveyFeature(featureId: string): Promise<void> {
   });
 }
 
+/** Typed field-survey domain data carried alongside a survey-feature write. */
+export interface TypedSurveyPayload {
+  trench?: Record<string, unknown>;
+  risks?: Record<string, unknown>[];
+  hazards?: Record<string, unknown>[];
+  evidence?: Record<string, unknown>[];
+}
+
 /** Create-or-update by HLD feature reference — the primary endpoint for the mobile app */
 export async function upsertSurveyFeature(
   data: {
@@ -329,7 +337,7 @@ export async function upsertSurveyFeature(
     original_geometry?: Record<string, unknown> | null;
     original_attributes?: Record<string, unknown> | null;
     change_reason?: string;
-  }
+  } & TypedSurveyPayload
 ): Promise<SurveyFeatureData> {
   return apiFetch('/api/survey/survey-features/upsert/', {
     method: 'POST',
