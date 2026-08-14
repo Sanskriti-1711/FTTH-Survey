@@ -3694,7 +3694,7 @@ const styles = StyleSheet.create({
   // ── Drag Mode Indicator ────────────────────────────────────────────────
   dragIndicator: {
     position: 'absolute',
-    top: Spacing.sm,
+    top: 58, // below the always-visible HLD/Survey/Overlay view switcher
     left: Spacing.xl,
     right: Spacing.xl,
     flexDirection: 'row',
