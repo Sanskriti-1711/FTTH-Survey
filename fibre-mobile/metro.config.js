@@ -1,6 +1,19 @@
+const fs = require('fs');
 const { getDefaultConfig } = require('expo/metro-config');
 
 const config = getDefaultConfig(__dirname);
+
+// Windows long-path build fix: the release APK is built from a short-path
+// junction (C:\ff -> project) so C++/CMake object files stay under the
+// 250-char Windows limit (the ninja "build.ninja still dirty after 100 tries"
+// loop). Node, however, resolves junction paths back to the real project
+// path, which made Metro's file watcher throw "this and base files have
+// different roots". Pinning the project root to the REAL path keeps Metro
+// consistent (JS bundling has no 250-char limit), while the C++ build still
+// runs through the short junction path.
+const REAL_ROOT = fs.realpathSync(__dirname);
+config.projectRoot = REAL_ROOT;
+config.watchFolders = [REAL_ROOT];
 
 // Windows/FAT32 fix #2: exclude heavy build artifacts from the file crawl.
 // Metro hashes every file it crawls; reading the 144MB APK and the exported

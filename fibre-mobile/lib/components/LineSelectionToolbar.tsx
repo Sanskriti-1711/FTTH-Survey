@@ -208,8 +208,9 @@ export default function LineSelectionToolbar({
             bgColor = colors.primary + '20';
             borderColor = colors.primary;
             textColor = colors.primary;
-          } else if (isSave && !hasUnsavedChanges) {
-            // Save is enabled but nothing to save — dim it
+          } else if (isSave && !hasUnsavedChanges && !moveMode) {
+            // Save is enabled but nothing to save — dim it (never while an
+            // edit session like Reroute is active: Save must stay tappable).
             opacity = 0.5;
           }
 
@@ -224,7 +225,7 @@ export default function LineSelectionToolbar({
                     opacity,
                   },
                 ]}
-                disabled={!isEnabled || (isSave && !hasUnsavedChanges)}
+                disabled={!isEnabled || (isSave && !hasUnsavedChanges && !moveMode && !continueMode && !deleteSectionMode)}
                 activeOpacity={0.7}
                 onPress={() => {
                   if (isDeleteSection && deleteSectionStep === 2 && onDeleteConfirm) onDeleteConfirm();

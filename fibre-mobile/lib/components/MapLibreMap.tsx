@@ -885,6 +885,23 @@ function NativeMapView({
         vertexDragRef.current = null;
       },
       onPanResponderTerminate: () => {
+        // A terminated gesture (e.g. the map's gesture recognizer reclaiming
+        // the responder) must NOT discard the drag — persist the last
+        // position exactly like onPanResponderRelease so the edit is never
+        // silently lost (and Save never stays disabled after a drag).
+        const ds = vertexDragRef.current;
+        const coords = vertexDragCoordsRef.current;
+        if (ds && coords) {
+          const pixDx = Math.abs(coords[0] - ds.startLng);
+          const pixDy = Math.abs(coords[1] - ds.startLat);
+          if (pixDx > 0.00005 || pixDy > 0.00005) {
+            if (ds.isPolygon && onPolygonVertexDragEnd) {
+              onPolygonVertexDragEnd(ds.featureId, ds.layerId, ds.vertexIdx, coords[0], coords[1]);
+            } else if (!ds.isPolygon && onVertexDragEnd) {
+              onVertexDragEnd(ds.featureId, ds.layerId, ds.vertexIdx, coords[0], coords[1]);
+            }
+          }
+        }
         setIsVertexDragging(false);
         setVertexDragDistance(null);
         vertexDragCoordsRef.current = null;

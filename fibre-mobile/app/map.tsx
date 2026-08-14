@@ -732,6 +732,18 @@ export default function MapScreen() {
     }
   }, [storeActiveProject?.id, fetchSurveyFeatures, clearSurveyFeatures]);
 
+  // ── Always open a project in the HLD view first ────────────────────────
+  // Re-entering a project (or switching projects) resets the display mode so
+  // the engineer always starts from the blue HLD view. Deep-link feature
+  // focus and review isolation are exempt — they force Overlay themselves.
+  useEffect(() => {
+    const focus = useSurveyFeaturesStore.getState().focusFeatureId;
+    const isolate = useSurveyFeaturesStore.getState().isolateFeatureId;
+    if (!focus && !isolate) {
+      setDisplayMode('hld');
+    }
+  }, [storeActiveProject?.id, setDisplayMode]);
+
   // ── Deep-link focus: fly to + highlight one survey feature ────────────
   // When the planner opens a survey change via the Job Approval page, the
   // deeplink sets displayMode='overlay' + focusFeatureId. Once the survey
@@ -2381,6 +2393,11 @@ export default function MapScreen() {
 
   // ── Check if temp line has unsaved changes ──
   const hasUnsavedLineChanges = useMemo(() => {
+    // An active reroute/edit session counts as unsaved so Save is always
+    // enabled mid-edit — a drag can be terminated before the release handler
+    // persists it, and re-entering reroute must never strand the engineer
+    // with a disabled Save button.
+    if (lineMoveMode) return true;
     if (!tempLineCoords || !tempLineOriginal) return false;
     if (tempLineCoords.length !== tempLineOriginal.length) return true;
     for (let i = 0; i < tempLineCoords.length; i++) {
@@ -2389,7 +2406,7 @@ export default function MapScreen() {
       }
     }
     return false;
-  }, [tempLineCoords, tempLineOriginal]);
+  }, [lineMoveMode, tempLineCoords, tempLineOriginal]);
 
   // ── Memoized vertex drag target — points at the temp preview layer during move mode.
   // Vertex markers render on this temp layer so they follow tempLineCoords state.
@@ -3096,6 +3113,50 @@ export default function MapScreen() {
             flyToUserTarget={flyToUserTarget}
             userLocation={userLocation}
           />
+
+          {/* HLD / Survey / Overlay view switcher — always available on the map,
+              so Overlay can be picked as a view without clicking a layer or
+              opening the tools menu. Hidden during review isolation (read-only). */}
+          {viewMode === 'map' && !isolateFeatureId && (
+            <View style={styles.viewSwitcher}>
+              {(
+                [
+                  { key: 'hld', label: 'HLD', icon: '🔵', activeColor: '#2563EB' },
+                  { key: 'survey', label: 'Survey', icon: '🟠', activeColor: SURVEY_COLOR },
+                  { key: 'overlay', label: 'Overlay', icon: '🔀', activeColor: '#8B5CF6' },
+                ] as { key: LayerDisplayMode; label: string; icon: string; activeColor: string }[]
+              ).map((m) => {
+                const active = displayMode === m.key;
+                return (
+                  <TouchableOpacity
+                    key={m.key}
+                    style={[
+                      styles.viewSeg,
+                      {
+                        backgroundColor: active ? m.activeColor : colors.surface,
+                        borderColor: active ? m.activeColor : colors.outlineLight,
+                      },
+                    ]}
+                    onPress={() => {
+                      setToolsOpen(false);
+                      setDisplayMode(m.key);
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={{ fontSize: 13 }}>{m.icon}</Text>
+                    <Text
+                      style={[
+                        styles.viewSegText,
+                        { color: active ? '#FFFFFF' : colors.textSecondary },
+                      ]}
+                    >
+                      {m.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          )}
 
           {/* Geometry Editor - editing toolbar OR add_point toolbar */}
           {viewMode === 'map' && (editingFeature !== null || geoMode !== 'select') && (
@@ -3823,6 +3884,37 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     paddingVertical: Spacing.xl,
     fontStyle: 'italic',
+  },
+
+  // ── View switcher (HLD / Survey / Overlay) ─────────────────────────────
+  viewSwitcher: {
+    position: 'absolute',
+    top: 14,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    gap: 6,
+    padding: 4,
+    borderRadius: Radius.md,
+    backgroundColor: 'rgba(255,255,255,0.94)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 6,
+    elevation: 6,
+    zIndex: 40,
+  },
+  viewSeg: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+  },
+  viewSegText: {
+    fontSize: 12.5,
+    fontWeight: '600',
   },
 
   // ── FABs ───────────────────────────────────────────────────────────────
