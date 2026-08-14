@@ -22,8 +22,14 @@ interface ProjectState {
   isLoading: boolean;
   error: string | null;
 
-  /** Progress of fetching GeoJSON layers from the backend: { fetched: N, total: N } */
-  layerFetchProgress: { fetched: number; total: number } | null;
+  /** Progress of fetching GeoJSON layers from the backend. `fetched` counts
+   *  only layers that actually loaded — a failed layer must never advance the
+   *  bar, so it can't reach 100% while data is missing. `failed` counts the
+   *  layers that errored. */
+  layerFetchProgress: { fetched: number; total: number; failed: number } | null;
+
+  /** How many layers failed to load on the last project fetch (0 = all OK). */
+  layerLoadFailed: number;
 
   /** GeoJSON features for the active project, keyed by layer ID */
   projectGeojsons: Record<string, GeoJSONFeature[]>;
@@ -92,6 +98,7 @@ export const useProjectStore = create<ProjectState>((set, get) => {
   isLoading: false,
   error: null,
   layerFetchProgress: null,
+  layerLoadFailed: 0,
   projectGeojsons: {},
   projectLayers: [],
 
@@ -115,32 +122,35 @@ export const useProjectStore = create<ProjectState>((set, get) => {
     if (projectId.startsWith('imported-')) {
       return; // Local-only import — nothing to fetch from the backend
     }
-    set({ isLoading: true, error: null });
+    set({ isLoading: true, error: null, layerLoadFailed: 0 });
     try {
       // Step 1: Get all layers for this project
       const { layers } = await projectsApi.getProjectLayers(projectId);
       const totalLayers = layers.length;
 
-      // Step 2: Fetch features for ALL layers in parallel, tracking progress
-      let fetchedCount = 0;
-      set({ layerFetchProgress: { fetched: 0, total: totalLayers } });
+      // Step 2: Fetch features for ALL layers in parallel, tracking progress.
+      // Only successful fetches advance the bar — a failed layer must never
+      // count as progress, so the bar can't reach 100% while data is missing.
+      let loadedCount = 0;
+      let failedCount = 0;
+      set({ layerFetchProgress: { fetched: 0, total: totalLayers, failed: 0 } });
 
       const layerPromises = layers.map((layer) =>
         projectsApi
           .getLayerDetail(projectId, layer.layer_id)
           .then((data) => {
-            // Update progress on each successful fetch
-            fetchedCount++;
-            set({ layerFetchProgress: { fetched: fetchedCount, total: totalLayers } });
+            // Update progress on each successful fetch only
+            loadedCount++;
+            set({ layerFetchProgress: { fetched: loadedCount, total: totalLayers, failed: failedCount } });
             return {
               key: layer.layer_id,
               features: get().featuresToGeoJSON(data.features?.filter((f) => f.geometry) ?? []),
             };
           })
           .catch((err) => {
-            // Update progress even on failure (still "fetched")
-            fetchedCount++;
-            set({ layerFetchProgress: { fetched: fetchedCount, total: totalLayers } });
+            // Count the failure separately — it must not advance the bar
+            failedCount++;
+            set({ layerFetchProgress: { fetched: loadedCount, total: totalLayers, failed: failedCount } });
             console.warn(`[fetchProjectGeojsons] Failed for layer ${layer.layer_id}:`, err);
             return { key: layer.layer_id, features: [] };
           })
@@ -159,7 +169,18 @@ export const useProjectStore = create<ProjectState>((set, get) => {
         )} features total`
       );
 
-      set({ projectGeojsons: geojsons, projectLayers: layers, isLoading: false, layerFetchProgress: null });
+      set({
+        projectGeojsons: geojsons,
+        projectLayers: layers,
+        isLoading: false,
+        layerFetchProgress: null,
+        layerLoadFailed: failedCount,
+      });
+      if (failedCount > 0) {
+        console.warn(
+          `[fetchProjectGeojsons] ${failedCount}/${totalLayers} layers failed to load — showing partial data`
+        );
+      }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to fetch project GeoJSON';
       console.error('[fetchProjectGeojsons] Error:', message);

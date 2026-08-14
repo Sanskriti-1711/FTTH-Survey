@@ -663,11 +663,6 @@ export default function MapScreen() {
   // Key for surveyPointGeometries: `${layerId}:${featureId}` to prevent cross-layer collisions
   const surveyPointKey = useCallback((layerId: string, featureId: string) => `${layerId}:${featureId}`, []);
 
-  const legendGroups = useMemo(
-    () => buildLayerGroups(panelLayerDataRef.current, DEFAULT_LAYER_GROUPS),
-    []
-  );
-
   const currentBasemapStyle = BASEMAPS[activeBasemap]?.style ?? BASEMAPS.streets.style;
 
   // Init visibility from store layers
@@ -690,6 +685,9 @@ export default function MapScreen() {
     activeProject: storeActiveProject,
     fetchProjectGeojsons,
     layerFetchProgress,
+    layerLoadFailed,
+    isLoading: storeIsLoading,
+    error: storeError,
   } = useProjectStore();
   const hasImportedData = Object.keys(projectGeojsons).length > 0;
 
@@ -1164,6 +1162,12 @@ export default function MapScreen() {
     [allPanelLayers, activeLayerColors, layerVisibility]
   );
 
+  // ── Build grouped legend from the CURRENT panel data (not a stale ref) ──
+  const legendGroups = useMemo(
+    () => buildLayerGroups(panelLayerData, DEFAULT_LAYER_GROUPS),
+    [panelLayerData]
+  );
+
   // ── Compute point layers for Add Point mode layer picker ────────────────
   const addPointLayers = useMemo(() => {
     return allPanelLayers
@@ -1337,49 +1341,16 @@ export default function MapScreen() {
     [selectFeature, activeLayerNames, mapLayerData, selectedPolygonFeature]
   );
 
-  // ── Layer isolation state ─────────────────────────────────────────────
-  // null = show all visible layers, string = only this layer is visible
-  const [isolatedLayerId, setIsolatedLayerId] = useState<string | null>(null);
-  // Stores previous visibility state so we can restore on un-isolate
-  const preIsolationVisibilityRef = useRef<Record<string, boolean> | null>(null);
-
-  // ── Toggle layer visibility / isolate layer ────────────────────────────
-  // Single tap on a layer chip in the legend isolates that layer (all others hidden).
-  // Tapping the same layer again restores all layers to their previous visibility.
+  // ── Toggle layer visibility (multi-select checkboxes) ─────────────────
+  // Each legend checkbox toggles ONE layer's visibility independently, so the
+  // engineer can show 2+ layers at once. No isolation is applied.
   const toggleLayerVisibility = useCallback((layerId: string) => {
-    if (isolatedLayerId === layerId) {
-      // ── Un-isolate: restore previous visibility state ──
-      setIsolatedLayerId(null);
-      if (preIsolationVisibilityRef.current) {
-        setLayerVisibility(preIsolationVisibilityRef.current);
-        preIsolationVisibilityRef.current = null;
-      }
-    } else if (isolatedLayerId === null) {
-      // ── First tap: isolate this layer ──
-      // Save current visibility state for later restore
-      setLayerVisibility((prev) => {
-        preIsolationVisibilityRef.current = { ...prev };
-        const next: Record<string, boolean> = {};
-        for (const key of Object.keys(prev)) {
-          next[key] = false;
-        }
-        next[layerId] = true;
-        return next;
-      });
-      setIsolatedLayerId(layerId);
-    } else {
-      // ── Switch isolation to a different layer ──
-      setLayerVisibility((prev) => {
-        const next: Record<string, boolean> = {};
-        for (const key of Object.keys(prev)) {
-          next[key] = false;
-        }
-        next[layerId] = true;
-        return next;
-      });
-      setIsolatedLayerId(layerId);
-    }
-  }, [isolatedLayerId]);
+    setLayerVisibility((prev) => {
+      const next = { ...prev };
+      next[layerId] = prev[layerId] === false;
+      return next;
+    });
+  }, []);
 
   // ── Helper: find an HLD feature's original geometry + attributes from active GeoJSON ──
   // Used when creating a SurveyFeature — we need to freeze the original HLD state.
@@ -2449,6 +2420,20 @@ export default function MapScreen() {
     [],
   );
 
+  // ── Undo for in-progress LINE edits ────────────────────────────────────
+  // Reverts the temp line back to its original coordinates when in move mode
+  // with unsaved changes; otherwise falls back to the global survey undo.
+  const handleLineUndo = useCallback(() => {
+    if (lineMoveMode && tempLineCoords && tempLineOriginal) {
+      setTempLineCoords(tempLineOriginal.map(([lng, lat]) => [lng, lat] as [number, number]));
+      setContinueLinePoints(0);
+      setContinueLineAnchor(null);
+      console.log('[LineUndo] Reverted line to original coordinates');
+      return;
+    }
+    handleUndo();
+  }, [lineMoveMode, tempLineCoords, tempLineOriginal, handleUndo]);
+
   // ── Polygon edit handlers ───────────────────────────────────────────
   const handlePolygonEditStart = useCallback((feature: EditingFeature) => {
     console.log(`[PolygonEdit] Starting edit for feature ${feature.id.slice(-8)} on layer ${feature.layerId}`);
@@ -2998,31 +2983,73 @@ export default function MapScreen() {
           {storeActiveProject && !storeActiveProject.id.startsWith('imported-') && !hasImportedData && (
             <View style={[styles.loadingOverlay, { backgroundColor: colors.background + 'CC' }]}>
               <View style={[styles.loadingBox, { backgroundColor: colors.surface }]}>
-                <Text style={{ fontSize: 32, marginBottom: 8 }}>📡</Text>
-                <Text style={[styles.loadingTitle, { color: colors.textPrimary }]}>
-                  Loading Project Data
-                </Text>
                 {layerFetchProgress ? (
                   <>
-                    <Text style={[styles.loadingDesc, { color: colors.textSecondary }]}>
-                      Fetched {layerFetchProgress.fetched}/{layerFetchProgress.total} layers for {storeActiveProject?.name ?? 'project'}...
+                    <Text style={{ fontSize: 32, marginBottom: 8 }}>📡</Text>
+                    <Text style={[styles.loadingTitle, { color: colors.textPrimary }]}>
+                      Loading Project Data
                     </Text>
-                    {/* Progress bar */}
+                    <Text style={[styles.loadingDesc, { color: colors.textSecondary }]}>
+                      Fetched {layerFetchProgress.fetched}/{layerFetchProgress.total} layers
+                      {layerFetchProgress.failed > 0
+                        ? ` (${layerFetchProgress.failed} failed — retrying not needed, showing what loaded)`
+                        : ''}{' '}
+                      for {storeActiveProject?.name ?? 'project'}...
+                    </Text>
+                    {/* Progress bar — capped at 99% while the fetch is in
+                        flight; only a fully completed load may reach 100. */}
                     <View style={[styles.progressBarBg, { backgroundColor: colors.outlineLight }]}>
                       <View
                         style={[
                           styles.progressBarFill,
                           {
                             backgroundColor: colors.primary,
-                            width: `${Math.round((layerFetchProgress.fetched / layerFetchProgress.total) * 100)}%` as any,
+                            width: `${Math.min(99, Math.round((layerFetchProgress.fetched / layerFetchProgress.total) * 100))}%` as any,
                           },
                         ]}
                       />
                     </View>
                     <ActivityIndicator size="small" color={colors.primary} style={{ marginTop: 12 }} />
                   </>
+                ) : !storeIsLoading ? (
+                  // Fetch settled but nothing loaded — show a failure state
+                  // instead of an endless spinner.
+                  <>
+                    <Text style={{ fontSize: 32, marginBottom: 8 }}>⚠️</Text>
+                    <Text style={[styles.loadingTitle, { color: colors.textPrimary }]}>
+                      Couldn't Load Project Data
+                    </Text>
+                    <Text style={[styles.loadingDesc, { color: colors.textSecondary }]}>
+                      {storeError ||
+                        (layerLoadFailed > 0
+                          ? `${layerLoadFailed} layer${layerLoadFailed === 1 ? '' : 's'} failed to load — check your connection and try again.`
+                          : 'Check your connection and try again.')}
+                    </Text>
+                    <TouchableOpacity
+                      style={{
+                        marginTop: 14,
+                        paddingVertical: 10,
+                        paddingHorizontal: 24,
+                        borderRadius: 8,
+                        backgroundColor: colors.primary,
+                      }}
+                      activeOpacity={0.7}
+                      onPress={() => {
+                        fetchAttemptedRef.current = false;
+                        if (storeActiveProject) {
+                          fetchProjectGeojsons(storeActiveProject.id).catch(() => {});
+                        }
+                      }}
+                    >
+                      <Text style={{ color: colors.onPrimary, fontWeight: '700', fontSize: 14 }}>Retry</Text>
+                    </TouchableOpacity>
+                  </>
                 ) : (
                   <>
+                    <Text style={{ fontSize: 32, marginBottom: 8 }}>📡</Text>
+                    <Text style={[styles.loadingTitle, { color: colors.textPrimary }]}>
+                      Loading Project Data
+                    </Text>
                     <Text style={[styles.loadingDesc, { color: colors.textSecondary }]}>
                       Awaiting layer list from server...
                     </Text>
@@ -3185,8 +3212,8 @@ export default function MapScreen() {
             <PolygonToolbar
               selectedFeature={selectedPolygonFeature}
               onDeselect={handlePolygonCancel}
-              undoCount={undoCount}
-              onUndo={handleUndo}
+              undoCount={polygonEditCoords !== null && polygonEditOriginal !== null && JSON.stringify(polygonEditCoords) !== JSON.stringify(polygonEditOriginal) ? 1 : 0}
+              onUndo={handlePolygonUndo}
               onSave={handlePolygonSave}
               onCancel={handlePolygonCancel}
               onDelete={handlePolygonDelete}
@@ -3199,8 +3226,8 @@ export default function MapScreen() {
             <LineSelectionToolbar
               selectedFeature={selectedLineFeature}
               onDeselect={handleLineDeselect}
-              undoCount={undoCount}
-              onUndo={handleUndo}
+              undoCount={hasUnsavedLineChanges ? 1 : undoCount}
+              onUndo={handleLineUndo}
               moveMode={lineMoveMode}
               onToggleMove={handleToggleMove}
               onSave={handleSaveLine}
