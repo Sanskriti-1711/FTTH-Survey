@@ -37,9 +37,21 @@ if ! command -v adb >/dev/null 2>&1; then
   exit 1
 fi
 
+# ── 0. Pre-flight: show the version we are about to ship ───────────────
+cd "$APP_DIR" || exit 1
+if command -v python >/dev/null 2>&1; then
+  VERSION_INFO=$(python -c "
+import json
+with open('app.json', encoding='utf-8') as f:
+    e = json.load(f).get('expo', {})
+print('version=' + str(e.get('version', '?')) + ' versionCode=' + str((e.get('android') or {}).get('versionCode', '?')))
+" 2>/dev/null)
+  echo "==> Building $VERSION_INFO (must be >= the version installed on the phone,"
+  echo "    otherwise adb install -r fails with INSTALL_FAILED_VERSION_DOWNGRADE)"
+fi
+
 # ── 1. Trigger the build ────────────────────────────────────────────────
 echo "==> Triggering EAS Android build (preview profile) ..."
-cd "$APP_DIR" || exit 1
 BUILD_LOG="/tmp/eas_rebuild.log"
 npx eas-cli build --platform android --profile preview \
   --non-interactive \

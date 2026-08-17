@@ -2,7 +2,7 @@
   "expo": {
     "name": "Fiber360",
     "slug": "fibre360-mobile",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "fibre360",
@@ -22,6 +22,7 @@
       }
     },
     "android": {
+      "versionCode": 2,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0D5CFF"
