@@ -1919,6 +1919,37 @@ export default function MapScreen() {
         }
       }
 
+      // Fallback #2: the tapped feature may be a SURVEY feature (a previous
+      // survey edit). Its id is the SurveyFeature UUID, which never exists in
+      // the HLD/imported GeoJSON or the import id map. Re-editing it must use
+      // the CURRENT survey geometry as the baseline so the engineer continues
+      // from their last saved change — and Save updates that same survey
+      // feature instead of creating a duplicate.
+      if (!hldFeature) {
+        const sfList = surveyFeatures[layerId] ?? [];
+        const surveySf = sfList.find((sf) => sf.id === featureId);
+        if (surveySf) {
+          const sGeom = surveySf.survey_geometry as { type?: string; coordinates?: unknown[] } | null;
+          const sType = sGeom?.type;
+          if (sGeom && (sType === 'LineString' || sType === 'MultiLineString')) {
+            hldFeature = {
+              type: 'Feature',
+              geometry: sGeom as { type: string; coordinates: unknown[] },
+              properties: {
+                ...(surveySf.survey_attributes ?? {}),
+                _survey_feature_id: surveySf.id,
+                _hld_feature_id: surveySf.original_hld_feature,
+              },
+            };
+            console.log(`[MoveMode] Re-editing survey feature ${surveySf.id.slice(-8)} — baseline = survey geometry (${surveySf.survey_status})`);
+          } else {
+            console.warn(`[MoveMode] Survey feature ${featureId.slice(-12)} has unsupported geom=${sType}`);
+          }
+        } else {
+          console.warn(`[MoveMode] GUARD 3b: not found in HLD data or survey store, featureId=${featureId.slice(-12)}`);
+        }
+      }
+
       // Accept both LineString and MultiLineString (multi-line features are common in imports).
       const geomType = hldFeature?.geometry?.type;
       if (!hldFeature?.geometry || (geomType !== 'LineString' && geomType !== 'MultiLineString')) {
@@ -1941,7 +1972,7 @@ export default function MapScreen() {
       autoOverlayOnEdit();
       console.log(`[MoveMode] Activated for ${featureId.slice(-8)} — ${coordsCopy.length} vertices`);
     }
-  }, [selectedLineFeature, lineMoveMode, autoOverlayOnEdit, importFeatureIdMap]);
+  }, [selectedLineFeature, lineMoveMode, autoOverlayOnEdit, importFeatureIdMap, surveyFeatures]);
 
   // ── Save the temporary line geometry to the survey-features store ──────
   // Creates or updates a SurveyFeature with the modified geometry.
@@ -1952,8 +1983,11 @@ export default function MapScreen() {
     const { id: featureId, layerId, layerName } = selectedLineFeature;
     const surveyGeometry = { type: 'LineString', coordinates: tempLineCoords };
 
-    // Check if a SurveyFeature already exists for this HLD feature
-    const existingSurvey = getSurveyFeatureForHld(featureId);
+    // Check if a SurveyFeature already exists for this feature. Two id shapes:
+    //   A) featureId is a SurveyFeature UUID (re-editing a survey feature) → match by id
+    //   B) featureId is the HLD feature id (editing a blue HLD line) → match by original_hld_feature
+    const surveyById = surveyFeatures[layerId]?.find((s) => s.id === featureId);
+    const existingSurvey = surveyById ?? getSurveyFeatureForHld(featureId);
     const { geometry: origGeom, attributes: origAttrs } = findHldFeatureOriginal(featureId, layerId);
 
     // ── Merge the snapped object's details into the line's attributes ──
@@ -2044,7 +2078,7 @@ export default function MapScreen() {
     lastContinueTapRef.current = null;
     setDeleteSectionRange(null);
     console.log(`[MoveMode] Saved line geometry for ${featureId.slice(-8)} — SurveyFeature ${existingSurvey ? 'updated' : 'created'}${continueSnapTarget ? ` (snapped to ${continueSnapTarget.name})` : ''}`);
-  }, [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, continueSnapTarget]);
+  }, [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, continueSnapTarget, surveyFeatures]);
 
   // ── Delete Section handlers ────────────────────────────────────────────
 
