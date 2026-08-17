@@ -3136,6 +3136,8 @@ export default function MapScreen() {
             onFeatureDragEnd={handleFeatureDragEnd}
             onVertexDragEnd={lineMoveMode && tempLineCoords && lineToolMode === null ? handleVertexDragEnd : undefined}
             vertexDragTarget={memoizedVertexTarget}
+            snapEnabled={lineMoveMode && lineToolMode === null}
+            snapRadiusM={10}
             polygonEditTarget={selectedPolygonFeature ? { featureId: `temp-preview-${selectedPolygonFeature.id}`, layerId: `temp-preview-${selectedPolygonFeature.layerId}` } : null}
             onPolygonVertexDragEnd={handlePolygonVertexDragEnd}
             draggableLayerIds={draggableLayerIds}

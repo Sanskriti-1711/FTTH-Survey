@@ -22,6 +22,7 @@ import {
   TouchableOpacity,
   Easing,
   PanResponder,
+  Vibration,
 } from 'react-native';
 import type { GeoJSONFeature } from '../utils/types';
 import Constants from 'expo-constants';
@@ -45,6 +46,115 @@ export interface BasemapStyle {
 }
 
 type MapStatus = 'loading' | 'ready' | 'error' | 'timeout' | 'empty';
+
+// ── Vertex snap index ────────────────────────────────────────────────────
+// Flat list of line/ring segments from all rendered layers, used to snap a
+// dragged vertex onto existing infrastructure (trenches, ducts, cables...).
+// Built once per layers change and queried per move event with a cheap
+// planar point-to-segment test — no per-feature allocation during drags.
+interface SnapSegment {
+  lng1: number;
+  lat1: number;
+  lng2: number;
+  lat2: number;
+  layerId: string;
+  featureId: string;
+}
+
+function pushSegments(out: SnapSegment[], layerId: string, featureId: string, pts: [number, number][], closeRing: boolean) {
+  if (pts.length < 2) {
+    // Single point (Point feature) — degenerate segment so it still snaps.
+    if (pts.length === 1) {
+      const [lng, lat] = pts[0];
+      out.push({ lng1: lng, lat1: lat, lng2: lng, lat2: lat, layerId, featureId });
+    }
+    return;
+  }
+  const n = closeRing ? pts.length : pts.length - 1;
+  for (let i = 0; i < n; i++) {
+    const [lng1, lat1] = pts[i];
+    const [lng2, lat2] = pts[(i + 1) % pts.length];
+    out.push({ lng1, lat1, lng2, lat2, layerId, featureId });
+  }
+}
+
+function buildSnapSegments(layers: MapLayerData[]): SnapSegment[] {
+  const out: SnapSegment[] = [];
+  for (const layer of layers) {
+    // The temp preview is the line currently being edited — never a snap target.
+    if (layer.id.startsWith('temp-preview-')) continue;
+    for (const feat of layer.features) {
+      const fid = String((feat.properties as any)?.id ?? (feat.properties as any)?._id ?? '');
+      const g = feat.geometry;
+      if (!g) continue;
+      if (g.type === 'LineString') {
+        pushSegments(out, layer.id, fid, (g.coordinates as [number, number][]) ?? [], false);
+      } else if (g.type === 'MultiLineString') {
+        for (const line of (g.coordinates as [number, number][][]) ?? []) {
+          pushSegments(out, layer.id, fid, line as [number, number][], false);
+        }
+      } else if (g.type === 'Polygon') {
+        const rings = (g.coordinates as [number, number][][]) ?? [];
+        if (rings[0]) pushSegments(out, layer.id, fid, rings[0] as [number, number][], true);
+      } else if (g.type === 'MultiPolygon') {
+        const firstPoly = (g.coordinates as [number, number][][][])?.[0];
+        if (firstPoly?.[0]) pushSegments(out, layer.id, fid, firstPoly[0] as [number, number][], true);
+      } else if (g.type === 'Point') {
+        const c = g.coordinates as [number, number];
+        if (c && typeof c[0] === 'number') {
+          out.push({ lng1: c[0], lat1: c[1], lng2: c[0], lat2: c[1], layerId: layer.id, featureId: fid });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Nearest point on any snap segment within radiusM of (lng, lat), excluding
+ * the feature being dragged and the survey twin of its layer.
+ */
+function nearestSnapPoint(
+  segs: SnapSegment[],
+  lng: number,
+  lat: number,
+  radiusM: number,
+  excludeLayerId: string,
+  excludeFeatureId: string,
+): [number, number] | null {
+  const cosLat = Math.cos((lat * Math.PI) / 180) || 1;
+  const M_PER_LNG = 111320 * cosLat;
+  const M_PER_LAT = 110540;
+  const r2 = radiusM * radiusM;
+  let bestD2 = r2;
+  let bestLng = 0;
+  let bestLat = 0;
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i];
+    // Skip the dragged feature itself and its survey twin (previous edit copy).
+    if (s.layerId === `survey-${excludeLayerId}`) continue;
+    if (s.layerId === excludeLayerId && s.featureId === excludeFeatureId) continue;
+    const x1 = (s.lng1 - lng) * M_PER_LNG;
+    const y1 = (s.lat1 - lat) * M_PER_LAT;
+    const x2 = (s.lng2 - lng) * M_PER_LNG;
+    const y2 = (s.lat2 - lat) * M_PER_LAT;
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const len2 = dx * dx + dy * dy;
+    let t = len2 ? (-(x1 * dx) - (y1 * dy)) / len2 : 0;
+    if (t < 0) t = 0;
+    else if (t > 1) t = 1;
+    const px = x1 + t * dx;
+    const py = y1 + t * dy;
+    const d2 = px * px + py * py;
+    if (d2 < bestD2) {
+      bestD2 = d2;
+      bestLng = lng + px / M_PER_LNG;
+      bestLat = lat + py / M_PER_LAT;
+    }
+  }
+  return bestD2 < r2 ? [bestLng, bestLat] : null;
+}
 
 interface MapErrorInfo {
   type: 'network' | 'style' | 'module' | 'unknown' | 'timeout';
@@ -81,6 +191,11 @@ interface MapLibreMapProps {
   flyToCenter?: { lng: number; lat: number; zoom: number } | null;
   /** When ts changes, the map flies to the user's GPS location (crosshair FAB). */
   flyToUserTarget?: { lng: number; lat: number; zoom: number; ts: number } | null;
+  /** When true, dragged vertices snap to nearby line/point features (existing
+   *  trenches/ducts/cables) so a reroute aligns with the existing infrastructure. */
+  snapEnabled?: boolean;
+  /** Snap radius in meters (default 10). */
+  snapRadiusM?: number;
 }
 
 // ── Basemap Presets ──────────────────────────────────────────────────────
@@ -381,6 +496,8 @@ function NativeMapView({
   loadingTimeoutMs = LOADING_TIMEOUT_MS,
   flyToCenter,
   flyToUserTarget,
+  snapEnabled,
+  snapRadiusM,
 }: MapLibreMapProps) {
   const cameraRef = useRef<any>(null);
   const mapRef = useRef<any>(null);
@@ -719,6 +836,32 @@ function NativeMapView({
   } | null>(null);
   const vertexDragCoordsRef = useRef<[number, number] | null>(null);
 
+  // ── Vertex snap state ──────────────────────────────────────────────────
+  const [snapActive, setSnapActive] = useState(false);
+  const [snapPos, setSnapPos] = useState<{ lng: number; lat: number } | null>(null);
+  const snapEnabledRef = useRef(!!snapEnabled);
+  const snapRadiusMRef = useRef(snapRadiusM ?? 10);
+  const snapSegmentsRef = useRef<SnapSegment[]>([]);
+  const snapActiveRef = useRef(false);
+
+  useEffect(() => {
+    snapEnabledRef.current = !!snapEnabled;
+  }, [snapEnabled]);
+
+  useEffect(() => {
+    snapRadiusMRef.current = snapRadiusM ?? 10;
+  }, [snapRadiusM]);
+
+  useEffect(() => {
+    snapSegmentsRef.current = buildSnapSegments(layers);
+  }, [layers]);
+
+  const clearSnap = useCallback(() => {
+    snapActiveRef.current = false;
+    setSnapActive(false);
+    setSnapPos(null);
+  }, []);
+
   // ── Vertex press handler — starts vertex drag when a handle is tapped ──
   const handleVertexPress = useCallback((e: any) => {
     if (!onVertexDragEnd && !onPolygonVertexDragEnd) return;
@@ -772,9 +915,10 @@ function NativeMapView({
       coords: [...parentCoords],
     };
     vertexDragCoordsRef.current = [lng, lat];
+    clearSnap();
     setIsVertexDragging(true);
     setVertexDragDistance(null);
-  }, [onVertexDragEnd, onPolygonVertexDragEnd]);
+  }, [onVertexDragEnd, onPolygonVertexDragEnd, clearSnap]);
 
   // ── Vertex PanResponder — captures gestures during vertex drag ─────────
   const vertexPanResponder = useRef(
@@ -799,8 +943,39 @@ function NativeMapView({
         const cosLat = Math.cos((ds.startLat * Math.PI) / 180);
         const lngPerPixel = 360 / (scale * cosLat);
         const latPerPixel = 180 / scale;
-        const newLng = ds.startLng + dx * lngPerPixel;
-        const newLat = ds.startLat - dy * latPerPixel;
+        let newLng = ds.startLng + dx * lngPerPixel;
+        let newLat = ds.startLat - dy * latPerPixel;
+
+        // ── Snap to existing infrastructure (reroute tool) ──
+        // While the vertex is near a trench/duct/cable/point feature within
+        // the snap radius, lock onto the nearest point on its geometry so the
+        // rerouted line follows the existing network. Haptic fires once when
+        // the snap engages and once when it releases.
+        if (snapEnabledRef.current) {
+          const snapped = nearestSnapPoint(
+            snapSegmentsRef.current,
+            newLng,
+            newLat,
+            snapRadiusMRef.current,
+            ds.layerId,
+            ds.featureId,
+          );
+          if (snapped) {
+            newLng = snapped[0];
+            newLat = snapped[1];
+            if (!snapActiveRef.current) {
+              snapActiveRef.current = true;
+              setSnapActive(true);
+              Vibration.vibrate(12);
+            }
+            setSnapPos({ lng: newLng, lat: newLat });
+          } else if (snapActiveRef.current) {
+            snapActiveRef.current = false;
+            setSnapActive(false);
+            setSnapPos(null);
+            Vibration.vibrate(8);
+          }
+        }
 
         vertexDragCoordsRef.current = [newLng, newLat];
 
@@ -879,6 +1054,7 @@ function NativeMapView({
             }
           }
         }
+        clearSnap();
         setIsVertexDragging(false);
         setVertexDragDistance(null);
         vertexDragCoordsRef.current = null;
@@ -902,6 +1078,7 @@ function NativeMapView({
             }
           }
         }
+        clearSnap();
         setIsVertexDragging(false);
         setVertexDragDistance(null);
         vertexDragCoordsRef.current = null;
@@ -1399,6 +1576,37 @@ function NativeMapView({
                 circleRadius: 20,
                 circleColor: 'transparent',
                 circleStrokeWidth: 0,
+              }}
+            />
+          </MapLibreGL.GeoJSONSource>
+        )}
+
+        {/* ── Snap halo — green ring shown while a dragged vertex is locked
+             onto existing infrastructure (trench/duct/cable) ── */}
+        {snapActive && snapPos && (
+          <MapLibreGL.GeoJSONSource
+            id="ml-snap-src"
+            data={{
+              type: 'FeatureCollection',
+              features: [
+                {
+                  type: 'Feature',
+                  geometry: { type: 'Point', coordinates: [snapPos.lng, snapPos.lat] },
+                  properties: {},
+                },
+              ],
+            }}
+          >
+            <MapLibreGL.Layer
+              type="circle"
+              id="ml-snap-halo"
+              source="ml-snap-src"
+              style={{
+                circleRadius: 16,
+                circleColor: 'transparent',
+                circleStrokeWidth: 3.5,
+                circleStrokeColor: '#22C55E',
+                circleOpacity: 0.95,
               }}
             />
           </MapLibreGL.GeoJSONSource>
