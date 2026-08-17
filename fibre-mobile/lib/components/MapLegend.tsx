@@ -639,7 +639,11 @@ export function buildLayerGroups(
 const styles = StyleSheet.create({
   container: {
     position: 'absolute',
-    top: Spacing.md,
+    // Sits below the HLD/Survey/Overlay view switcher (map.tsx), which is
+    // centred at top:14 and ~42dp tall — placing the Layers tab at 62 keeps
+    // the two from overlapping. The panel expands downward, so it never
+    // collides with the switcher above it.
+    top: 62,
     left: Spacing.md,
     minWidth: 180,
     maxWidth: 260,
