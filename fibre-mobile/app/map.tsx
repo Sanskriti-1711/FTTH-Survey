@@ -1951,8 +1951,22 @@ export default function MapScreen() {
       }
 
       // Accept both LineString and MultiLineString (multi-line features are common in imports).
-      const geomType = hldFeature?.geometry?.type;
-      if (!hldFeature?.geometry || (geomType !== 'LineString' && geomType !== 'MultiLineString')) {
+      // If this HLD feature already carries a survey change, the reroute tool
+      // must show and continue from the CURRENT survey geometry (the engineer's
+      // change), not the original HLD path — otherwise the saved edits appear
+      // "lost" the moment the tool opens.
+      let baselineGeom: { type: string; coordinates: unknown[] } | null = hldFeature?.geometry ?? null;
+      const surveyBaseline = getSurveyFeatureForHld(featureId);
+      if (surveyBaseline) {
+        const sGeom = surveyBaseline.survey_geometry as { type?: string; coordinates?: unknown[] } | null;
+        const sType = sGeom?.type;
+        if (sGeom && (sType === 'LineString' || sType === 'MultiLineString')) {
+          baselineGeom = sGeom as { type: string; coordinates: unknown[] };
+          console.log(`[MoveMode] Baseline = survey geometry for ${featureId.slice(-8)} (status=${surveyBaseline.survey_status})`);
+        }
+      }
+      const geomType = baselineGeom?.type;
+      if (!baselineGeom || (geomType !== 'LineString' && geomType !== 'MultiLineString')) {
         console.warn(`[MoveMode] GUARD 3: unsupported geom=${geomType}, featureId=${featureId.slice(-12)}`);
         return;
       }
@@ -1960,8 +1974,8 @@ export default function MapScreen() {
       // Extract coordinates: MultiLineString uses the first line's coordinate array.
       const rawCoords =
         geomType === 'MultiLineString'
-          ? (hldFeature.geometry.coordinates as [number, number][][])[0] ?? []
-          : (hldFeature.geometry.coordinates as [number, number][]);
+          ? (baselineGeom.coordinates as [number, number][][])[0] ?? []
+          : (baselineGeom.coordinates as [number, number][]);
       const coords = rawCoords as [number, number][];
       const coordsCopy = coords.map(([lng, lat]) => [lng, lat] as [number, number]);
       const originalCopy = coords.map(([lng, lat]) => [lng, lat] as [number, number]);
@@ -1972,7 +1986,7 @@ export default function MapScreen() {
       autoOverlayOnEdit();
       console.log(`[MoveMode] Activated for ${featureId.slice(-8)} — ${coordsCopy.length} vertices`);
     }
-  }, [selectedLineFeature, lineMoveMode, autoOverlayOnEdit, importFeatureIdMap, surveyFeatures]);
+  }, [selectedLineFeature, lineMoveMode, autoOverlayOnEdit, importFeatureIdMap, surveyFeatures, getSurveyFeatureForHld]);
 
   // ── Save the temporary line geometry to the survey-features store ──────
   // Creates or updates a SurveyFeature with the modified geometry.
