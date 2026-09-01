@@ -223,6 +223,17 @@ interface MapLibreMapProps {
   vertexDragTarget?: { featureId: string; layerId: string; vertexIdx: number } | null;
   /** When set, renders a highlighted polygon and draggable corner markers for the target polygon feature. */
   polygonEditTarget?: { featureId: string; layerId: string } | null;
+  /** When set, the polygon body itself becomes draggable — a touch anywhere on the
+   *  polygon translates the WHOLE feature (all ring vertices move together). The
+   *  drag reports a cumulative [dLng, dLat] delta; the parent applies it to its
+   *  own coordinate state exactly like vertex drags. Pass null to disable. */
+  polygonMoveTarget?: { featureId: string; layerId: string } | null;
+  /** Called continuously while a polygon body drag is active with the cumulative
+   *  delta from the drag start, so the parent can live-preview the shift. */
+  onPolygonMove?: (featureId: string, layerId: string, dLng: number, dLat: number) => void;
+  /** Called when the user releases the polygon body drag with the final
+   *  cumulative delta from the drag start. */
+  onPolygonMoveEnd?: (featureId: string, layerId: string, dLng: number, dLat: number) => void;
   /** Called when a polygon corner handle is dragged to a new location. */
   onPolygonVertexDragEnd?: (featureId: string, layerId: string, vertexIdx: number, newLng: number, newLat: number) => void;
   /** GPS position of the device — renders a blue user-location dot when set. */
@@ -535,6 +546,9 @@ function NativeMapView({
   onVertexDragEnd,
   vertexDragTarget,
   polygonEditTarget,
+  polygonMoveTarget,
+  onPolygonMove,
+  onPolygonMoveEnd,
   onPolygonVertexDragEnd,
   userLocation,
   draggableLayerIds,
@@ -576,6 +590,12 @@ function NativeMapView({
   const centerRef = useRef<[number, number]>([13.3775, 52.5162]); // Berlin default
   const onDragEndRef = useRef(onFeatureDragEnd);
   onDragEndRef.current = onFeatureDragEnd;
+  const polygonMoveTargetRef = useRef(polygonMoveTarget);
+  polygonMoveTargetRef.current = polygonMoveTarget;
+  const onPolygonMoveRef = useRef(onPolygonMove);
+  onPolygonMoveRef.current = onPolygonMove;
+  const onPolygonMoveEndRef = useRef(onPolygonMoveEnd);
+  onPolygonMoveEndRef.current = onPolygonMoveEnd;
   const editHandleRef = useRef<{ coords: [number, number][]; isPolygon: boolean; featureId: string; layerId: string } | null>(null);
   const onVertexDragEndRef = useRef(onVertexDragEnd);
   onVertexDragEndRef.current = onVertexDragEnd;
@@ -1217,6 +1237,110 @@ function NativeMapView({
     })
   ).current;
 
+  // ── Whole-polygon Move state + PanResponder ─────────────────────────────
+  // Unlike vertex drag (which moves ONE corner), the polygon Move tool drags
+  // the polygon BODY: a touch anywhere inside the projected ring translates
+  // the WHOLE feature, reporting a cumulative [dLng, dLat] delta to the
+  // parent who applies it to its polygonEditCoords state.
+  const [isPolygonMoving, setIsPolygonMoving] = useState(false);
+  const polygonMoveRef = useRef<{
+    featureId: string;
+    layerId: string;
+    startLng: number;
+    startLat: number;
+    startScreenX: number;
+    startScreenY: number;
+    cumLng: number;
+    cumLat: number;
+    active: boolean;
+  } | null>(null);
+
+  /** Ray-cast point-in-polygon test on projected screen points. */
+  const pointInRing = useCallback((px: number, py: number, ring: Array<{ x: number; y: number }>): boolean => {
+    let inside = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const xi = ring[i].x, yi = ring[i].y;
+      const xj = ring[j].x, yj = ring[j].y;
+      const intersect = ((yi > py) !== (yj > py)) &&
+        (px < ((xj - xi) * (py - yi)) / ((yj - yi) || 1e-9) + xi);
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  }, []);
+
+  const polygonMovePanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: (evt) => {
+        if (!onPolygonMoveRef.current && !onPolygonMoveEndRef.current) return false;
+        const target = polygonMoveTargetRef.current;
+        if (!target) return false;
+        const positions = vertexScreenRef.current;
+        if (!positions || positions.length < 3) return false;
+        const px = evt.nativeEvent.locationX ?? evt.nativeEvent.pageX;
+        const py = evt.nativeEvent.locationY ?? evt.nativeEvent.pageY;
+        // Touch must land INSIDE the projected ring (the polygon body),
+        // not merely near it — the body is what Move translates.
+        if (!pointInRing(px, py, positions)) return false;
+        polygonMoveRef.current = {
+          featureId: target.featureId,
+          layerId: target.layerId,
+          startLng: positions[0].coords[0],
+          startLat: positions[0].coords[1],
+          startScreenX: 0,
+          startScreenY: 0,
+          cumLng: 0,
+          cumLat: 0,
+          active: true,
+        };
+        setIsPolygonMoving(true);
+        return true;
+      },
+      onMoveShouldSetPanResponder: () => polygonMoveRef.current?.active === true,
+      onPanResponderGrant: (evt) => {
+        const ds = polygonMoveRef.current;
+        if (!ds) return;
+        ds.startScreenX = evt.nativeEvent.pageX;
+        ds.startScreenY = evt.nativeEvent.pageY;
+      },
+      onPanResponderMove: (evt) => {
+        const ds = polygonMoveRef.current;
+        if (!ds || !ds.active) return;
+        if (!ds.startScreenX) {
+          ds.startScreenX = evt.nativeEvent.pageX;
+          ds.startScreenY = evt.nativeEvent.pageY;
+          return;
+        }
+        const dx = evt.nativeEvent.pageX - ds.startScreenX;
+        const dy = evt.nativeEvent.pageY - ds.startScreenY;
+        const scale = 256 * Math.pow(2, zoomRef.current);
+        const cosLat = Math.cos((ds.startLat * Math.PI) / 180);
+        const lngPerPixel = 360 / (scale * cosLat);
+        const latPerPixel = 180 / scale;
+        ds.cumLng = dx * lngPerPixel;
+        ds.cumLat = -dy * latPerPixel;
+        if (onPolygonMoveRef.current) {
+          onPolygonMoveRef.current(ds.featureId, ds.layerId, ds.cumLng, ds.cumLat);
+        }
+      },
+      onPanResponderRelease: () => {
+        const ds = polygonMoveRef.current;
+        if (ds && ds.active && onPolygonMoveEndRef.current) {
+          onPolygonMoveEndRef.current(ds.featureId, ds.layerId, ds.cumLng, ds.cumLat);
+        }
+        polygonMoveRef.current = null;
+        setIsPolygonMoving(false);
+      },
+      onPanResponderTerminate: () => {
+        const ds = polygonMoveRef.current;
+        if (ds && ds.active && onPolygonMoveEndRef.current) {
+          onPolygonMoveEndRef.current(ds.featureId, ds.layerId, ds.cumLng, ds.cumLat);
+        }
+        polygonMoveRef.current = null;
+        setIsPolygonMoving(false);
+      },
+    })
+  ).current;
+
   // ── Long-press handler — initiates point drag, or vertex drag when
   //     the long-press lands near an editing vertex ───────────────────────
   const handleLongPress = useCallback(
@@ -1473,7 +1597,7 @@ function NativeMapView({
   // When vertexDragTarget or polygonEditTarget is set, find the target
   // feature in the layers and build point features for each vertex.
   const editHandleData = useMemo(() => {
-    const target = vertexDragTarget ?? polygonEditTarget;
+    const target = vertexDragTarget ?? polygonEditTarget ?? polygonMoveTarget;
     if (!target) return null;
     for (const layerData of layers) {
       // Match exact layer ID OR temp-preview- prefixed version (used during Move Mode)
@@ -1605,7 +1729,7 @@ function NativeMapView({
         androidView="texture"
         onPress={handlePress}
         onLongPress={handleLongPress}
-        dragPan={!isDragging && !isVertexDragging}
+        dragPan={!isDragging && !isVertexDragging && !isPolygonMoving}
         touchZoom={!isDragging && !isVertexDragging}
         touchPitch={!isDragging && !isVertexDragging}
         touchRotate={!isDragging && !isVertexDragging}
@@ -1728,8 +1852,10 @@ function NativeMapView({
           );
         })}
 
-        {/* ── Vertex Markers — rendered when a line/polygon is being edited ── */}
-        {editHandleData && (
+        {/* ── Vertex Markers — rendered when a line/polygon is being edited.
+             Hidden in whole-polygon Move mode — the corners stay put there
+             (the body translates), so showing draggable handles is misleading. ── */}
+        {editHandleData && !polygonMoveTarget && (
           <MapLibreGL.GeoJSONSource
             id={`ml-vert-src-${editHandleData.layerId}-${editHandleData.featureId}`}
             onPress={handleVertexPress}
@@ -1896,6 +2022,19 @@ function NativeMapView({
           style={StyleSheet.absoluteFill}
           pointerEvents="auto"
           {...vertexPanResponder.panHandlers}
+        />
+      )}
+
+      {/* ── Whole-polygon Move overlay — present in polygon Move mode so a
+            single touch-and-drag on the polygon BODY translates the whole
+            feature. onStartShouldSetPanResponder returns false unless the
+            touch lands inside the projected ring, so pan/zoom elsewhere
+            still works normally. ─── */}
+      {polygonMoveTarget && (onPolygonMove || onPolygonMoveEnd) && (
+        <View
+          style={StyleSheet.absoluteFill}
+          pointerEvents="auto"
+          {...polygonMovePanResponder.panHandlers}
         />
       )}
 
@@ -2261,6 +2400,9 @@ function WebMapView({
   onVertexDragEnd,
   vertexDragTarget,
   polygonEditTarget,
+  polygonMoveTarget,
+  onPolygonMove,
+  onPolygonMoveEnd,
   onPolygonVertexDragEnd,
   userLocation,
   draggableLayerIds,
@@ -2599,6 +2741,12 @@ function WebMapView({
   vertexDragTargetRef.current = vertexDragTarget;
   const polygonEditTargetRef = useRef(polygonEditTarget);
   polygonEditTargetRef.current = polygonEditTarget;
+  const polygonMoveTargetRef = useRef(polygonMoveTarget);
+  polygonMoveTargetRef.current = polygonMoveTarget;
+  const onPolygonMoveRef = useRef(onPolygonMove);
+  onPolygonMoveRef.current = onPolygonMove;
+  const onPolygonMoveEndRef = useRef(onPolygonMoveEnd);
+  onPolygonMoveEndRef.current = onPolygonMoveEnd;
 
   // Effect: render/update edit handles when the active vertex target changes
   useEffect(() => {
@@ -3207,6 +3355,103 @@ function WebMapView({
       for (const fn of cleanupFns) try { fn(); } catch {}
     };
 }, [status, vertexDragTarget, polygonEditTarget, onVertexDragEnd, onPolygonVertexDragEnd, applyVertexGeometryUpdate, snapshotGeometryCoords]);
+
+  // ── Whole-polygon Move effect (web) — polygon body translates together ──
+  // Mirrors the point/vertex drag: mousedown on the polygon's rendered layer
+  // starts a translate; mousemove shifts every ring vertex by the same delta;
+  // mouseup reports the cumulative delta to the parent.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !polygonMoveTargetRef.current || !onPolygonMoveRef.current || status !== 'ready') return;
+
+    const target = polygonMoveTargetRef.current;
+    const fillLayerId = `ml-lyr-${target.layerId}`;
+    const outlineId = `ml-out-${target.layerId}`;
+    // The polygon may be rendered under the temp-preview-<layerId> id.
+    const previewFillId = `ml-lyr-temp-preview-${target.layerId}`;
+    const canvas = map.getCanvas();
+    const cleanupFns: (() => void)[] = [];
+
+    const containerToLngLat = (e: any) => {
+      if (e.lngLat) return e.lngLat;
+      try {
+        const rect = map.getContainer().getBoundingClientRect();
+        return map.unproject([e.clientX - rect.left, e.clientY - rect.top]);
+      } catch { return null; }
+    };
+
+    const moveState = {
+      active: false as boolean,
+      featureId: '',
+      layerId: '',
+      startLng: 0,
+      startLat: 0,
+      cumLng: 0,
+      cumLat: 0,
+      startPoint: { x: 0, y: 0 },
+    };
+
+    const onMove = (e: any) => {
+      if (!moveState.active) return;
+      const lngLat = containerToLngLat(e);
+      if (!lngLat) return;
+      moveState.cumLng = lngLat.lng - moveState.startLng;
+      moveState.cumLat = lngLat.lat - moveState.startLat;
+      onPolygonMoveRef.current!(moveState.featureId, moveState.layerId, moveState.cumLng, moveState.cumLat);
+    };
+
+    const onUp = () => {
+      if (!moveState.active) return;
+      moveState.active = false;
+      try { map.getCanvas().style.cursor = ''; } catch {}
+      if ((Math.abs(moveState.cumLng) > 1e-9 || Math.abs(moveState.cumLat) > 1e-9) && onPolygonMoveEndRef.current) {
+        onPolygonMoveEndRef.current(moveState.featureId, moveState.layerId, moveState.cumLng, moveState.cumLat);
+      }
+    };
+
+    const onDown = (e: any) => {
+      e.preventDefault();
+      const feature = e.features?.[0];
+      if (!feature) return;
+      const props = feature.properties ?? {};
+      const fid = props._id as string | undefined;
+      const lid = props._layer_id as string | undefined;
+      if (!fid || !lid) return;
+      moveState.active = true;
+      moveState.featureId = fid.replace(/^temp-preview-/, '');
+      moveState.layerId = lid.replace(/^temp-preview-/, '');
+      moveState.startLng = e.lngLat.lng;
+      moveState.startLat = e.lngLat.lat;
+      moveState.cumLng = 0;
+      moveState.cumLat = 0;
+      moveState.startPoint = e.point ? { x: e.point.x, y: e.point.y } : { x: 0, y: 0 };
+      map.getCanvas().style.cursor = 'grabbing';
+    };
+
+    canvas.addEventListener('mousemove', onMove);
+    canvas.addEventListener('mouseup', onUp);
+    canvas.addEventListener('mouseleave', onUp);
+    cleanupFns.push(() => {
+      canvas.removeEventListener('mousemove', onMove);
+      canvas.removeEventListener('mouseup', onUp);
+      canvas.removeEventListener('mouseleave', onUp);
+    });
+
+    for (const layerId of [previewFillId, fillLayerId, outlineId]) {
+      try {
+        if (map.getLayer(layerId)) {
+          map.on('mousedown', layerId, onDown);
+          cleanupFns.push(() => {
+            try { map.off('mousedown', layerId, onDown); } catch {}
+          });
+        }
+      } catch {}
+    }
+
+    return () => {
+      for (const fn of cleanupFns) try { fn(); } catch {}
+    };
+  }, [status, polygonMoveTarget, onPolygonMove, onPolygonMoveEnd]);
 
   // ── Fly-to imported center ────────────────────────────────────────────
   useEffect(() => {

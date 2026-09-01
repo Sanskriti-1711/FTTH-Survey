@@ -40,6 +40,10 @@ interface PolygonToolbarProps {
   hasUnsavedChanges?: boolean;
   /** Called when user confirms deleting the polygon */
   onDelete?: () => void;
+  /** Whether whole-polygon Move (translate) mode is active */
+  moveMode?: boolean;
+  /** Called when user taps the Move button (whole-polygon translate) */
+  onToggleMove?: () => void;
 }
 
 // ── Action definitions ─────────────────────────────────────────────────────
@@ -54,6 +58,7 @@ interface ActionDef {
 }
 
 const ACTIONS: ActionDef[] = [
+  { id: 'move', label: 'Move', icon: '✥', enabled: true },
   { id: 'undo', label: 'Undo', icon: '↩️', enabled: true },
   { id: 'cancel', label: 'Cancel', icon: '✕', danger: true, enabled: true },
   { id: 'delete', label: 'Delete', icon: '🗑️', danger: true, enabled: true },
@@ -71,6 +76,8 @@ export default function PolygonToolbar({
   onCancel,
   hasUnsavedChanges = false,
   onDelete,
+  moveMode = false,
+  onToggleMove,
 }: PolygonToolbarProps) {
   const colors = useThemeStore((s) => s.colors);
   const slideAnim = useRef(new Animated.Value(0)).current;
@@ -120,6 +127,7 @@ export default function PolygonToolbar({
             </Text>
             <Text style={[styles.headerSubtitle, { color: colors.textTertiary }]} numberOfLines={1}>
               {selectedFeature?.layerName ?? 'Polygon Layer'} · Polygon
+              {moveMode && ' · Move Mode'}
               {hasUnsavedChanges && ' · Unsaved'}
             </Text>
           </View>
@@ -141,6 +149,7 @@ export default function PolygonToolbar({
         contentContainerStyle={styles.actionsContainer}
       >
         {ACTIONS.filter((a) => !(a.id === 'delete' && !onDelete)).map((action) => {
+          const isMove = action.id === 'move';
           const isUndo = action.id === 'undo';
           const isSave = action.id === 'save';
           const isCancel = action.id === 'cancel';
@@ -148,6 +157,7 @@ export default function PolygonToolbar({
           const showBadge = isUndo && undoCount > 0;
 
           const isEnabled = action.enabled === true;
+          const isMoveActive = isMove && moveMode;
           const isSaveActive = isSave && hasUnsavedChanges;
           const isDeleteArmed = isDelete && confirmDelete;
 
@@ -159,7 +169,11 @@ export default function PolygonToolbar({
           if (isEnabled) {
             opacity = 1;
             textColor = colors.textSecondary;
-            if (isSaveActive) {
+            if (isMoveActive) {
+              bgColor = '#FF8C00' + '20';
+              borderColor = '#FF8C00';
+              textColor = '#FF8C00';
+            } else if (isSaveActive) {
               bgColor = colors.primary + '20';
               borderColor = colors.primary;
               textColor = colors.primary;
@@ -186,7 +200,8 @@ export default function PolygonToolbar({
                 disabled={!isEnabled || (isSave && !hasUnsavedChanges)}
                 activeOpacity={0.7}
                 onPress={() => {
-                  if (isSave && onSave) onSave();
+                  if (isMove && onToggleMove) onToggleMove();
+                  else if (isSave && onSave) onSave();
                   else if (isCancel && onCancel) onCancel();
                   else if (isUndo && onUndo) onUndo();
                   else if (isDelete) {
@@ -206,7 +221,7 @@ export default function PolygonToolbar({
                   style={[styles.actionLabel, { color: textColor }]}
                   numberOfLines={1}
                 >
-                  {isDeleteArmed ? 'Confirm?' : action.label}
+                  {isMove && moveMode ? 'Move: ON' : isDeleteArmed ? 'Confirm?' : action.label}
                 </Text>
               </TouchableOpacity>
 
@@ -218,6 +233,11 @@ export default function PolygonToolbar({
                 </View>
               )}
 
+              {isMove && (
+                <Text style={[styles.statusLabel, { color: moveMode ? '#FF8C00' : colors.textTertiary }]}>
+                  {moveMode ? 'Drag body' : 'Whole move'}
+                </Text>
+              )}
               {isEnabled && isSave && (
                 <Text style={[styles.statusLabel, { color: hasUnsavedChanges ? colors.primary : colors.textTertiary }]}>
                   {hasUnsavedChanges ? 'Unsaved' : 'No changes'}
@@ -240,9 +260,13 @@ export default function PolygonToolbar({
 
       {/* ── Hint text ──────────────────────────────────────────────────── */}
       <Text style={[styles.hintText, { color: colors.textTertiary }]}>
-        {hasUnsavedChanges
-          ? 'Drag corners to adjust · Tap Save to persist · Tap Cancel to discard'
-          : 'Drag corners to adjust the polygon · Tap ✕ to deselect'}
+        {moveMode
+          ? hasUnsavedChanges
+            ? 'Drag the polygon body to move it · Tap Save to persist'
+            : 'Drag the polygon body to move it as a whole · Tap ✕ to deselect'
+          : hasUnsavedChanges
+            ? 'Drag corners to adjust · Tap Save to persist · Tap Cancel to discard'
+            : 'Drag corners to adjust the polygon · Tap Move to translate it · Tap ✕ to deselect'}
       </Text>
     </Animated.View>
   );

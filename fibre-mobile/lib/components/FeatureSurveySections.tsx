@@ -134,6 +134,9 @@ function formatSavedDate(iso: string): string {
 interface Props {
   featureId: string;
   layerId: string;
+  /** Current feature geometry (used to create the SurveyFeature record when
+   *  the engineer writes network attributes without a geometry change). */
+  initialGeometry?: Record<string, unknown> | null;
 }
 
 // ── Color Helpers ─────────────────────────────────────────────────────────
@@ -160,7 +163,7 @@ function getProbabilityColor(prob: string) {
 
 // ── Component ─────────────────────────────────────────────────────────────
 
-export default function FeatureSurveySections({ featureId, layerId }: Props) {
+export default function FeatureSurveySections({ featureId, layerId, initialGeometry }: Props) {
   const colors = useThemeStore((s) => s.colors);
   const store = useSurveyStore();
 
@@ -200,6 +203,22 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
   const [evidenceDescription, setEvidenceDescription] = useState('');
   const [evidenceWeather, setEvidenceWeather] = useState('');
 
+  // Network Attributes Module (trench class / duct capacity / aerial flag)
+  // These values ride in survey_attributes so LLD's _survey_capacity(props),
+  // Mode A trench mirroring and the aerial-drop planner can read the
+  // engineer's field observation. Standardized engine keys:
+  //   trench  -> trench_type (Feeder | Distribution | Garden)
+  //   duct    -> duct_type (single|twin|quad), capacity_total, spare_capacity
+  //              (%), occupied, condition (good|partial|blocked|collapsed)
+  //   premise -> aerial_required (bool)
+  const [netTrenchClass, setNetTrenchClass] = useState(''); // Feeder|Distribution|Garden
+  const [netDuctType, setNetDuctType] = useState('');       // single|twin|quad
+  const [netCapacity, setNetCapacity] = useState('');
+  const [netSpare, setNetSpare] = useState('');
+  const [netOccupied, setNetOccupied] = useState(false);
+  const [netCondition, setNetCondition] = useState('');
+  const [netAerial, setNetAerial] = useState(false);
+
   // Status Module
   const [surveyStatus, setSurveyStatus] = useState<string>('not_started');
   const [fieldNotes, setFieldNotes] = useState('');
@@ -216,6 +235,7 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
     hazard?: string;
     evidence?: string;
     status?: string;
+    network?: string;
   }>({});
 
   useEffect(() => {
@@ -240,6 +260,13 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
         setEvidenceWeather('');
         setSurveyStatus('not_started');
         setFieldNotes('');
+        setNetTrenchClass('');
+        setNetDuctType('');
+        setNetCapacity('');
+        setNetSpare('');
+        setNetOccupied(false);
+        setNetCondition('');
+        setNetAerial(false);
         setSavedDates({});
 
         // Fire all fetchers in parallel; each is independent.
@@ -483,6 +510,79 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
   };
 
   const isTrenchLayer = layerId === 'trenches' || layerId.includes('trench');
+  const isDuctLayer = layerId.includes('duct');
+  const isPremiseLayer = layerId.includes('premise') || layerId.includes('object') || layerId.includes('polygon') || layerId === 'premises';
+
+  // ── Network attributes: merge capacity/condition/aerial into the survey
+  //    features store (survey_attributes), creating the record if needed ──
+  const handleSaveNetworkAttrs = async () => {
+    const backendId = requireBackendFeature();
+    if (!backendId) return;
+    try {
+      const sfStore = useSurveyFeaturesStore.getState();
+      const existing = sfStore.getSurveyFeatureForHld(backendId);
+      const attrs: Record<string, unknown> = {
+        ...(existing?.survey_attributes ?? {}),
+      };
+      if (isTrenchLayer) {
+        // LLD trench classification — Feeder | Distribution | Garden. This is
+        // the key Mode A/B read for mirroring garden trenches into final_trenches
+        // and for BOQ/construction planning. Distinct from the construction type
+        // (new_trench / existing_duct …) captured in the Trench module above.
+        if (netTrenchClass) attrs.trench_type = netTrenchClass;
+      }
+      if (isDuctLayer) {
+        if (netDuctType) attrs.duct_type = netDuctType;
+        if (netCapacity) attrs.capacity_total = parseInt(netCapacity, 10);
+        if (netSpare) attrs.spare_capacity = parseInt(netSpare, 10);
+        attrs.occupied = netOccupied;
+        if (netCondition) attrs.condition = netCondition;
+      }
+      if (isPremiseLayer || isDuctLayer) {
+        attrs.aerial_required = netAerial;
+      }
+      if (existing) {
+        await sfStore.updateSurveyFeature(existing.id, layerId, {
+          survey_attributes: attrs,
+          survey_status: existing.survey_status === 'new' ? 'new' : ('modified' as const),
+        });
+      } else {
+        await sfStore.upsertSurveyFeature(
+          backendId,
+          layerId,
+          layerId.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase()),
+          (initialGeometry ?? { type: 'Point', coordinates: [0, 0] }) as Record<string, unknown>,
+          attrs,
+          initialGeometry ?? null,
+          {},
+          'Captured network attributes',
+        );
+      }
+      showToast('Network attributes saved', 'success');
+      setSavedDates((p) => ({ ...p, network: formatSavedDate(new Date().toISOString()) }));
+      setActiveModule(null);
+    } catch (err) {
+      const m = err instanceof Error ? err.message : 'Failed to save network attributes';
+      showToast(m, 'error');
+    }
+  };
+
+  // ── Prefill network attrs from an existing survey feature ──
+  useEffect(() => {
+    const sf = useSurveyFeaturesStore.getState().getSurveyFeatureForHld(featureId);
+    const a = (sf?.survey_attributes ?? {}) as Record<string, unknown>;
+    // Normalize stored case so chips compare cleanly (Feeder|Distribution|Garden).
+    if (a.trench_type) {
+      const raw = String(a.trench_type);
+      setNetTrenchClass(raw.charAt(0).toUpperCase() + raw.slice(1));
+    }
+    if (a.duct_type) setNetDuctType(String(a.duct_type).toLowerCase());
+    setNetCapacity(a.capacity_total != null ? String(a.capacity_total) : '');
+    setNetSpare(a.spare_capacity != null ? String(a.spare_capacity) : '');
+    setNetOccupied(a.occupied === true || a.occupied === 'true' || a.occupied === 'True' || a.occupied === 1 || a.occupied === '1');
+    setNetCondition(a.condition ? String(a.condition) : '');
+    setNetAerial(a.aerial_required === true || a.aerial_required === 'true' || a.aerial_required === 'True' || a.aerial_required === '1' || a.aerial_required === 1);
+  }, [featureId]);
 
   const toggleModule = (name: string) => {
     setActiveModule(activeModule === name ? null : name);
@@ -866,7 +966,138 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
         )}
       </View>
 
-      {/* Module 5: Survey Status */}
+      {/* Module 5: Network Attributes (LLD-facing field data) */}
+      {(isTrenchLayer || isDuctLayer || isPremiseLayer) && (
+        <View style={[styles.sectionCard, { backgroundColor: colors.surface }]}>
+          <View style={styles.sectionHeader}>
+            <View style={styles.sectionHeaderLeft}>
+              <Text style={{ fontSize: 20, marginRight: 6 }}>🧵</Text>
+              <View>
+                <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>Network Attributes</Text>
+                <Text style={[styles.sectionSubtitle, { color: colors.textTertiary }]}>Field data that drives LLD routing</Text>
+              </View>
+              {renderSavedChip(savedDates.network)}
+            </View>
+            <TouchableOpacity
+              style={[styles.moduleToggle, { backgroundColor: activeModule === 'network' ? colors.primary + '20' : 'transparent' }]}
+              onPress={() => toggleModule('network')}
+            >
+              <ChevronRight size={16} stroke={colors.primary} style={activeModule === 'network' ? { transform: [{ rotate: '90deg' }] } : undefined} />
+            </TouchableOpacity>
+          </View>
+
+          {/* Trench classification — Feeder | Distribution | Garden (LLD TRENCH_TYPE) */}
+          {isTrenchLayer && (
+            <>
+              <Text style={[styles.sectionLabel, { color: colors.textPrimary }]}>Trench Classification</Text>
+              <View style={styles.categoryGrid}>
+                {['Feeder', 'Distribution', 'Garden'].map((c) => (
+                  <TouchableOpacity
+                    key={c}
+                    style={[styles.categoryChip, { backgroundColor: netTrenchClass === c ? colors.primary + '20' : colors.background, borderColor: netTrenchClass === c ? colors.primary : colors.outline }]}
+                    onPress={() => { setNetTrenchClass(c); setActiveModule('network'); }}
+                  >
+                    <Text style={[styles.categoryText, { color: netTrenchClass === c ? colors.primary : colors.textSecondary }]}>{c}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              {activeModule === 'network' && (
+                <Text style={[styles.attrLabel, { color: colors.textTertiary }]}>Feeder runs PDP→MFG, Distribution runs premise→PDP, Garden is the short drop to the building. LLD mirrors Garden trenches into final_trenches.</Text>
+              )}
+            </>
+          )}
+
+          {/* Duct capacity / condition — read by LLD _survey_capacity */}
+          {isDuctLayer && (
+            <>
+              <Text style={[styles.sectionLabel, { color: colors.textPrimary }]}>Duct Type</Text>
+              <View style={styles.categoryGrid}>
+                {['single', 'twin', 'quad'].map((t) => (
+                  <TouchableOpacity
+                    key={t}
+                    style={[styles.categoryChip, { backgroundColor: netDuctType === t ? colors.primary + '20' : colors.background, borderColor: netDuctType === t ? colors.primary : colors.outline }]}
+                    onPress={() => { setNetDuctType(t); setActiveModule('network'); }}
+                  >
+                    <Text style={[styles.categoryText, { color: netDuctType === t ? colors.primary : colors.textSecondary }]}>{t.charAt(0).toUpperCase() + t.slice(1)}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              {activeModule === 'network' && (
+                <View style={styles.moduleContent}>
+                  <View style={styles.attrRow}>
+                    <Text style={[styles.attrLabel, { color: colors.textSecondary }]}>Capacity (ways)</Text>
+                    <TextInput
+                      style={[styles.attrInput, { color: colors.textPrimary, borderColor: colors.outline, backgroundColor: colors.background }]}
+                      value={netCapacity}
+                      onChangeText={setNetCapacity}
+                      keyboardType="numeric"
+                      placeholder="e.g. 4"
+                      placeholderTextColor={colors.textTertiary}
+                    />
+                  </View>
+                  <View style={styles.attrRow}>
+                    <Text style={[styles.attrLabel, { color: colors.textSecondary }]}>Spare capacity %</Text>
+                    <TextInput
+                      style={[styles.attrInput, { color: colors.textPrimary, borderColor: colors.outline, backgroundColor: colors.background }]}
+                      value={netSpare}
+                      onChangeText={setNetSpare}
+                      keyboardType="numeric"
+                      placeholder="e.g. 50"
+                      placeholderTextColor={colors.textTertiary}
+                    />
+                  </View>
+                  <Text style={[styles.sectionLabel, { color: colors.textPrimary }]}>Condition</Text>
+                  <View style={styles.categoryGrid}>
+                    {['good', 'partial', 'blocked', 'collapsed'].map((c) => (
+                      <TouchableOpacity
+                        key={c}
+                        style={[styles.categoryChip, { backgroundColor: netCondition === c ? (c === 'blocked' || c === 'collapsed' ? colors.error + '20' : colors.success + '20') : colors.background, borderColor: netCondition === c ? (c === 'blocked' || c === 'collapsed' ? colors.error : colors.success) : colors.outline }]}
+                        onPress={() => setNetCondition(c)}
+                      >
+                        <Text style={[styles.categoryText, { color: netCondition === c ? (c === 'blocked' || c === 'collapsed' ? colors.error : colors.success) : colors.textSecondary }]}>{c}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  <TouchableOpacity
+                    style={[styles.toggleBtn, { backgroundColor: netOccupied ? colors.warning + '20' : colors.background, borderColor: netOccupied ? colors.warning : colors.outline }]}
+                    onPress={() => setNetOccupied(!netOccupied)}
+                  >
+                    <View style={[styles.toggleCheck, { backgroundColor: netOccupied ? colors.warning : 'transparent', borderColor: netOccupied ? colors.warning : colors.outline }]}>
+                      {netOccupied && <CheckCircle size={12} stroke={colors.onPrimary} fill={colors.onPrimary} />}
+                    </View>
+                    <Text style={[styles.toggleLabel, { color: netOccupied ? colors.warning : colors.textSecondary }]}>Occupied / Full</Text>
+                  </TouchableOpacity>
+                  <Text style={[styles.attrLabel, { color: colors.textTertiary, marginTop: Spacing.sm }]}>Blocked or collapsed ducts are excluded from LLD routing. Spare % inverts against total capacity.</Text>
+                </View>
+              )}
+            </>
+          )}
+
+          {/* Aerial flag — read by Mode A + aerial_drop_planner */}
+          {(isPremiseLayer || isDuctLayer) && (
+            <>
+              <TouchableOpacity
+                style={[styles.toggleBtn, { backgroundColor: netAerial ? colors.primary + '20' : colors.background, borderColor: netAerial ? colors.primary : colors.outline, alignSelf: 'flex-start', marginTop: Spacing.sm }]}
+                onPress={() => setNetAerial(!netAerial)}
+              >
+                <View style={[styles.toggleCheck, { backgroundColor: netAerial ? colors.primary : 'transparent', borderColor: netAerial ? colors.primary : colors.outline }]}>
+                  {netAerial && <CheckCircle size={12} stroke={colors.onPrimary} fill={colors.onPrimary} />}
+                </View>
+                <Text style={[styles.toggleLabel, { color: netAerial ? colors.primary : colors.textSecondary }]}>Aerial drop required</Text>
+              </TouchableOpacity>
+              {activeModule === 'network' && isPremiseLayer && (
+                <Text style={[styles.attrLabel, { color: colors.textTertiary, marginTop: Spacing.sm }]}>Flagging a premise routes its drop overhead (pole route) instead of underground when LLD runs.</Text>
+              )}
+            </>
+          )}
+
+          {(activeModule === 'network' || netTrenchClass !== '' || netDuctType !== '' || netCapacity !== '' || netSpare !== '' || netCondition !== '' || netOccupied || netAerial) && (
+            <Button title="Save Network Attributes" variant="primary" size="sm" onPress={handleSaveNetworkAttrs} style={{ marginTop: Spacing.md }} />
+          )}
+        </View>
+      )}
+
+      {/* Module 6: Survey Status */}
       <View style={[styles.sectionCard, { backgroundColor: colors.surface }]}>
         <View style={styles.sectionHeader}>
           <View style={styles.sectionHeaderLeft}>

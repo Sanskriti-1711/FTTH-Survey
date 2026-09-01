@@ -606,6 +606,7 @@ export default function FeatureDetailScreen() {
           <FeatureSurveySections
             featureId={backendFeatureId}
             layerId={feature.layer_id}
+            initialGeometry={(geojson?.geometry as Record<string, unknown> | null | undefined) ?? null}
           />
         </View>
 

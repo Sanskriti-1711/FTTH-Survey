@@ -528,6 +528,7 @@ export default function MapScreen() {
   // Only one feature can be selected at a time. Toolbar disappears when deselected.
   const [selectedLineFeature, setSelectedLineFeature] = useState<EditingFeature | null>(null);
   const [selectedPolygonFeature, setSelectedPolygonFeature] = useState<EditingFeature | null>(null);
+  const [polygonMoveMode, setPolygonMoveMode] = useState(false);
   const [polygonEditCoords, setPolygonEditCoords] = useState<[number, number][] | null>(null);
   const [polygonEditOriginal, setPolygonEditOriginal] = useState<[number, number][] | null>(null);
   // Original geometry/attributes captured from the RENDERED layer at edit-start.
@@ -2851,8 +2852,51 @@ export default function MapScreen() {
     []
   );
 
+  // ── Whole-polygon Move: translate EVERY ring vertex by a shared delta ──
+  // The map reports a CUMULATIVE [dLng, dLat] from the drag START. We anchor
+  // to the coords captured at the first move event and re-derive from there
+  // on every event, so the delta never double-applies (applying cumulative
+  // deltas to already-shifted coords would drift the ring).
+  const polygonMoveBaseRef = useRef<[number, number][] | null>(null);
+  const handlePolygonMove = useCallback(
+    (featureId: string, layerId: string, dLng: number, dLat: number) => {
+      setPolygonEditCoords((prev) => {
+        // First move event: snapshot the current ring as the anchor.
+        if (!polygonMoveBaseRef.current && prev) {
+          polygonMoveBaseRef.current = prev.map(([lng, lat]) => [lng, lat] as [number, number]);
+        }
+        const base = polygonMoveBaseRef.current;
+        if (!base) return prev;
+        return base.map(([lng, lat]) => [lng + dLng, lat + dLat] as [number, number]);
+      });
+    },
+    []
+  );
+
+  // On release the map gives the FINAL cumulative delta; clear the anchor so
+  // the next drag starts fresh (the live preview already shows the final
+  // position — this only resets state).
+  const handlePolygonMoveEnd = useCallback(
+    (featureId: string, layerId: string, dLng: number, dLat: number) => {
+      polygonMoveBaseRef.current = null;
+      console.log(`[PolygonEdit] Whole-polygon move ended Δ[${dLng.toFixed(6)}, ${dLat.toFixed(6)}]`);
+    },
+    []
+  );
+
+  // Toggle whole-polygon Move mode (toolbar Move button).
+  const handleTogglePolygonMove = useCallback(() => {
+    if (!selectedPolygonFeature) {
+      console.warn('[PolygonMove] GUARD: no selected polygon');
+      return;
+    }
+    setPolygonMoveMode((v) => !v);
+  }, [selectedPolygonFeature]);
+
   const handlePolygonSave = useCallback(() => {
     if (!selectedPolygonFeature || !polygonEditCoords || !polygonEditOriginal) return;
+    setPolygonMoveMode(false);
+    polygonMoveBaseRef.current = null;
 
     const { id: featureId, layerId } = selectedPolygonFeature;
     const surveyGeometry = { type: 'Polygon', coordinates: [polygonEditCoords] };
@@ -2943,6 +2987,8 @@ export default function MapScreen() {
 
   // ── Polygon cancel handler — discard changes and exit editing ──────────
   const handlePolygonCancel = useCallback(() => {
+    setPolygonMoveMode(false);
+    polygonMoveBaseRef.current = null;
     setSelectedPolygonFeature(null);
     setPolygonEditCoords(null);
     setPolygonEditOriginal(null);
@@ -3403,8 +3449,11 @@ export default function MapScreen() {
             vertexDragTarget={memoizedVertexTarget}
             snapEnabled={lineMoveMode && lineToolMode === null}
             snapRadiusM={4}
-            polygonEditTarget={selectedPolygonFeature ? { featureId: `temp-preview-${selectedPolygonFeature.id}`, layerId: `temp-preview-${selectedPolygonFeature.layerId}` } : null}
+            polygonEditTarget={selectedPolygonFeature && !polygonMoveMode ? { featureId: `temp-preview-${selectedPolygonFeature.id}`, layerId: `temp-preview-${selectedPolygonFeature.layerId}` } : null}
             onPolygonVertexDragEnd={handlePolygonVertexDragEnd}
+            polygonMoveTarget={selectedPolygonFeature && polygonMoveMode ? { featureId: `temp-preview-${selectedPolygonFeature.id}`, layerId: `temp-preview-${selectedPolygonFeature.layerId}` } : null}
+            onPolygonMove={handlePolygonMove}
+            onPolygonMoveEnd={handlePolygonMoveEnd}
             draggableLayerIds={draggableLayerIds}
             dragMode={dragMode}
             selectedFeatureId={selectedMapFeatureId ?? undefined}
@@ -3580,6 +3629,8 @@ export default function MapScreen() {
               onCancel={handlePolygonCancel}
               onDelete={handlePolygonDelete}
               hasUnsavedChanges={polygonEditCoords !== null && polygonEditOriginal !== null && JSON.stringify(polygonEditCoords) !== JSON.stringify(polygonEditOriginal)}
+              moveMode={polygonMoveMode}
+              onToggleMove={handleTogglePolygonMove}
             />
           )}
 
@@ -3635,6 +3686,16 @@ export default function MapScreen() {
               // in all display modes — all line features get Reroute, Del Section,
               // Delete (logical), Draw Segment, and Undo via the LineSelectionToolbar.
               onStartEdit={handlePopupEdit}
+              // Move (→ point drag mode): enables the map's point-drag mode and
+              // closes the popup so the engineer can drag the tapped feature.
+              onQuickMove={() => {
+                selectFeature(null);
+                setSelectedMapFeatureId(null);
+                setPopupScreenCoords(null);
+                setDragMode(true);
+                setToolsOpen(false);
+                console.log('[Popup] Move enabled — drag the feature to relocate it');
+              }}
               notesDraft={notesDraft}
               onNotesChange={setNotesDraft}
               onSaveNotes={handleSaveNotes}
