@@ -2270,13 +2270,48 @@ export default function MapScreen() {
     }
 
     const { id: featureId, layerId, layerName } = selectedLineFeature;
-    const surveyGeometry = { type: 'LineString', coordinates: tempLineCoords };
-
-    // Check if a SurveyFeature already exists for this feature. Two id shapes:
-    //   A) featureId is a SurveyFeature UUID (re-editing a survey feature) → match by id
-    //   B) featureId is the HLD feature id (editing a blue HLD line) → match by original_hld_feature
+    // Resolve the existing survey feature BEFORE the no-op guard (it decides
+    // whether the baseline is the previous survey edit or the HLD original).
     const surveyById = surveyFeatures[layerId]?.find((s) => s.id === featureId);
     const existingSurvey = surveyById ?? getSurveyFeatureForHld(featureId);
+    const surveyGeometry = { type: 'LineString', coordinates: tempLineCoords };
+
+    // ── No-op guard: a save whose geometry is identical to the baseline
+    // (or within ~0.5 m) must NOT create/update a SurveyFeature. Silent
+    // no-op saves are how "changes" with zero before/after difference end
+    // up in the database — the LLD then sees old_path == new_path and has
+    // nothing to enforce, so reroutes appear to "not change the trenches".
+    // When the baseline is itself a survey edit (re-edit), compare against
+    // the PREVIOUS survey geometry; otherwise against the HLD original.
+    const baselineForNoop = (() => {
+      if (existingSurvey?.survey_geometry) {
+        const sg = existingSurvey.survey_geometry as { type?: string; coordinates?: unknown } | null;
+        if (sg && sg.type === 'LineString' && Array.isArray(sg.coordinates)) {
+          return sg.coordinates as [number, number][];
+        }
+      }
+      return tempLineOriginal;
+    })();
+    if (baselineForNoop && baselineForNoop.length === tempLineCoords.length) {
+      let maxShift = 0;
+      for (let i = 0; i < baselineForNoop.length; i++) {
+        const a = baselineForNoop[i] as [number, number];
+        const b = tempLineCoords[i] as [number, number];
+        const d = Math.hypot(a[0] - b[0], a[1] - b[1]) * 111000;
+        if (d > maxShift) maxShift = d;
+      }
+      if (maxShift < 0.5) {
+        console.log(`[MoveMode] Save blocked — line ${featureId.slice(-8)} unchanged (max shift ${maxShift.toFixed(1)}m). No SurveyFeature written.`);
+        setTempLineCoords(null);
+        setTempLineOriginal(null);
+        setLineMoveMode(false);
+        return;
+      }
+    }
+
+    // Check if a SurveyFeature already exists for this feature (resolved above
+    // for the no-op guard). The HLD feature's frozen geometry/attributes are
+    // the before-state of the change.
     const { geometry: origGeom, attributes: origAttrs } = findHldFeatureOriginal(featureId, layerId);
 
     // ── Merge the snapped object's details into the line's attributes ──
