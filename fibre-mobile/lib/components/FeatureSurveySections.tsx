@@ -203,16 +203,21 @@ export default function FeatureSurveySections({ featureId, layerId, initialGeome
   const [evidenceDescription, setEvidenceDescription] = useState('');
   const [evidenceWeather, setEvidenceWeather] = useState('');
 
-  // Network Attributes Module (trench class / duct capacity / aerial flag)
+  // Network Attributes Module (trench class / duct capacity / cable / aerial)
   // These values ride in survey_attributes so LLD's _survey_capacity(props),
-  // Mode A trench mirroring and the aerial-drop planner can read the
-  // engineer's field observation. Standardized engine keys:
+  // Mode A trench mirroring, the brownfield fibre register and the
+  // aerial-drop planner can read the engineer's field observation.
+  // Standardized engine keys:
   //   trench  -> trench_type (Feeder | Distribution | Garden)
   //   duct    -> duct_type (single|twin|quad), capacity_total, spare_capacity
   //              (%), occupied, condition (good|partial|blocked|collapsed)
+  //   cable   -> cable_type (Feeder | Distribution), fiber_count / fibre_count
+  //              / capacity_total (strands per cable)
   //   premise -> aerial_required (bool)
   const [netTrenchClass, setNetTrenchClass] = useState(''); // Feeder|Distribution|Garden
   const [netDuctType, setNetDuctType] = useState('');       // single|twin|quad
+  const [netCableType, setNetCableType] = useState('');     // Feeder|Distribution
+  const [netFiberCount, setNetFiberCount] = useState('');   // strands per cable
   const [netCapacity, setNetCapacity] = useState('');
   const [netSpare, setNetSpare] = useState('');
   const [netOccupied, setNetOccupied] = useState(false);
@@ -262,6 +267,8 @@ export default function FeatureSurveySections({ featureId, layerId, initialGeome
         setFieldNotes('');
         setNetTrenchClass('');
         setNetDuctType('');
+        setNetCableType('');
+        setNetFiberCount('');
         setNetCapacity('');
         setNetSpare('');
         setNetOccupied(false);
@@ -511,6 +518,7 @@ export default function FeatureSurveySections({ featureId, layerId, initialGeome
 
   const isTrenchLayer = layerId === 'trenches' || layerId.includes('trench');
   const isDuctLayer = layerId.includes('duct');
+  const isCableLayer = layerId.includes('cable');
   const isPremiseLayer = layerId.includes('premise') || layerId.includes('object') || layerId.includes('polygon') || layerId === 'premises';
 
   // ── Network attributes: merge capacity/condition/aerial into the survey
@@ -537,6 +545,21 @@ export default function FeatureSurveySections({ featureId, layerId, initialGeome
         if (netSpare) attrs.spare_capacity = parseInt(netSpare, 10);
         attrs.occupied = netOccupied;
         if (netCondition) attrs.condition = netCondition;
+      }
+      if (isCableLayer) {
+        // Fibre count is PER CABLE (strands in that one physical cable), not
+        // per bundle — Feeder 288, Distribution >= 48 sized by households
+        // served, Garden 12. Written under every spelling the brownfield
+        // fibre register reads (capacity_total / fibre_count / fiber_count).
+        if (netCableType) attrs.cable_type = netCableType;
+        if (netFiberCount) {
+          const strands = parseInt(netFiberCount, 10);
+          if (!isNaN(strands) && strands > 0) {
+            attrs.fiber_count = strands;
+            attrs.fibre_count = strands;
+            attrs.capacity_total = strands;
+          }
+        }
       }
       if (isPremiseLayer || isDuctLayer) {
         attrs.aerial_required = netAerial;
@@ -577,7 +600,13 @@ export default function FeatureSurveySections({ featureId, layerId, initialGeome
       setNetTrenchClass(raw.charAt(0).toUpperCase() + raw.slice(1));
     }
     if (a.duct_type) setNetDuctType(String(a.duct_type).toLowerCase());
-    setNetCapacity(a.capacity_total != null ? String(a.capacity_total) : '');
+    if (a.cable_type) {
+      const raw = String(a.cable_type);
+      setNetCableType(raw.charAt(0).toUpperCase() + raw.slice(1));
+    }
+    const strands = a.fiber_count ?? a.fibre_count ?? (isCableLayer ? a.capacity_total : undefined);
+    if (strands != null) setNetFiberCount(String(strands));
+    setNetCapacity(a.capacity_total != null && !isCableLayer ? String(a.capacity_total) : '');
     setNetSpare(a.spare_capacity != null ? String(a.spare_capacity) : '');
     setNetOccupied(a.occupied === true || a.occupied === 'true' || a.occupied === 'True' || a.occupied === 1 || a.occupied === '1');
     setNetCondition(a.condition ? String(a.condition) : '');
@@ -967,7 +996,7 @@ export default function FeatureSurveySections({ featureId, layerId, initialGeome
       </View>
 
       {/* Module 5: Network Attributes (LLD-facing field data) */}
-      {(isTrenchLayer || isDuctLayer || isPremiseLayer) && (
+      {(isTrenchLayer || isDuctLayer || isCableLayer || isPremiseLayer) && (
         <View style={[styles.sectionCard, { backgroundColor: colors.surface }]}>
           <View style={styles.sectionHeader}>
             <View style={styles.sectionHeaderLeft}>
@@ -1073,6 +1102,40 @@ export default function FeatureSurveySections({ featureId, layerId, initialGeome
             </>
           )}
 
+          {/* Cable — Feeder & Distribution survey data; fibre count per cable */}
+          {isCableLayer && (
+            <>
+              <Text style={[styles.sectionLabel, { color: colors.textPrimary }]}>Cable Type</Text>
+              <View style={styles.categoryGrid}>
+                {['Feeder', 'Distribution'].map((t) => (
+                  <TouchableOpacity
+                    key={t}
+                    style={[styles.categoryChip, { backgroundColor: netCableType === t ? colors.primary + '20' : colors.background, borderColor: netCableType === t ? colors.primary : colors.outline }]}
+                    onPress={() => { setNetCableType(t); setActiveModule('network'); }}
+                  >
+                    <Text style={[styles.categoryText, { color: netCableType === t ? colors.primary : colors.textSecondary }]}>{t}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              {activeModule === 'network' && (
+                <View style={styles.moduleContent}>
+                  <View style={styles.attrRow}>
+                    <Text style={[styles.attrLabel, { color: colors.textSecondary }]}>Fibre count</Text>
+                    <TextInput
+                      style={[styles.attrInput, { color: colors.textPrimary, borderColor: colors.outline, backgroundColor: colors.background }]}
+                      value={netFiberCount}
+                      onChangeText={setNetFiberCount}
+                      keyboardType="numeric"
+                      placeholder="e.g. 48"
+                      placeholderTextColor={colors.textTertiary}
+                    />
+                  </View>
+                  <Text style={[styles.attrLabel, { color: colors.textTertiary }]}>Strands in this physical cable — Feeder 288, Distribution ≥ 48, Garden 12. LLD reads this as the cable's capacity.</Text>
+                </View>
+              )}
+            </>
+          )}
+
           {/* Aerial flag — read by Mode A + aerial_drop_planner */}
           {(isPremiseLayer || isDuctLayer) && (
             <>
@@ -1091,7 +1154,7 @@ export default function FeatureSurveySections({ featureId, layerId, initialGeome
             </>
           )}
 
-          {(activeModule === 'network' || netTrenchClass !== '' || netDuctType !== '' || netCapacity !== '' || netSpare !== '' || netCondition !== '' || netOccupied || netAerial) && (
+          {(activeModule === 'network' || netTrenchClass !== '' || netDuctType !== '' || netCableType !== '' || netFiberCount !== '' || netCapacity !== '' || netSpare !== '' || netCondition !== '' || netOccupied || netAerial) && (
             <Button title="Save Network Attributes" variant="primary" size="sm" onPress={handleSaveNetworkAttrs} style={{ marginTop: Spacing.md }} />
           )}
         </View>
