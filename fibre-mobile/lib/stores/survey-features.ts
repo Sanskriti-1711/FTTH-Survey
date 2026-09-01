@@ -250,6 +250,10 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
       const message = err instanceof Error ? err.message : 'Failed to update survey feature';
       console.error('[SurveyFeatures] updateSurveyFeature:', message);
       set({ error: message });
+      // Do not silently convert a failed database write into a successful
+      // local edit. Callers must be able to stop submission/approval when the
+      // reroute was not persisted.
+      throw err instanceof Error ? err : new Error(message);
     }
   },
 

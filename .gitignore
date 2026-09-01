@@ -12,6 +12,22 @@ server.log
 *.log
 
 # ── Build outputs (web exports) ───────────────────────────
+# (existing entries above) — additional ad-hoc web bundle dirs
+fibre-mobile/web-fixed/
+fibre-mobile/web-prod-old-0824/
+fibre-mobile/web-prod-stale-0817/
+web-prod/
+
+# ── Machine-specific local APK dev scripts (hardcoded paths & creds) ──
+# Local build helpers only; never commit — they embed the dev machine's
+# D:/C: paths, LAN IP and PGPASSWORD, and would break or leak on any other
+# machine. EAS (expo) is the portable build path.
+APK_BUILD_STEPS.md
+bundle-state-workaround.gradle
+fix-ninja-regen.sh
+run-apk-build18.cmd
+start-backend-engine.cmd
+strip-regen-init.gradle
 fibre-mobile/dist/
 fibre-mobile/dist-fresh/
 fibre-mobile/build_output/

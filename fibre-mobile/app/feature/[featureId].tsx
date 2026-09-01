@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -82,6 +82,48 @@ export default function FeatureDetailScreen() {
 
   const { projectGeojsons } = useProjectStore();
 
+  // ── Resolve the REAL backend feature UUID for survey API calls ─────────
+  // The route param can be a synthetic id ("imp-feat-<layer>-<n>") when the
+  // GeoJSON carried no backend id, or a SurveyFeature UUID when the engineer
+  // opened an orange survey copy. The survey endpoints (risks/hazards/trenches)
+  // require a valid projects.Feature UUID, so resolve:
+  //   1. the API-loaded feature.id (real HLD UUID) when available
+  //   2. the SurveyFeature's original_hld_feature / hld_feature_id
+  const backendFeatureId = useMemo((): string => {
+    const routeId = (featureId as string) ?? '';
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    // 1. Survey-features store FIRST: if the route id is a survey copy's own
+    //    id, map it to its original HLD feature id. The detail endpoint and
+    //    the survey sections key on the projects.Feature UUID — using the
+    //    copy's id 404s the detail fetch and breaks every survey save.
+    const st = useSurveyFeaturesStore.getState();
+    for (const list of Object.values(st.surveyFeatures)) {
+      const sf = list.find((s) => s.id === routeId);
+      if (sf) {
+        const hldId = sf.original_hld_feature || sf.hld_feature_id;
+        return hldId || routeId;
+      }
+    }
+    // 2. Genuine HLD feature UUID → use as-is.
+    if (isUuid.test(routeId)) return routeId;
+    // 3. Feature loaded from the API carries the real id (synthetic route id).
+    const fid = feature?.id;
+    if (fid && isUuid.test(fid)) {
+      return fid;
+    }
+    // 4. Synthetic id that matches an existing survey copy's HLD link.
+    for (const list of Object.values(st.surveyFeatures)) {
+      const sf = list.find(
+        (s) => s.original_hld_feature === routeId || s.hld_feature_id === routeId
+      );
+      if (sf) {
+        const hldId = sf.original_hld_feature || sf.hld_feature_id;
+        if (hldId) return hldId;
+      }
+    }
+    return routeId;
+  }, [feature, featureId]);
+
   useEffect(() => {
     if (!featureId) return;
     loadData();
@@ -92,7 +134,7 @@ export default function FeatureDetailScreen() {
       setLoading(true);
       if (routeProjectId) {
         try {
-          const data = await apiGetFeatureDetail(routeProjectId, featureId as string);
+          const data = await apiGetFeatureDetail(routeProjectId, backendFeatureId);
           setFeature(data.feature);
           setGeojson(data.geojson);
           setMeasurements(seedMeasurements(data.feature.layer_id, data.feature.properties, data.feature.field_measurements as Record<string, unknown>));
@@ -558,11 +600,11 @@ export default function FeatureDetailScreen() {
             <Text style={[styles.surveyModulesTitle, { color: colors.textPrimary }]}>Survey</Text>
           </View>
           <SurveyChangeDiff
-            featureId={featureId as string}
+            featureId={backendFeatureId}
             projectId={routeProjectId}
           />
           <FeatureSurveySections
-            featureId={featureId as string}
+            featureId={backendFeatureId}
             layerId={feature.layer_id}
           />
         </View>

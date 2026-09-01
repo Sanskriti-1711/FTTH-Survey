@@ -103,6 +103,155 @@ const IMPORT_COLORS: Record<string, string> = {
 
 const IMPORT_ID_PREFIX = 'imp-';
 
+// ── Bundle reroute propagation (the whole corridor moves together) ────────
+// Rerouting ANY line layer in the survey means that route has a problem
+// (constricted area, etc.) — the whole corridor follows: the feeder,
+// distribution and garden/drop sections plus the duct/cable riding on them
+// all move to the NEW path in the SAME survey change, so the approved
+// dataset carries the entire bundle and the LLD never re-creates the old
+// path. Only the moved REGION is re-laid; shared endpoints and parts on
+// other (unmoved) lines stay exactly where they are. "Editing the layers
+// altogether."
+const BUNDLE_LINE_LAYERS = [
+  'final_trenches',
+  'feeder_ducts',
+  'feeder_cable',
+  'distribution_ducts',
+  'distribution_cable',
+  'drop_ducts',
+  'trenches',
+  'ducts',
+  'cables',
+];
+
+/** Equirectangular distance in meters (accurate enough at ~meter scale). */
+function distM(a: [number, number], b: [number, number]): number {
+  const mLng = 111320 * Math.cos(((a[1] + b[1]) / 2) * (Math.PI / 180));
+  const dLng = (b[0] - a[0]) * mLng;
+  const dLat = (b[1] - a[1]) * 110540;
+  return Math.sqrt(dLng * dLng + dLat * dLat);
+}
+
+/** Distance from point p to segment [a, b], in meters. */
+function nearestPointOnLine(path: [number, number][], p: [number, number]): [number, number] {
+  let best: [number, number] = path[0] ?? p;
+  let bestD = Infinity;
+  for (let i = 0; i < path.length - 1; i++) {
+    const a = path[i];
+    const b = path[i + 1];
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const denom = dx * dx + dy * dy;
+    const t = denom === 0 ? 0 : Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / denom));
+    const q: [number, number] = [a[0] + t * dx, a[1] + t * dy];
+    const d = distM(p, q);
+    if (d < bestD) { bestD = d; best = q; }
+  }
+  return best;
+}
+
+function pointSegDistM(p: [number, number], a: [number, number], b: [number, number]): number {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const seg2 = dx * dx + dy * dy;
+  let t = seg2 === 0 ? 0 : ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / seg2;
+  t = Math.max(0, Math.min(1, t));
+  return distM(p, [a[0] + t * dx, a[1] + t * dy]);
+}
+
+/** Nearest point on a polyline path to p; returns the point + distance in meters. */
+function nearestOnPathM(
+  p: [number, number],
+  path: [number, number][],
+): { pt: [number, number]; d: number } {
+  let best: [number, number] = p;
+  let bestD = Infinity;
+  for (let i = 0; i < path.length - 1; i++) {
+    const a = path[i];
+    const b = path[i + 1];
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const seg2 = dx * dx + dy * dy;
+    let t = seg2 === 0 ? 0 : ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / seg2;
+    t = Math.max(0, Math.min(1, t));
+    const q: [number, number] = [a[0] + t * dx, a[1] + t * dy];
+    const d = distM(p, q);
+    if (d < bestD) {
+      bestD = d;
+      best = q;
+    }
+  }
+  return { pt: best, d: bestD };
+}
+
+/**
+ * Re-lay a dependent line onto the rerouted support line, REGION-ONLY:
+ * vertices riding on the moved region of the old path are snapped onto the
+ * new path; vertices outside it (shared endpoints, parts on other lines)
+ * stay exactly where they are. Returns null when nothing moved.
+ */
+function relayDependentCoords(
+  depCoords: [number, number][],
+  oldPath: [number, number][],
+  newPath: [number, number][],
+  tolM: number,
+): [number, number][] | null {
+  // 1. Old-path segments the new path no longer covers = the moved region.
+  const movedSegs: Array<[[number, number], [number, number]]> = [];
+  for (let i = 0; i < oldPath.length - 1; i++) {
+    const a = oldPath[i];
+    const b = oldPath[i + 1];
+    const mid: [number, number] = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    if (nearestOnPathM(mid, newPath).d > tolM) movedSegs.push([a, b]);
+  }
+  if (movedSegs.length === 0) return null;
+
+  // 2. Snap vertices riding on the moved region onto the new path.
+  const out = depCoords.map((p) => {
+    const onMoved = movedSegs.some(([a, b]) => pointSegDistM(p, a, b) <= tolM);
+    return onMoved ? nearestOnPathM(p, newPath).pt : p;
+  });
+
+  // 3. Nothing actually changed → report null (no upsert).
+  const changed = out.some((p, i) => distM(p, depCoords[i]) > 1e-6);
+  return changed ? out : null;
+}
+
+/**
+ * Apply the region relay to a dependent feature geometry (LineString or
+ * MultiLineString). Returns the new geometry or null when nothing moved.
+ */
+function relayFeatureGeom(
+  geom: { type: string; coordinates: unknown } | null | undefined,
+  oldPath: [number, number][],
+  newPath: [number, number][],
+  tolM: number,
+): { type: string; coordinates: unknown } | null {
+  if (!geom) return null;
+  if (geom.type === 'LineString') {
+    const out = relayDependentCoords(geom.coordinates as [number, number][], oldPath, newPath, tolM);
+    return out ? { type: 'LineString', coordinates: out } : null;
+  }
+  if (geom.type === 'MultiLineString') {
+    let changed = false;
+    const lines = (geom.coordinates as [number, number][][]).map((line) => {
+      const out = relayDependentCoords(line, oldPath, newPath, tolM);
+      if (out) {
+        changed = true;
+        return out;
+      }
+      return line;
+    });
+    return changed ? { type: 'MultiLineString', coordinates: lines } : null;
+  }
+  return null;
+}
+
+/** Clean a map layer id (imp-/survey- prefixes) to the raw survey layer key. */
+function cleanLayerId(layerId: string): string {
+  return layerId.replace(/^imp-/, '').replace(/^survey-/, '').replace(/^temp-preview-/, '').replace(/^ml-/, '');
+}
+
 // ── Extract all [lng, lat] pairs from any GeoJSON geometry ───────────────-
 function extractCoords(geom: { type: string; coordinates: unknown }): [number, number][] {
   if (geom.type === 'Point') {
@@ -401,6 +550,10 @@ export default function MapScreen() {
 
   // ── Continue Line state ──────────────────────────────────────────────
   const [continueLineAnchor, setContinueLineAnchor] = useState<number | null>(null);
+  // The free-placed start coordinate of the draw segment (first tap). The
+  // destination is placed by the second tap; the two points become the
+  // saved segment. null until the first tap.
+  const [continueStartPt, setContinueStartPt] = useState<[number, number] | null>(null);
   // Number of points appended so far (0 = none yet). Drives the toolbar step UI
   // and lets the connect handler append A→B→C→D instead of re-truncating.
   const [continueLinePoints, setContinueLinePoints] = useState(0);
@@ -1068,7 +1221,11 @@ export default function MapScreen() {
     // the blue HLD layer. Vertex markers render on this preview layer's
     // source so they follow tempLineCoords instead of original HLD coords.
     const previewLayers: any[] = [];
-    if (lineMoveMode && tempLineCoords && selectedLineFeature) {
+    // In Draw Segment (continue-line) mode the preview only appears once
+    // the two-point segment has actually been drawn — never the whole line.
+    const showLinePreview =
+      lineMoveMode || (lineToolMode === 'continue-line' && continueLinePoints >= 1);
+    if (showLinePreview && tempLineCoords && selectedLineFeature) {
       const previewFeature = {
         type: 'Feature' as const,
         geometry: {
@@ -1121,7 +1278,7 @@ export default function MapScreen() {
     }
 
     return [...hldLayers, ...previewLayers, ...surveyLayers];
-  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, tempLineCoords, selectedLineFeature, selectedPolygonFeature, polygonEditCoords, isolateFeatureId]);
+  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, lineToolMode, continueLinePoints, tempLineCoords, selectedLineFeature, selectedPolygonFeature, polygonEditCoords, isolateFeatureId]);
 
   // Build visible layers from the active project's layers
   const visibleLayers = useMemo(() => {
@@ -1861,6 +2018,7 @@ export default function MapScreen() {
     setContinueLineAnchor(null);
     setContinueLinePoints(0);
     setContinueSnapTarget(null);
+    setContinueStartPt(null);
     lastContinueTapRef.current = null;
     setDeleteSectionRange(null);
   }, []);
@@ -1883,6 +2041,7 @@ export default function MapScreen() {
       setContinueLineAnchor(null);
       setContinueLinePoints(0);
       setContinueSnapTarget(null);
+      setContinueStartPt(null);
       lastContinueTapRef.current = null;
       setDeleteSectionRange(null);
       console.log('[MoveMode] Exited — temp changes discarded');
@@ -1988,11 +2147,126 @@ export default function MapScreen() {
     }
   }, [selectedLineFeature, lineMoveMode, autoOverlayOnEdit, importFeatureIdMap, surveyFeatures, getSurveyFeatureForHld]);
 
+  // ── Bundle reroute propagation ──────────────────────────────────────────
+  // Rerouting a support line (trench/duct) means that route has a problem —
+  // every layer riding on it (duct rides in trench, cable rides in duct)
+  // must follow the NEW path in the same survey change. Only the moved
+  // REGION is re-laid; shared endpoints and parts on other lines stay put.
+  const propagateBundleReroute = useCallback(
+    (supportFeatureId: string, supportLayerId: string, oldPath: [number, number][], newPath: [number, number][]) => {
+      const cleanLayer = cleanLayerId(supportLayerId);
+      // The whole corridor follows: every other line layer (feeder, distribution,
+      // garden/drop, duct, cable) that rides on the moved region is re-laid onto
+      // the new path. The region relay keeps anything not co-located untouched.
+      const dependents = BUNDLE_LINE_LAYERS.filter((l) => l !== cleanLayer);
+      if (dependents.length === 0) {
+        console.log(`[Bundle] No other corridor layers for ${cleanLayer} — nothing to relay`);
+        return;
+      }
+      const tolM = 8; // co-location tolerance (meters) — a vertex is "riding on" the moved region within this
+      let relayedCount = 0;
+      const relayedDesc: string[] = [];
+
+      for (const depLayer of dependents) {
+        const depLayerName = (LAYER_NAMES[depLayer] ?? depLayer.toUpperCase());
+        // Survey store + map layers are keyed by the map layer id ('imp-' prefix)
+        const depMapKey = `${IMPORT_ID_PREFIX}${depLayer}`;
+        const hldFeats = activeGeojsonRef.current[depMapKey] ?? [];
+        const surveySfs = surveyFeatures[depMapKey] ?? [];
+
+        // ── Build candidate list: HLD features + existing survey features ──
+        const candidates: Array<{
+          hldId: string | null;
+          sfId: string | null;
+          baseGeom: { type: string; coordinates: unknown } | null;
+          origGeom: Record<string, unknown> | null;
+          origAttrs: Record<string, unknown> | null;
+        }> = [];
+
+        for (const f of hldFeats) {
+          const props = (f.properties ?? {}) as Record<string, unknown>;
+          const hldId = String(props.id ?? props._id ?? props.feature_id ?? '');
+          if (!hldId) continue;
+          const geom = f.geometry as { type: string; coordinates: unknown } | null;
+          if (!geom || (geom.type !== 'LineString' && geom.type !== 'MultiLineString')) continue;
+          candidates.push({ hldId, sfId: null, baseGeom: geom, origGeom: geom, origAttrs: props });
+        }
+
+        for (const sf of surveySfs) {
+          if (sf.survey_status === 'removed') continue;
+          const sGeom = sf.survey_geometry as { type?: string; coordinates?: unknown } | null;
+          if (!sGeom || (sGeom.type !== 'LineString' && sGeom.type !== 'MultiLineString')) continue;
+          // Skip if already covered via an HLD candidate for the same hld id
+          if (sf.original_hld_feature && candidates.some((c) => c.hldId === sf.original_hld_feature)) continue;
+          candidates.push({
+            hldId: sf.original_hld_feature,
+            sfId: sf.id,
+            baseGeom: sGeom as { type: string; coordinates: unknown },
+            origGeom: (sf.original_geometry as Record<string, unknown> | null) ?? null,
+            origAttrs: (sf.survey_attributes ?? {}) as Record<string, unknown>,
+          });
+        }
+
+        for (const cand of candidates) {
+          const newGeom = relayFeatureGeom(cand.baseGeom, oldPath, newPath, tolM);
+          if (!newGeom) continue;
+
+          const reason = `Rerouted with ${cleanLayer} ${supportFeatureId.slice(-8)} (bundle propagation)`;
+          if (cand.sfId) {
+            // Existing survey feature (standalone / previously created)
+            updateSurveyFeature(cand.sfId, depMapKey, {
+              survey_geometry: newGeom as Record<string, unknown>,
+              survey_status: 'modified',
+            });
+            relayedCount++;
+            relayedDesc.push(`${depLayerName} #${cand.sfId.slice(-6)} (updated)`);
+          } else if (cand.hldId) {
+            // Existing HLD feature → create/update a survey copy
+            const existingSf = surveySfs.find((s) => s.original_hld_feature === cand.hldId);
+            if (existingSf) {
+              updateSurveyFeature(existingSf.id, depMapKey, {
+                survey_geometry: newGeom as Record<string, unknown>,
+                survey_status: 'modified',
+              });
+              relayedCount++;
+              relayedDesc.push(`${depLayerName} #${existingSf.id.slice(-6)} (updated)`);
+            } else {
+              upsertSurveyFeature(
+                cand.hldId, depMapKey, depLayerName,
+                newGeom as Record<string, unknown>,
+                cand.origAttrs ?? {},
+                cand.origGeom,
+                cand.origAttrs,
+                reason,
+              ).then((sf) => {
+                if (sf) console.log(`[Bundle] Relayed ${depLayerName} ${sf.id.slice(-6)} with ${cleanLayer}`);
+              });
+              relayedCount++;
+              relayedDesc.push(`${depLayerName} #${cand.hldId.slice(-6)} (created)`);
+            }
+          }
+        }
+      }
+
+      if (relayedCount > 0) {
+        console.log(`[Bundle] ${cleanLayer} reroute relayed to ${relayedCount} dependent feature(s): ${relayedDesc.join(', ')}`);
+      } else {
+        console.log(`[Bundle] ${cleanLayer} reroute: no other corridor layers ride the moved region`);
+      }
+    },
+    [activeGeojsonRef, surveyFeatures, updateSurveyFeature, upsertSurveyFeature],
+  );
+
   // ── Save the temporary line geometry to the survey-features store ──────
   // Creates or updates a SurveyFeature with the modified geometry.
   // HLD geometry is never touched.
   const handleSaveLine = useCallback(() => {
     if (!selectedLineFeature || !tempLineCoords || !tempLineOriginal) return;
+    // Draw Segment: block saving before both points are placed.
+    if (lineToolMode === 'continue-line' && continueLinePoints === 0) {
+      console.log('[Continue] Draw the segment first — tap start, then destination');
+      return;
+    }
 
     const { id: featureId, layerId, layerName } = selectedLineFeature;
     const surveyGeometry = { type: 'LineString', coordinates: tempLineCoords };
@@ -2078,6 +2352,11 @@ export default function MapScreen() {
           });
         }
       });
+    }    // Bundle propagation belongs only to Reroute. Draw Segment is an
+    // independent two-point addition and must never rewrite neighbouring
+    // corridor features as if the selected line had been diverted.
+    if (lineToolMode !== 'continue-line') {
+      propagateBundleReroute(featureId, layerId, tempLineOriginal, tempLineCoords);
     }
 
     // Clear temp state + exit move mode + exit any line tool mode so the
@@ -2089,10 +2368,11 @@ export default function MapScreen() {
     setContinueLineAnchor(null);
     setContinueLinePoints(0);
     setContinueSnapTarget(null);
+    setContinueStartPt(null);
     lastContinueTapRef.current = null;
     setDeleteSectionRange(null);
     console.log(`[MoveMode] Saved line geometry for ${featureId.slice(-8)} — SurveyFeature ${existingSurvey ? 'updated' : 'created'}${continueSnapTarget ? ` (snapped to ${continueSnapTarget.name})` : ''}`);
-  }, [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, continueSnapTarget, surveyFeatures]);
+  }, [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, continueSnapTarget, surveyFeatures, propagateBundleReroute, lineToolMode, continueLinePoints]);
 
   // ── Delete Section handlers ────────────────────────────────────────────
 
@@ -2144,6 +2424,7 @@ export default function MapScreen() {
       setContinueLineAnchor(null);
       setContinueLinePoints(0);
       setContinueSnapTarget(null);
+      setContinueStartPt(null);
       lastContinueTapRef.current = null;
       setTempLineCoords(null);
       setTempLineOriginal(null);
@@ -2170,11 +2451,14 @@ export default function MapScreen() {
     const coords = (rawCoords as [number, number][]).map(([lng, lat]) => [lng, lat] as [number, number]);
     setTempLineCoords(coords);
     setTempLineOriginal(coords.map(([lng, lat]) => [lng, lat] as [number, number]));
-    setLineMoveMode(true);
+    // Draw Segment is a free two-point tool: NO reroute vertex handles, NO
+    // tap-on-the-line requirement. lineMoveMode stays OFF so the map renders
+    // no vertex markers and taps anywhere on the map are accepted.
     setLineToolMode('continue-line');
     setContinueLineAnchor(null);
     setContinueLinePoints(0);
     setContinueSnapTarget(null);
+    setContinueStartPt(null);
     lastContinueTapRef.current = null;
     autoOverlayOnEdit();
   }, [selectedLineFeature, lineToolMode, importFeatureIdMap, autoOverlayOnEdit]);
@@ -2264,7 +2548,7 @@ export default function MapScreen() {
         },
       });
     }
-    setLineMoveMode(false); setLineToolMode(null); setDeleteSectionRange(null); setContinueLineAnchor(null); setContinueLinePoints(0); setContinueSnapTarget(null); lastContinueTapRef.current = null; setTempLineCoords(null); setTempLineOriginal(null);
+    setLineMoveMode(false); setLineToolMode(null); setDeleteSectionRange(null); setContinueLineAnchor(null); setContinueLinePoints(0); setContinueSnapTarget(null); setContinueStartPt(null); lastContinueTapRef.current = null; setTempLineCoords(null); setTempLineOriginal(null);
   }, [deleteSectionRange, tempLineCoords, tempLineOriginal, selectedLineFeature, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, activeProject]);
 
   // ── Delete Section: tap handler ────────────────────────────────────────
@@ -2309,17 +2593,11 @@ export default function MapScreen() {
     [lineToolMode, selectedLineFeature, tempLineCoords],
   );
 
-  // ── Draw Segment (Continue Line): tap handler ──────────────────────────
-  // Step 1: FIRST tap on the selected line snaps to the nearest vertex and
-  //   sets the ANCHOR vertex — the segment starts from this vertex.
-  // Step 2: NEXT tap connects the anchor to the tapped location. If the tap
-  //   lands ON the selected line itself, it snaps to the nearest vertex
-  //   there ("connect the 2 nearby tapped vertex points"). If the tap lands
-  //   on a Point feature or empty area, it connects to that exact spot.
-  // Step 3+: EVERY following tap APPENDS another segment to the growing
-  //   path — the line becomes A→B→C→D… (multi-segment extension). Only the
-  //   FIRST connection truncates the original tail after the anchor so the
-  //   path extends straight out from the anchor instead of bending back.
+  // ── Draw Segment: independent two-point tool ───────────────────────────
+  // Unlike Reroute, this tool never edits the selected line's existing path.
+  // It creates exactly one new LineString from the nearest point on the
+  // selected line to the nearest existing point (or the tapped location).
+  // There is no continuation state and no bundle propagation.
   const handleContinueLineTap = useCallback(
     (featureId: string, layerId: string, lngLat: [number, number]) => {
       if (lineToolMode !== 'continue-line' || !selectedLineFeature || !tempLineCoords) return;
@@ -2342,101 +2620,74 @@ export default function MapScreen() {
       }
       lastContinueTapRef.current = { lng: lngLat[0], lat: lngLat[1], t: now };
 
-      const expectedPreview = `temp-preview-${selectedLineFeature.layerId}`;
-      const onSelectedLine =
-        layerId === expectedPreview ||
-        (featureId === selectedLineFeature.id && layerId === selectedLineFeature.layerId);
-
-      // ── Nearest-vertex snap helper (shared by both steps) ──
-      const nearestVertexIdx = (pt: [number, number]): number => {
-        let bestIdx = 0;
-        let bestDist = Infinity;
-        tempLineCoords!.forEach(([vlng, vlat], i) => {
-          const d = (pt[0] - vlng) ** 2 + (pt[1] - vlat) ** 2;
-          if (d < bestDist) { bestDist = d; bestIdx = i; }
-        });
-        return bestIdx;
-      };
-
-      // ── Step 1: pick the anchor vertex ──
-      if (continueLineAnchor === null) {
-        if (!onSelectedLine) {
-          console.log('[Continue] Tap the selected line to choose the start vertex');
-          return;
-        }
-        const bestIdx = nearestVertexIdx(lngLat);
-        setContinueLineAnchor(bestIdx);
-        console.log(`[Continue] Anchor set at vertex ${bestIdx}`);
-        return;
-      }
-
-      // ── Step 2+: connect the CURRENT end of the path to the tapped point ──
-      let connectLng: number;
-      let connectLat: number;
-      if (onSelectedLine) {
-        // Tapping the line again → snap to the nearest vertex there and
-        // connect to it (draws a segment between 2 line vertices).
-        const endIdx = nearestVertexIdx(lngLat);
-        if (endIdx === continueLineAnchor && continueLinePoints === 0) {
-          console.log('[Continue] Tapped the anchor vertex itself — ignoring');
-          return;
-        }
-        const [elng, elat] = tempLineCoords[endIdx];
-        connectLng = elng;
-        connectLat = elat;
-        // Connecting to a line vertex, not an object point — clear any prior snap
-        setContinueSnapTarget(null);
-        console.log(`[Continue] Connected to vertex ${endIdx}`);
-      } else {
-        // Tapping elsewhere → snap to a nearby object point (within ~15m)
-        // so the final vertex lands EXACTLY on the object it connects to
-        // (e.g. a newly created premise). This makes the path readable by
-        // LLD automation. If nothing is nearby, use the tapped spot.
-        const snap = findNearestSnapPoint(mapLayerData, lngLat[0], lngLat[1]);
+      // ── Free two-point flow ────────────────────────────────────────────
+      // Draw Segment is a standalone two-point tool: the FIRST tap places
+      // the start point anywhere on the map, the SECOND tap places the
+      // destination. Each tap snaps to the nearest point feature (within
+      // ~15 m) or, failing that, to the nearest point on the selected line.
+      // No tap is required to land on the selected line and no reroute
+      // vertex handles are shown — the map only draws the new orange
+      // segment once both points are placed.
+      const resolveTap = (pt: [number, number]) => {
+        // 1) Snap to the nearest point feature (premise/pdp/mfg/object).
+        const snap = findNearestSnapPoint(mapLayerData, pt[0], pt[1]);
         if (snap) {
-          connectLng = snap.lng;
-          connectLat = snap.lat;
-          setContinueSnapTarget({
-            id: snap.id,
-            layerId: snap.layerId,
-            name: snap.name,
+          return {
             lng: snap.lng,
             lat: snap.lat,
-            properties: { ...snap.properties },
-          });
-          console.log(`[Continue] ✨ Snap → ${snap.name} #${snap.id.slice(-6)} at [${connectLng.toFixed(6)}, ${connectLat.toFixed(6)}]`);
-        } else {
-          connectLng = lngLat[0];
-          connectLat = lngLat[1];
-          setContinueSnapTarget(null);
-          console.log(`[Continue] Connected to [${connectLng.toFixed(6)}, ${connectLat.toFixed(6)}]`);
+            snapTarget: {
+              id: snap.id,
+              layerId: snap.layerId,
+              name: snap.name,
+              lng: snap.lng,
+              lat: snap.lat,
+              properties: { ...snap.properties },
+            },
+          };
         }
-      }
+        // 2) Otherwise snap to the nearest point on the selected line
+        //    (within ~15 m) so the segment connects cleanly to the network.
+        const onLine = nearestPointOnLine(tempLineCoords!, pt);
+        const dLine = (onLine[0] - pt[0]) ** 2 + (onLine[1] - pt[1]) ** 2;
+        if (dLine <= 0.00015 ** 2) {
+          return { lng: onLine[0], lat: onLine[1], snapTarget: null };
+        }
+        // 3) Exact tap location.
+        return { lng: pt[0], lat: pt[1], snapTarget: null };
+      };
 
-      // Build the new path:
-      //   First connection — keep the line up to and including the anchor,
-      //   then go straight to the tapped point (truncates the tail so it
-      //   doesn't bend back and create a V shape).
-      //   Later connections — simply append, growing the path A→B→C→D…
-      const newCoords =
-        continueLinePoints === 0
-          ? [...tempLineCoords.slice(0, continueLineAnchor + 1)]
-          : [...tempLineCoords];
-
-      // ── Guard: skip zero-length segments (tapping the same spot or the
-      //    anchor vertex again would append a duplicate point). ──
-      const lastPt = newCoords[newCoords.length - 1];
-      if (lastPt && Math.abs(lastPt[0] - connectLng) < 1e-9 && Math.abs(lastPt[1] - connectLat) < 1e-9) {
-        console.log('[Continue] Tapped the same point as the current end — ignoring');
+      // ── Step 1: place the start point ──
+      if (continueLineAnchor === null) {
+        const s = resolveTap(lngLat);
+        setContinueStartPt([s.lng, s.lat]);
+        setContinueLineAnchor(0); // marker: start chosen
+        console.log(`[Continue] Start ${s.snapTarget ? `snapped to ${s.snapTarget.name} #${s.snapTarget.id.slice(-6)}` : 'placed'} at [${s.lng.toFixed(6)}, ${s.lat.toFixed(6)}]`);
         return;
       }
 
-      newCoords.push([connectLng, connectLat]);
-      setTempLineCoords(newCoords);
-      setContinueLinePoints((p) => p + 1);
-      console.log(`[Continue] Segment ${continueLinePoints + 1} drawn — path ${tempLineCoords.length} → ${newCoords.length} vertices`);
+      // ── Step 2: place the destination and build the one segment ──
+      if (continueLinePoints === 0 && continueStartPt) {
+        const s = resolveTap(lngLat);
+        const newCoords: [number, number][] = [
+          continueStartPt,
+          [s.lng, s.lat],
+        ];
+        // Guard against a zero-length segment.
+        if (newCoords[0][0] === newCoords[1][0] && newCoords[0][1] === newCoords[1][1]) {
+          console.log('[Continue] Start and destination are the same point — ignoring');
+          return;
+        }
+        setContinueSnapTarget(s.snapTarget);
+        setTempLineCoords(newCoords);
+        setContinueLinePoints(1);
+        console.log(`[Continue] Segment drawn ${s.snapTarget ? `→ snapped to ${s.snapTarget.name} #${s.snapTarget.id.slice(-6)}` : ''} — ${newCoords.length} vertices`);
+        return;
+      }
+
+      // Segment already ready — ignore extra taps (Save to finish).
+      console.log('[Continue] Segment ready — tap Save to finish');
     },
-    [lineToolMode, selectedLineFeature, tempLineCoords, continueLineAnchor, continueLinePoints, mapLayerData],
+    [lineToolMode, selectedLineFeature, tempLineCoords, continueLineAnchor, continueLinePoints, continueStartPt, mapLayerData],
   );
 
   // ── Check if temp line has unsaved changes ──
@@ -3151,7 +3402,7 @@ export default function MapScreen() {
             onVertexDragEnd={lineMoveMode && tempLineCoords && lineToolMode === null ? handleVertexDragEnd : undefined}
             vertexDragTarget={memoizedVertexTarget}
             snapEnabled={lineMoveMode && lineToolMode === null}
-            snapRadiusM={10}
+            snapRadiusM={4}
             polygonEditTarget={selectedPolygonFeature ? { featureId: `temp-preview-${selectedPolygonFeature.id}`, layerId: `temp-preview-${selectedPolygonFeature.layerId}` } : null}
             onPolygonVertexDragEnd={handlePolygonVertexDragEnd}
             draggableLayerIds={draggableLayerIds}

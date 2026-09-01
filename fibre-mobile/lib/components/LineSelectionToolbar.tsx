@@ -58,7 +58,7 @@ interface LineSelectionToolbarProps {
   onContinue?: () => void;
   /** Current step in continue-line: 0=idle, 1=anchor set, 2=connected */
   continueLineStep?: number;
-  /** How many segments have been appended so far in Draw Segment mode */
+  /** Draw Segment is a single independent segment; retained for API compatibility. */
   continueLineSegments?: number;
   /** Label of the object point the draw-segment path snapped to (e.g. 'Snapped to PREMISES #123') */
   continueSnapLabel?: string;
@@ -153,7 +153,7 @@ export default function LineSelectionToolbar({
               {selectedFeature?.layerName ?? 'Line Layer'} · LineString
               {moveMode && ' · Reroute Mode'}
               {deleteSectionMode && ` · Del Section ${deleteSectionStep === 0 ? '' : deleteSectionStep === 1 ? '(select end)' : '(confirm)'}`}
-              {continueMode && ` · Draw Segment ${continueLineStep === 1 ? '(select point)' : continueLineStep === 2 ? continueLineSegments > 1 ? `(${continueLineSegments} segments)` : '(connected)' : ''}`}
+              {continueMode && ` · Draw Segment ${continueLineStep === 1 ? '(select point)' : continueLineStep === 2 ? '(ready to save)' : ''}`}
               {continueMode && continueSnapLabel && ` · ${continueSnapLabel}`}
               {moveMode && hasUnsavedChanges && ' · Unsaved'}
             </Text>
@@ -262,7 +262,7 @@ export default function LineSelectionToolbar({
               )}
               {isContinue && (
                 <Text style={[styles.soonLabel, { color: continueMode ? (continueSnapLabel ? colors.success : '#FF8C00') : colors.textTertiary }]} numberOfLines={1}>
-                  {continueMode ? (continueLineStep === 0 ? 'Tap vertex' : continueLineStep === 1 ? 'Tap point' : continueSnapLabel ? 'Snapped ✓' : 'Tap to extend') : 'Tap to start'}
+                  {continueMode ? (continueLineStep === 0 ? 'Tap start' : continueLineStep === 1 ? 'Tap destination' : continueSnapLabel ? 'Snapped ✓' : 'Tap to extend') : 'Tap to start'}
                 </Text>
               )}
               {isDeleteFeature && (
@@ -299,11 +299,11 @@ export default function LineSelectionToolbar({
             : deleteSectionStep === 1 ? 'Tap the line near another vertex to select end point'
             : 'Tap Confirm to remove the section, or ✕ to cancel'
           : continueMode
-            ? continueLineStep === 0 ? 'Tap the line to choose the start vertex'
-            : continueLineStep === 1 ? 'Tap a point to draw the first segment'
+            ? continueLineStep === 0 ? 'Tap the map to place the segment start (snaps to nearest point)'
+            : continueLineStep === 1 ? 'Tap the destination point; it will snap to the nearest point'
             : continueSnapLabel
-              ? `${continueSnapLabel} · keep tapping to extend or Save to finish`
-              : 'Keep tapping to extend the path (A→B→C→D…) · Save to finish'
+              ? `${continueSnapLabel} · Save to finish the segment`
+              : 'One segment ready · Save to finish'
           : 'Tap empty area or ✕ to deselect'}
       </Text>
     </Animated.View>

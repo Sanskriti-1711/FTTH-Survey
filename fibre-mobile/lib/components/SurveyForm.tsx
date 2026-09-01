@@ -89,23 +89,55 @@ const TRENCH_TYPES: Record<TrenchType, { label: string; icon: string }> = {
   pole_route: { label: 'Pole Route', icon: '🏗️' },
 };
 
+// Values match the backend RiskAssessment/Hazard choices (snake_case); labels
+// are what the engineer sees. Sending labels to the API used to fail DRF
+// ChoiceField validation, so saves silently 400'd.
 const RISK_CATEGORIES = [
-  'Traffic', 'Pedestrian', 'Private Land', 'Tree Roots',
-  'Concrete Surface', 'Railway', 'Bridge', 'River',
-  'Protected Area', 'Environmental', 'Gas Line', 'Water Main',
-  'Electric Cable', 'Telecom', 'Asbestos', 'Confined Space',
+  { value: 'traffic', label: 'Traffic' },
+  { value: 'pedestrian', label: 'Pedestrian' },
+  { value: 'private_land', label: 'Private Land' },
+  { value: 'tree_roots', label: 'Tree Roots' },
+  { value: 'concrete_surface', label: 'Concrete Surface' },
+  { value: 'railway', label: 'Railway' },
+  { value: 'bridge', label: 'Bridge' },
+  { value: 'river', label: 'River' },
+  { value: 'protected_area', label: 'Protected Area' },
+  { value: 'environmental', label: 'Environmental' },
+  { value: 'gas_line', label: 'Gas Line' },
+  { value: 'water_main', label: 'Water Main' },
+  { value: 'electric_cable', label: 'Electric Cable' },
+  { value: 'telecom', label: 'Telecom' },
+  { value: 'asbestos', label: 'Asbestos' },
+  { value: 'confined_space', label: 'Confined Space' },
 ];
 
 const HAZARD_TYPES = [
-  'Working at Height', 'Confined Space', 'Excavation', 'Traffic Management',
-  'High Voltage', 'Flood Risk', 'Dog', 'Aggressive Resident',
-  'Private Security', 'Environmental Protection', 'Tree Preservation Order',
+  { value: 'working_at_height', label: 'Working at Height' },
+  { value: 'confined_space', label: 'Confined Space' },
+  { value: 'excavation', label: 'Excavation' },
+  { value: 'traffic_management', label: 'Traffic Management' },
+  { value: 'high_voltage', label: 'High Voltage' },
+  { value: 'flood_risk', label: 'Flood Risk' },
+  { value: 'dog', label: 'Dog' },
+  { value: 'aggressive_resident', label: 'Aggressive Resident' },
+  { value: 'private_security', label: 'Private Security' },
+  { value: 'environmental', label: 'Environmental Protection' },
+  { value: 'tree_order', label: 'Tree Preservation Order' },
 ];
 
 const MITIGATION_TEMPLATES = [
-  'Traffic Lights', 'Temporary Barriers', 'Road Closure', 'Permit',
-  'HDD', 'Night Work', 'Police Assistance', 'Tree Officer Approval',
-  'Environmental Approval', 'Utility Locate', 'CAT Scan', 'Trial Hole',
+  { value: 'traffic_lights', label: 'Traffic Lights' },
+  { value: 'temp_barriers', label: 'Temporary Barriers' },
+  { value: 'road_closure', label: 'Road Closure' },
+  { value: 'permit', label: 'Permit' },
+  { value: 'hdd', label: 'HDD' },
+  { value: 'night_work', label: 'Night Work' },
+  { value: 'police_assist', label: 'Police Assistance' },
+  { value: 'tree_officer', label: 'Tree Officer Approval' },
+  { value: 'env_approval', label: 'Environmental Approval' },
+  { value: 'utility_locate', label: 'Utility Locate' },
+  { value: 'cat_scan', label: 'CAT Scan' },
+  { value: 'trial_hole', label: 'Trial Hole' },
 ];
 
 // ── Editable Field Renderer (reused from NewPointForm) ────────────────────
@@ -721,15 +753,15 @@ export default function SurveyForm({ formData, onDismiss, onSave, onDelete }: Su
                 <View style={styles.chipGrid}>
                   {RISK_CATEGORIES.map((cat) => (
                     <TouchableOpacity
-                      key={cat}
+                      key={cat.value}
                       style={[styles.catChip, {
-                        backgroundColor: riskCategory === cat ? colors.error + '20' : colors.background,
-                        borderColor: riskCategory === cat ? colors.error : colors.outline,
+                        backgroundColor: riskCategory === cat.value ? colors.error + '20' : colors.background,
+                        borderColor: riskCategory === cat.value ? colors.error : colors.outline,
                       }]}
-                      onPress={() => setRiskCategory(cat)}
+                      onPress={() => setRiskCategory(cat.value)}
                     >
-                      <Text style={[styles.catText, { color: riskCategory === cat ? colors.error : colors.textSecondary }]}>
-                        {cat}
+                      <Text style={[styles.catText, { color: riskCategory === cat.value ? colors.error : colors.textSecondary }]}>
+                        {cat.label}
                       </Text>
                     </TouchableOpacity>
                   ))}
@@ -818,15 +850,15 @@ export default function SurveyForm({ formData, onDismiss, onSave, onDelete }: Su
                 <View style={styles.chipGrid}>
                   {HAZARD_TYPES.map((hazard) => (
                     <TouchableOpacity
-                      key={hazard}
+                      key={hazard.value}
                       style={[styles.catChip, {
-                        backgroundColor: selectedHazard === hazard ? '#F39C1220' : colors.background,
-                        borderColor: selectedHazard === hazard ? '#F39C12' : colors.outline,
+                        backgroundColor: selectedHazard === hazard.value ? '#F39C1220' : colors.background,
+                        borderColor: selectedHazard === hazard.value ? '#F39C12' : colors.outline,
                       }]}
-                      onPress={() => setSelectedHazard(hazard)}
+                      onPress={() => setSelectedHazard(hazard.value)}
                     >
-                      <Text style={[styles.catText, { color: selectedHazard === hazard ? '#F39C12' : colors.textSecondary }]}>
-                        {hazard}
+                      <Text style={[styles.catText, { color: selectedHazard === hazard.value ? '#F39C12' : colors.textSecondary }]}>
+                        {hazard.label}
                       </Text>
                     </TouchableOpacity>
                   ))}
@@ -838,15 +870,15 @@ export default function SurveyForm({ formData, onDismiss, onSave, onDelete }: Su
                     <View style={styles.chipGrid}>
                       {MITIGATION_TEMPLATES.map((tmpl) => (
                         <TouchableOpacity
-                          key={tmpl}
+                          key={tmpl.value}
                           style={[styles.catChip, {
-                            backgroundColor: hazardMitigation === tmpl ? colors.success + '20' : colors.background,
-                            borderColor: hazardMitigation === tmpl ? colors.success : colors.outline,
+                            backgroundColor: hazardMitigation === tmpl.value ? colors.success + '20' : colors.background,
+                            borderColor: hazardMitigation === tmpl.value ? colors.success : colors.outline,
                           }]}
-                          onPress={() => setHazardMitigation(tmpl)}
+                          onPress={() => setHazardMitigation(tmpl.value)}
                         >
-                          <Text style={[styles.catText, { color: hazardMitigation === tmpl ? colors.success : colors.textSecondary }]}>
-                            {tmpl}
+                          <Text style={[styles.catText, { color: hazardMitigation === tmpl.value ? colors.success : colors.textSecondary }]}>
+                            {tmpl.label}
                           </Text>
                         </TouchableOpacity>
                       ))}

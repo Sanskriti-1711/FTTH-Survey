@@ -20,6 +20,7 @@ import {
 } from 'react-native';
 import { useThemeStore } from '../stores/theme';
 import { useSurveyStore } from '../stores/survey';
+import { useSurveyFeaturesStore } from '../stores/survey-features';
 import { router } from 'expo-router';
 import {
   Camera, Ruler, ClipboardList, CheckCircle, Flag,
@@ -56,26 +57,58 @@ const TRENCH_TYPES: Record<TrenchType, TrenchTypeInfo> = {
   pole_route: { label: 'Pole Route', color: '#795548', icon: '🏗️' },
 };
 
+// Values match the backend RiskAssessment.RiskCategory choices (snake_case);
+// labels are what the engineer sees. Sending labels to the API used to fail
+// validation (DRF ChoiceField rejects display labels), so saves silently 400'd.
 const RISK_CATEGORIES = [
-  'Traffic', 'Pedestrian', 'Private Land', 'Tree Roots',
-  'Concrete Surface', 'Railway', 'Bridge', 'River',
-  'Protected Area', 'Environmental', 'Gas Line', 'Water Main',
-  'Electric Cable', 'Telecom', 'Asbestos', 'Confined Space',
+  { value: 'traffic', label: 'Traffic' },
+  { value: 'pedestrian', label: 'Pedestrian' },
+  { value: 'private_land', label: 'Private Land' },
+  { value: 'tree_roots', label: 'Tree Roots' },
+  { value: 'concrete_surface', label: 'Concrete Surface' },
+  { value: 'railway', label: 'Railway' },
+  { value: 'bridge', label: 'Bridge' },
+  { value: 'river', label: 'River' },
+  { value: 'protected_area', label: 'Protected Area' },
+  { value: 'environmental', label: 'Environmental' },
+  { value: 'gas_line', label: 'Gas Line' },
+  { value: 'water_main', label: 'Water Main' },
+  { value: 'electric_cable', label: 'Electric Cable' },
+  { value: 'telecom', label: 'Telecom' },
+  { value: 'asbestos', label: 'Asbestos' },
+  { value: 'confined_space', label: 'Confined Space' },
 ];
 
 const SEVERITY_LEVELS = ['low', 'medium', 'high', 'critical'] as const;
 const PROBABILITY_LEVELS = ['rare', 'possible', 'likely', 'certain'] as const;
 
 const HAZARD_TYPES = [
-  'Working at Height', 'Confined Space', 'Excavation', 'Traffic Management',
-  'High Voltage', 'Flood Risk', 'Dog', 'Aggressive Resident',
-  'Private Security', 'Environmental Protection', 'Tree Preservation Order',
+  { value: 'working_at_height', label: 'Working at Height' },
+  { value: 'confined_space', label: 'Confined Space' },
+  { value: 'excavation', label: 'Excavation' },
+  { value: 'traffic_management', label: 'Traffic Management' },
+  { value: 'high_voltage', label: 'High Voltage' },
+  { value: 'flood_risk', label: 'Flood Risk' },
+  { value: 'dog', label: 'Dog' },
+  { value: 'aggressive_resident', label: 'Aggressive Resident' },
+  { value: 'private_security', label: 'Private Security' },
+  { value: 'environmental', label: 'Environmental Protection' },
+  { value: 'tree_order', label: 'Tree Preservation Order' },
 ];
 
 const MITIGATION_TEMPLATES = [
-  'Traffic Lights', 'Temporary Barriers', 'Road Closure', 'Permit',
-  'HDD', 'Night Work', 'Police Assistance', 'Tree Officer Approval',
-  'Environmental Approval', 'Utility Locate', 'CAT Scan', 'Trial Hole',
+  { value: 'traffic_lights', label: 'Traffic Lights' },
+  { value: 'temp_barriers', label: 'Temporary Barriers' },
+  { value: 'road_closure', label: 'Road Closure' },
+  { value: 'permit', label: 'Permit' },
+  { value: 'hdd', label: 'HDD' },
+  { value: 'night_work', label: 'Night Work' },
+  { value: 'police_assist', label: 'Police Assistance' },
+  { value: 'tree_officer', label: 'Tree Officer Approval' },
+  { value: 'env_approval', label: 'Environmental Approval' },
+  { value: 'utility_locate', label: 'Utility Locate' },
+  { value: 'cat_scan', label: 'CAT Scan' },
+  { value: 'trial_hole', label: 'Trial Hole' },
 ];
 
 const SURVEY_STATUS_FLOW = [
@@ -305,11 +338,63 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
 
   // ── Handlers ─────────────────────────────────────────────────────────
 
+  /**
+   * Resolve a real backend projects.Feature UUID for the survey API calls.
+   * The detail screen can pass a synthetic id ("imp-feat-<layer>-<n>") or a
+   * SurveyFeature UUID; the survey endpoints require a real HLD feature UUID.
+   * Returns null when no backend feature is linked (e.g. a purely local
+   * imported feature with no survey copy yet) — callers must not save.
+   */
+  const resolveBackendFeatureId = (): string | null => {
+    const id = (featureId || '').trim();
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    // 1. Survey-features store FIRST: a survey copy's own id must resolve to
+    //    its original HLD feature id. The survey endpoints (trenches/risks/
+    //    hazards/status) key on the projects.Feature UUID, not the
+    //    SurveyFeature UUID — saving with the copy's id 400s with an invalid pk.
+    const st = useSurveyFeaturesStore.getState();
+    for (const list of Object.values(st.surveyFeatures)) {
+      const sf = list.find((s) => s.id === id);
+      if (sf) {
+        const hldId = sf.original_hld_feature || sf.hld_feature_id;
+        // Engineer-created copy with no HLD link: nothing to attach typed data to.
+        return hldId || null;
+      }
+    }
+    // 2. Genuine HLD feature UUID → use as-is.
+    if (isUuid.test(id)) return id;
+    // 3. Synthetic id ("imp-feat-<layer>-<n>"): an existing survey copy records
+    //    the original HLD feature id (the real UUID) even when the route param
+    //    is synthetic.
+    for (const list of Object.values(st.surveyFeatures)) {
+      const sf = list.find(
+        (s) => s.original_hld_feature === id || s.hld_feature_id === id
+      );
+      if (sf) {
+        const hldId = sf.original_hld_feature || sf.hld_feature_id;
+        if (hldId) return hldId;
+      }
+    }
+    return null;
+  };
+
+  /** Guard used by every save handler: resolves the backend UUID or bails
+   *  with a clear toast instead of a silent 400 from the API. */
+  const requireBackendFeature = (): string | null => {
+    const backendId = resolveBackendFeatureId();
+    if (!backendId) {
+      showToast('This feature has no backend record yet — open it from the map to save survey data', 'error');
+    }
+    return backendId;
+  };
+
   const handleSaveTrench = async () => {
     if (!selectedTrenchType) return;
+    const backendId = requireBackendFeature();
+    if (!backendId) return;
     try {
       await store.saveTrenchSurvey({
-        feature: featureId,
+        feature: backendId,
         trench_type: selectedTrenchType,
         depth_mm: trenchAttrs.depth ? parseInt(trenchAttrs.depth) : null,
         width_mm: trenchAttrs.width ? parseInt(trenchAttrs.width) : null,
@@ -332,9 +417,11 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
 
   const handleSaveRisk = async () => {
     if (!riskCategory) return;
+    const backendId = requireBackendFeature();
+    if (!backendId) return;
     try {
       await store.saveRisk({
-        feature: featureId,
+        feature: backendId,
         category: riskCategory,
         severity: riskSeverity as any,
         probability: riskProbability as any,
@@ -350,9 +437,11 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
 
   const handleSaveHazard = async () => {
     if (!selectedHazard) return;
+    const backendId = requireBackendFeature();
+    if (!backendId) return;
     try {
       await store.saveHazard({
-        feature: featureId,
+        feature: backendId,
         hazard_type: selectedHazard,
         mitigation_template: hazardMitigation || null,
         notes: hazardNotes,
@@ -365,9 +454,11 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
   };
 
   const handleSaveEvidence = async () => {
+    const backendId = requireBackendFeature();
+    if (!backendId) return;
     try {
       await store.saveEvidence({
-        feature: featureId,
+        feature: backendId,
         evidence_type: 'measurement',
         description: evidenceDescription,
         weather: evidenceWeather,
@@ -382,8 +473,10 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
   };
 
   const handleUpdateStatus = async () => {
+    const backendId = requireBackendFeature();
+    if (!backendId) return;
     try {
-      await store.updateStatus(featureId, surveyStatus, fieldNotes);
+      await store.updateStatus(backendId, surveyStatus, fieldNotes);
       showToast('Status updated to ' + surveyStatus.replace(/_/g, ' '), 'success');
       setSavedDates((p) => ({ ...p, status: formatSavedDate(new Date().toISOString()) }));
     } catch { showToast('Failed to update status', 'error'); }
@@ -442,7 +535,7 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
                     borderWidth: selectedTrenchType === type ? 2 : 1,
                   },
                 ]}
-                onPress={() => setSelectedTrenchType(type)}
+                onPress={() => { setSelectedTrenchType(type); setActiveModule('trench'); }}
               >
                 <Text style={styles.trenchIcon}>{info.icon}</Text>
                 <Text style={[styles.trenchLabel, { color: selectedTrenchType === type ? info.color : colors.textSecondary }]} numberOfLines={1}>
@@ -567,11 +660,11 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
         <View style={styles.categoryGrid}>
           {RISK_CATEGORIES.map((cat) => (
             <TouchableOpacity
-              key={cat}
-              style={[styles.categoryChip, { backgroundColor: riskCategory === cat ? colors.error + '20' : colors.background, borderColor: riskCategory === cat ? colors.error : colors.outline }]}
-              onPress={() => setRiskCategory(cat)}
+              key={cat.value}
+              style={[styles.categoryChip, { backgroundColor: riskCategory === cat.value ? colors.error + '20' : colors.background, borderColor: riskCategory === cat.value ? colors.error : colors.outline }]}
+              onPress={() => { setRiskCategory(cat.value); setActiveModule('risk'); }}
             >
-              <Text style={[styles.categoryText, { color: riskCategory === cat ? colors.error : colors.textSecondary }]}>{cat}</Text>
+              <Text style={[styles.categoryText, { color: riskCategory === cat.value ? colors.error : colors.textSecondary }]}>{cat.label}</Text>
             </TouchableOpacity>
           ))}
         </View>
@@ -661,11 +754,11 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
         <View style={styles.categoryGrid}>
           {HAZARD_TYPES.map((hazard) => (
             <TouchableOpacity
-              key={hazard}
-              style={[styles.categoryChip, { backgroundColor: selectedHazard === hazard ? colors.warning + '20' : colors.background, borderColor: selectedHazard === hazard ? colors.warning : colors.outline }]}
-              onPress={() => setSelectedHazard(hazard)}
+              key={hazard.value}
+              style={[styles.categoryChip, { backgroundColor: selectedHazard === hazard.value ? colors.warning + '20' : colors.background, borderColor: selectedHazard === hazard.value ? colors.warning : colors.outline }]}
+              onPress={() => { setSelectedHazard(hazard.value); setActiveModule('hazard'); }}
             >
-              <Text style={[styles.categoryText, { color: selectedHazard === hazard ? colors.warning : colors.textSecondary }]}>{hazard}</Text>
+              <Text style={[styles.categoryText, { color: selectedHazard === hazard.value ? colors.warning : colors.textSecondary }]}>{hazard.label}</Text>
             </TouchableOpacity>
           ))}
         </View>
@@ -676,11 +769,11 @@ export default function FeatureSurveySections({ featureId, layerId }: Props) {
             <View style={styles.categoryGrid}>
               {MITIGATION_TEMPLATES.map((tmpl) => (
                 <TouchableOpacity
-                  key={tmpl}
-                  style={[styles.mitigationChip, { backgroundColor: hazardMitigation === tmpl ? colors.success + '20' : colors.background, borderColor: hazardMitigation === tmpl ? colors.success : colors.outline }]}
-                  onPress={() => setHazardMitigation(tmpl)}
+                  key={tmpl.value}
+                  style={[styles.mitigationChip, { backgroundColor: hazardMitigation === tmpl.value ? colors.success + '20' : colors.background, borderColor: hazardMitigation === tmpl.value ? colors.success : colors.outline }]}
+                  onPress={() => setHazardMitigation(tmpl.value)}
                 >
-                  <Text style={[styles.mitigationText, { color: hazardMitigation === tmpl ? colors.success : colors.textSecondary }]}>{tmpl}</Text>
+                  <Text style={[styles.mitigationText, { color: hazardMitigation === tmpl.value ? colors.success : colors.textSecondary }]}>{tmpl.label}</Text>
                 </TouchableOpacity>
               ))}
             </View>

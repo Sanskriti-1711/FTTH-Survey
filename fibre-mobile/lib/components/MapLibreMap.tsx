@@ -112,7 +112,10 @@ function buildSnapSegments(layers: MapLayerData[]): SnapSegment[] {
 
 /**
  * Nearest point on any snap segment within radiusM of (lng, lat), excluding
- * the feature being dragged and the survey twin of its layer.
+ * the feature being dragged, the survey twin of its layer, and any segment
+ * that rides in the SAME corridor as the dragged feature (co-located
+ * duct/cable/trench lines follow the original path — snapping to them would
+ * pull the rerouted vertex right back onto the old route).
  */
 function nearestSnapPoint(
   segs: SnapSegment[],
@@ -121,11 +124,33 @@ function nearestSnapPoint(
   radiusM: number,
   excludeLayerId: string,
   excludeFeatureId: string,
+  excludeCorridor?: [number, number][],
 ): [number, number] | null {
   const cosLat = Math.cos((lat * Math.PI) / 180) || 1;
   const M_PER_LNG = 111320 * cosLat;
   const M_PER_LAT = 110540;
   const r2 = radiusM * radiusM;
+  // Pre-tesselate the dragged feature's own path into short segments so
+  // co-location can be tested cheaply (a duct/cable riding the same corridor
+  // passes within ~1m of the dragged line's vertices).
+  const corridorSegs: { x1: number; y1: number; x2: number; y2: number }[] = [];
+  if (excludeCorridor && excludeCorridor.length >= 2) {
+    const cLat = Math.cos((excludeCorridor[0][1] * Math.PI) / 180) || 1;
+    const cM_PER_LNG = 111320 * cLat;
+    const cM_PER_LAT = 110540;
+    for (let i = 0; i < excludeCorridor.length - 1; i++) {
+      const a = excludeCorridor[i];
+      const b = excludeCorridor[i + 1];
+      corridorSegs.push({
+        x1: a[0] * cM_PER_LNG,
+        y1: a[1] * cM_PER_LAT,
+        x2: b[0] * cM_PER_LNG,
+        y2: b[1] * cM_PER_LAT,
+      });
+    }
+  }
+  const CORRIDOR_M = 2.5; // a segment within this of the dragged path is "same corridor"
+  const c2 = CORRIDOR_M * CORRIDOR_M;
   let bestD2 = r2;
   let bestLng = 0;
   let bestLat = 0;
@@ -134,6 +159,30 @@ function nearestSnapPoint(
     // Skip the dragged feature itself and its survey twin (previous edit copy).
     if (s.layerId === `survey-${excludeLayerId}`) continue;
     if (s.layerId === excludeLayerId && s.featureId === excludeFeatureId) continue;
+    // Skip segments co-located with the dragged feature's own path.
+    if (corridorSegs.length > 0) {
+      const mx = (s.lng1 * M_PER_LNG + s.lng2 * M_PER_LNG) / 2;
+      const my = (s.lat1 * M_PER_LAT + s.lat2 * M_PER_LAT) / 2;
+      let sameCorridor = false;
+      for (let j = 0; j < corridorSegs.length; j++) {
+        const c = corridorSegs[j];
+        const px = mx - c.x1;
+        const py = my - c.y1;
+        const dx = c.x2 - c.x1;
+        const dy = c.y2 - c.y1;
+        const len2 = dx * dx + dy * dy;
+        let t = len2 ? (px * dx + py * dy) / len2 : 0;
+        if (t < 0) t = 0;
+        else if (t > 1) t = 1;
+        const qx = px - t * dx;
+        const qy = py - t * dy;
+        if (qx * qx + qy * qy <= c2) {
+          sameCorridor = true;
+          break;
+        }
+      }
+      if (sameCorridor) continue;
+    }
     const x1 = (s.lng1 - lng) * M_PER_LNG;
     const y1 = (s.lat1 - lat) * M_PER_LAT;
     const x2 = (s.lng2 - lng) * M_PER_LNG;
@@ -524,8 +573,14 @@ function NativeMapView({
     baselineCaptured: boolean;
   } | null>(null);
   const zoomRef = useRef(15);
+  const centerRef = useRef<[number, number]>([13.3775, 52.5162]); // Berlin default
   const onDragEndRef = useRef(onFeatureDragEnd);
   onDragEndRef.current = onFeatureDragEnd;
+  const editHandleRef = useRef<{ coords: [number, number][]; isPolygon: boolean; featureId: string; layerId: string } | null>(null);
+  const onVertexDragEndRef = useRef(onVertexDragEnd);
+  onVertexDragEndRef.current = onVertexDragEnd;
+  const onPolygonVertexDragEndRef = useRef(onPolygonVertexDragEnd);
+  onPolygonVertexDragEndRef.current = onPolygonVertexDragEnd;
 
   // ── Haversine distance (metres) ────────────────────────────────────────
   const haversineDistance = useCallback((lng1: number, lat1: number, lng2: number, lat2: number): number => {
@@ -632,11 +687,23 @@ function NativeMapView({
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: (evt) => {
+        // Capture the baseline at TOUCH-DOWN, not on the first move event.
+        // The first move event only fires after React Native's touch slop
+        // (~10px) is exceeded, so capturing it there left a dead zone where
+        // the dragged point lagged behind the finger — it felt rigid.
+        const ds = dragRef.current;
+        if (!ds) return;
+        ds.startScreenX = evt.nativeEvent.pageX;
+        ds.startScreenY = evt.nativeEvent.pageY;
+        ds.baselineCaptured = true;
+      },
       onPanResponderMove: (evt) => {
         const ds = dragRef.current;
         if (!ds) return;
 
-        // On very first move, capture the initial screen position as baseline
+        // Fallback: if no grant was received (e.g. overlay mounted mid-
+        // gesture), establish the baseline on the first move instead.
         if (!ds.baselineCaptured) {
           ds.startScreenX = evt.nativeEvent.pageX;
           ds.startScreenY = evt.nativeEvent.pageY;
@@ -822,6 +889,7 @@ function NativeMapView({
   // ── Vertex Drag State ──────────────────────────────────────────────────
   const [isVertexDragging, setIsVertexDragging] = useState(false);
   const [vertexDragDistance, setVertexDragDistance] = useState<number | null>(null);
+  const [cameraVersion, setCameraVersion] = useState(0);
   const vertexDragRef = useRef<{
     featureId: string;
     layerId: string;
@@ -920,15 +988,70 @@ function NativeMapView({
     setVertexDragDistance(null);
   }, [onVertexDragEnd, onPolygonVertexDragEnd, clearSnap]);
 
-  // ── Vertex PanResponder — captures gestures during vertex drag ─────────
+  // ── Vertex screen positions (pre-projected for touch-down arming) ──
+  // Ref so the PanResponder (created once) always sees fresh positions.
+  const vertexScreenRef = useRef<Array<{ x: number; y: number; coords: [number, number]; idx: number }> | null>(null);
+  const vertexScreenVersionRef = useRef(0);
+
+  // ── Vertex PanResponder — captures vertex drags at TOUCH-DOWN ─────────
   const vertexPanResponder = useRef(
     PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponder: (evt) => {
+        if (!onVertexDragEndRef.current && !onPolygonVertexDragEndRef.current) return false;
+        const positions = vertexScreenRef.current;
+        if (!positions || positions.length === 0) return false;
+        const px = evt.nativeEvent.locationX ?? evt.nativeEvent.pageX;
+        const py = evt.nativeEvent.locationY ?? evt.nativeEvent.pageY;
+        const hitRadius = 40;
+        let best: { idx: number; dist: number } | null = null;
+        for (let i = 0; i < positions.length; i++) {
+          const p = positions[i];
+          const dx = p.x - px;
+          const dy = p.y - py;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist <= hitRadius && (best === null || dist < best.dist)) {
+            best = { idx: i, dist };
+          }
+        }
+        if (best === null) return false;
+        const targetPos = positions[best.idx];
+        const eh = editHandleRef.current;
+        if (!eh) return false;
+        vertexDragRef.current = {
+          featureId: eh.featureId,
+          layerId: eh.layerId,
+          vertexIdx: targetPos.idx,
+          startLng: targetPos.coords[0],
+          startLat: targetPos.coords[1],
+          startScreenX: 0,
+          startScreenY: 0,
+          baselineCaptured: false,
+          isPolygon: eh.isPolygon,
+          coords: [...eh.coords],
+        };
+        vertexDragCoordsRef.current = [targetPos.coords[0], targetPos.coords[1]];
+        clearSnap();
+        setIsVertexDragging(true);
+        setVertexDragDistance(null);
+        return true;
+      },
+      onMoveShouldSetPanResponder: () => {
+        return vertexDragRef.current !== null;
+      },
+      onPanResponderGrant: (evt) => {
+        // Capture the baseline at TOUCH-DOWN so the vertex follows the finger
+        // from the very first pixel (see point-drag responder for details).
+        const ds = vertexDragRef.current;
+        if (!ds) return;
+        ds.startScreenX = evt.nativeEvent.pageX;
+        ds.startScreenY = evt.nativeEvent.pageY;
+        ds.baselineCaptured = true;
+      },
       onPanResponderMove: (evt) => {
         const ds = vertexDragRef.current;
         if (!ds) return;
 
+        // Fallback baseline capture if no grant was received.
         if (!ds.baselineCaptured) {
           ds.startScreenX = evt.nativeEvent.pageX;
           ds.startScreenY = evt.nativeEvent.pageY;
@@ -951,14 +1074,24 @@ function NativeMapView({
         // the snap radius, lock onto the nearest point on its geometry so the
         // rerouted line follows the existing network. Haptic fires once when
         // the snap engages and once when it releases.
+        //
+        // Hysteresis: once locked, the snap only releases when the finger
+        // moves beyond 1.8× the radius, so the vertex doesn't flicker on/off
+        // at the radius boundary while following the finger (which made the
+        // tool feel rigid).
         if (snapEnabledRef.current) {
+          const wasSnapped = snapActiveRef.current;
+          const snapRadius = wasSnapped
+            ? snapRadiusMRef.current * 1.8
+            : snapRadiusMRef.current;
           const snapped = nearestSnapPoint(
             snapSegmentsRef.current,
             newLng,
             newLat,
-            snapRadiusMRef.current,
+            snapRadius,
             ds.layerId,
             ds.featureId,
+            ds.coords,
           );
           if (snapped) {
             newLng = snapped[0];
@@ -1044,13 +1177,15 @@ function NativeMapView({
         const ds = vertexDragRef.current;
         const coords = vertexDragCoordsRef.current;
         if (ds && coords) {
+          // Threshold in degrees ≈ 0.5 m at this latitude — small but real
+          // vertex moves must be persisted. (0.00005° ≈ 5 m discarded genuine
+          // reroute tweaks, which is why reroutes looked "not saved".)
           const pixDx = Math.abs(coords[0] - ds.startLng);
           const pixDy = Math.abs(coords[1] - ds.startLat);
-          if (pixDx > 0.00005 || pixDy > 0.00005) {
-            if (ds.isPolygon && onPolygonVertexDragEnd) {
-              onPolygonVertexDragEnd(ds.featureId, ds.layerId, ds.vertexIdx, coords[0], coords[1]);
-            } else if (!ds.isPolygon && onVertexDragEnd) {
-              onVertexDragEnd(ds.featureId, ds.layerId, ds.vertexIdx, coords[0], coords[1]);
+          if (pixDx > 0.0000045 || pixDy > 0.0000045) {
+            const cbd = ds.isPolygon ? onPolygonVertexDragEndRef.current : onVertexDragEndRef.current;
+            if (cbd) {
+              cbd(ds.featureId, ds.layerId, ds.vertexIdx, coords[0], coords[1]);
             }
           }
         }
@@ -1061,20 +1196,15 @@ function NativeMapView({
         vertexDragRef.current = null;
       },
       onPanResponderTerminate: () => {
-        // A terminated gesture (e.g. the map's gesture recognizer reclaiming
-        // the responder) must NOT discard the drag — persist the last
-        // position exactly like onPanResponderRelease so the edit is never
-        // silently lost (and Save never stays disabled after a drag).
         const ds = vertexDragRef.current;
         const coords = vertexDragCoordsRef.current;
         if (ds && coords) {
           const pixDx = Math.abs(coords[0] - ds.startLng);
           const pixDy = Math.abs(coords[1] - ds.startLat);
-          if (pixDx > 0.00005 || pixDy > 0.00005) {
-            if (ds.isPolygon && onPolygonVertexDragEnd) {
-              onPolygonVertexDragEnd(ds.featureId, ds.layerId, ds.vertexIdx, coords[0], coords[1]);
-            } else if (!ds.isPolygon && onVertexDragEnd) {
-              onVertexDragEnd(ds.featureId, ds.layerId, ds.vertexIdx, coords[0], coords[1]);
+          if (pixDx > 0.0000045 || pixDy > 0.0000045) {
+            const cbd = ds.isPolygon ? onPolygonVertexDragEndRef.current : onVertexDragEndRef.current;
+            if (cbd) {
+              cbd(ds.featureId, ds.layerId, ds.vertexIdx, coords[0], coords[1]);
             }
           }
         }
@@ -1125,19 +1255,23 @@ function NativeMapView({
             if (bestIdx >= 0 && bestVDist <= 0.0006 ** 2) {
               const dragCb = vIsPolygon ? onPolygonVertexDragEnd : onVertexDragEnd;
               if (!dragCb) continue; // no drag callback for this mode → skip grab
+              // Start from the VERTEX's own coordinates, not the long-press
+              // point (which can be up to ~60 m away) — otherwise the vertex
+              // visibly jumps to the press location the moment the drag starts.
+              const vertexCoords = vCoords[bestIdx];
               vertexDragRef.current = {
                 featureId: vTarget.featureId,
                 layerId: vTarget.layerId,
                 vertexIdx: bestIdx,
-                startLng: pressLng,
-                startLat: pressLat,
+                startLng: vertexCoords[0],
+                startLat: vertexCoords[1],
                 startScreenX: 0,
                 startScreenY: 0,
                 baselineCaptured: false,
                 isPolygon: vIsPolygon,
                 coords: [...vCoords],
               };
-              vertexDragCoordsRef.current = [pressLng, pressLat];
+              vertexDragCoordsRef.current = [vertexCoords[0], vertexCoords[1]];
               setIsVertexDragging(true);
               setVertexDragDistance(null);
               console.log(`[Vertex] Long-press started drag of vertex ${bestIdx}`);
@@ -1395,6 +1529,52 @@ function NativeMapView({
     return null;
   }, [layers, vertexDragTarget, polygonEditTarget]);
 
+  // Keep the ref in sync so the gesture responder (created once) can see
+  // current vertex positions without stale closures.
+  useEffect(() => {
+    if (editHandleData) {
+      editHandleRef.current = {
+        coords: editHandleData.coords,
+        isPolygon: editHandleData.isPolygon,
+        featureId: editHandleData.featureId,
+        layerId: editHandleData.layerId,
+      };
+    } else {
+      editHandleRef.current = null;
+    }
+  }, [editHandleData]);
+
+  // Re-project vertex screen positions when edit data or the camera changes.
+  useEffect(() => {
+    const eh = editHandleData;
+    if (!eh || !eh.coords || eh.coords.length === 0) {
+      vertexScreenRef.current = null;
+      vertexScreenVersionRef.current += 1;
+      return;
+    }
+    const version = vertexScreenVersionRef.current + 1;
+    vertexScreenVersionRef.current = version;
+    let cancelled = false;
+    const projectAll = async () => {
+      const map = mapRef.current;
+      if (!map || typeof map.project !== 'function') return;
+      const results: Array<{ x: number; y: number; coords: [number, number]; idx: number }> = [];
+      for (let i = 0; i < eh.coords.length; i++) {
+        try {
+          const [lng, lat] = eh.coords[i];
+          const pt = await map.project([lng, lat]);
+          if (cancelled || vertexScreenVersionRef.current !== version) return;
+          results.push({ x: pt[0], y: pt[1], coords: [lng, lat], idx: i });
+        } catch { /* vertex stays unprojected; tap-release fallback still works */ }
+      }
+      if (!cancelled && vertexScreenVersionRef.current === version) {
+        vertexScreenRef.current = results.length > 0 ? results : null;
+      }
+    };
+    projectAll();
+    return () => { cancelled = true; };
+  }, [editHandleData, cameraVersion]);
+
   const containerStyle: any = { flex: 1, minHeight: 300 };
   if (height !== undefined && typeof height === 'number') {
     containerStyle.height = height;
@@ -1434,9 +1614,13 @@ function NativeMapView({
           if (zoom !== undefined) {
             zoomRef.current = zoom;
           }
+          const center = e?.nativeEvent?.center ?? e?.properties?.center;
+          if (center && Array.isArray(center) && center.length === 2) {
+            centerRef.current = [center[0], center[1]];
+          }
           markMapAlive();
         }}
-        onRegionDidChange={() => markMapAlive()}
+        onRegionDidChange={() => { markMapAlive(); setCameraVersion((v) => v + 1); }}
         onDidFinishLoadingMap={() => markMapReady('onDidFinishLoadingMap')}
         onDidFinishLoadingStyle={() => markMapReady('onDidFinishLoadingStyle')}
         onDidFinishRenderingMap={() => markMapReady('onDidFinishRenderingMap')}
@@ -1703,8 +1887,11 @@ function NativeMapView({
         )}
       </MapLibreGL.Map>
 
-      {/* ── Vertex Drag overlay ── visible when dragging a vertex ───── */}
-      {isVertexDragging && (
+      {/* ── Vertex Drag overlay — always present in vertex-edit mode so a
+            single touch-and-drag moves the vertex (touch-down arming).
+            onStartShouldSetPanResponder returns false when the finger is
+            not near a vertex, so map pan/zoom still works normally. ─── */}
+      {(onVertexDragEnd || onPolygonVertexDragEnd) && (vertexDragTarget || polygonEditTarget) && (
         <View
           style={StyleSheet.absoluteFill}
           pointerEvents="auto"
