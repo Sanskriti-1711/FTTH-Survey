@@ -93,7 +93,16 @@ export const useImageStore = create<ImageState>((set, get) => ({
         uploading: false,
         pendingPhotos: state.pendingPhotos.map((p) =>
           p.id === id
-            ? { ...p, uploadStatus: 'uploaded' as const, remoteUrl: result.photo_url }
+            ? {
+                ...p,
+                uploadStatus: 'uploaded' as const,
+                remoteUrl: result.photo_url,
+                // A1 tags + A3 suggestions from the server classifier
+                // (survey-feature uploads only — HLD endpoint returns none).
+                tags: (result as { photo_tags?: string[] }).photo_tags ?? undefined,
+                suggestions:
+                  (result as { suggestions?: Record<string, { value: unknown; confidence: number; source_tag: string }> }).suggestions ?? undefined,
+              }
             : p
         ),
       }));

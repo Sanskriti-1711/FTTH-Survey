@@ -294,6 +294,10 @@ export interface PendingPhoto {
   uploadStatus: 'pending' | 'uploading' | 'uploaded' | 'failed';
   createdAt: string;
   remoteUrl?: string;
+  /** A1 classified tags returned by the server on upload. */
+  tags?: string[];
+  /** A3 auto-fill suggestions keyed by field name. */
+  suggestions?: Record<string, { value: unknown; confidence: number; source_tag: string }>;
 }
 
 export interface SyncQueueItem {

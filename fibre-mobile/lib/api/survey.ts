@@ -281,6 +281,10 @@ export async function uploadSurveyFeaturePhoto(
 ): Promise<{
   id: string;
   photo_url: string;
+  /** A1 classified tags for the photo (heuristic or ML backend). */
+  photo_tags?: string[];
+  /** A3 auto-fill suggestions keyed by field: {value, confidence, source_tag}. */
+  suggestions?: Record<string, { value: unknown; confidence: number; source_tag: string }>;
   uploaded_at: string;
 }> {
   const form = new FormData();

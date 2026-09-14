@@ -60,6 +60,7 @@ interface SurveyFeaturesState {
     originalAttributes?: Record<string, unknown> | null,
     changeReason?: string,
     typedData?: TypedSurveyPayload,
+    gpsMeta?: { accuracyM?: number | null; quality?: string },
   ) => Promise<SurveyFeatureData | null>;
 
   /** Update an existing survey feature's geometry or attributes */
@@ -155,6 +156,7 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
     originalAttributes,
     changeReason,
     typedData,
+    gpsMeta,
   ) => {
     const activeProject = useProjectStore.getState().activeProject;
     if (!activeProject || activeProject.id.startsWith('imported-')) {
@@ -177,6 +179,12 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
           original_attributes: originalAttributes,
           change_reason: changeReason,
           ...(typedData || {}),
+          ...(gpsMeta
+            ? {
+                gps_accuracy_m: gpsMeta.accuracyM ?? null,
+                gps_quality: gpsMeta.quality || '',
+              }
+            : {}),
         });
       } else {
         // ── Brand-new engineer-created feature (no HLD parent) → create ──
@@ -194,6 +202,12 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
           sync_status: 'pending',
           change_reason: changeReason ?? '',
           ...(typedData || {}),
+          ...(gpsMeta
+            ? {
+                gps_accuracy_m: gpsMeta.accuracyM ?? null,
+                gps_quality: gpsMeta.quality || '',
+              }
+            : {}),
         });
       }
 

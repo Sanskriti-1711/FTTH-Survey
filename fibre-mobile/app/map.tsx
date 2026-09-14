@@ -16,6 +16,8 @@ import { useProjectStore } from '../lib/stores/project';
 import { useSurveyStore } from '../lib/stores/survey';
 import { useSurveyFeaturesStore, SURVEY_COLOR } from '../lib/stores/survey-features';
 import { recalculateDependentProperties } from '../lib/utils/spatial';
+import { getLayerSchema } from '../lib/stores/layer-schemas';
+import { gradeGpsAccuracy } from '../lib/utils/gps-quality';
 // Geometry operation utilities removed — all edits now route through survey-features store
 import GeometryEditor from '../lib/components/GeometryEditor';
 import type { GeometryMode, EditingFeature } from '../lib/components/GeometryEditor';
@@ -464,12 +466,20 @@ export default function MapScreen() {
         if (cancelled || status !== 'granted') return;
         const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
         if (cancelled) return;
-        setUserLocation({ latitude: pos.coords.latitude, longitude: pos.coords.longitude });
+        setUserLocation({
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+          accuracyM: pos.coords.accuracy ?? null,
+        });
         watchSub = await Location.watchPositionAsync(
           { accuracy: Location.Accuracy.Balanced, distanceInterval: 5 },
           (p) => {
             if (!cancelled) {
-              setUserLocation({ latitude: p.coords.latitude, longitude: p.coords.longitude });
+              setUserLocation({
+              latitude: p.coords.latitude,
+              longitude: p.coords.longitude,
+              accuracyM: p.coords.accuracy ?? null,
+            });
             }
           },
         );
@@ -3069,6 +3079,18 @@ export default function MapScreen() {
         const surveyGeometry = { type: 'Point', coordinates: [lng, lat] };
         const layerName = activeLayerNames[addPointTargetLayer] ?? addPointTargetLayer.toUpperCase();
 
+        // ── GPS quality gate (A2): grade the current fix for this layer ──
+        const gpsSchema = getLayerSchema(addPointTargetLayer);
+        const gpsMeta = {
+          accuracyM: useMapStore.getState().userLocationAccuracyM,
+          quality: '' as string,
+        };
+        const gq = gradeGpsAccuracy(gpsMeta.accuracyM, gpsSchema?.gpsAccuracyM ?? null);
+        gpsMeta.quality = gq.grade === 'reject' ? 'reject' : gq.grade;
+        if (gq.grade === 'reject') {
+          console.warn('[AddPoint] Reject-grade GPS fix (±' + (gpsMeta.accuracyM ?? '?') + 'm) — engineer override recorded');
+        }
+
         // ── Create a SurveyFeature with original_hld_feature = null ──
         // (engineer-created points don't reference any HLD feature)
         upsertSurveyFeature(
@@ -3079,7 +3101,11 @@ export default function MapScreen() {
           {},                          // surveyAttributes (empty — engineer fills via SurveyForm)
           null,                        // originalGeometry (no HLD original)
           null,                        // originalAttributes (no HLD original)
-          `Engineer-added new point at [${lng.toFixed(6)}, ${lat.toFixed(6)}]`,
+          `Engineer-added new point at [${lng.toFixed(6)}, ${lat.toFixed(6)}]${
+            gq.grade !== 'ok' ? ` [GPS ${gq.grade} ±${gpsMeta.accuracyM ?? '?'}m]` : ''
+          }`,
+          undefined,                   // typedData
+          gpsMeta,                     // GPS capture quality (A2)
         ).then((sf) => {
           if (sf) {
             console.log(`[AddPoint] SurveyFeature created: ${sf.id} at [${lng.toFixed(6)}, ${lat.toFixed(6)}]`);

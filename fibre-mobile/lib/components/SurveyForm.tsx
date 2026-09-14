@@ -24,6 +24,7 @@ import {
 } from 'react-native';
 import { useThemeStore } from '../stores/theme';
 import { useSurveyStore } from '../stores/survey';
+import { useImageStore } from '../stores/image';
 import { router } from 'expo-router';
 import { Spacing, Radius } from '../theme/colors';
 import { getLayerSchema } from '../stores/layer-schemas';
@@ -392,6 +393,39 @@ export default function SurveyForm({ formData, onDismiss, onSave, onDelete }: Su
   // Survey Status state
   const [surveyStatus, setSurveyStatus] = useState('visited');
   const [fieldNotes, setFieldNotes] = useState('');
+
+  // A3 auto-fill suggestions from the server photo classifier — refreshed
+  // whenever a photo upload for this feature completes (uploadPhoto stores
+  // tags + suggestions on the PendingPhoto). Dismissed suggestions stay hidden.
+  const [dismissedSuggestions, setDismissedSuggestions] = useState<Record<string, boolean>>({});
+  const pendingPhotos = useImageStore((s) => s.pendingPhotos);
+  const photoSuggestions = useMemo(() => {
+    if (!formData?.photoTargetId) return {};
+    const photo = pendingPhotos.find((p) => p.featureId === formData.photoTargetId && p.suggestions);
+    return photo?.suggestions ?? {};
+  }, [pendingPhotos, formData?.photoTargetId]);
+  const activeSuggestions = useMemo(
+    () => Object.fromEntries(
+      Object.entries(photoSuggestions).filter(([k, s]) => {
+        if (dismissedSuggestions[k]) return false;
+        // Don't suggest a value the engineer already set differently.
+        const cur = trenchAttrs[k as keyof typeof trenchAttrs];
+        if (typeof cur === 'boolean' && cur === s.value) return false;
+        return true;
+      }),
+    ),
+    [photoSuggestions, dismissedSuggestions, trenchAttrs],
+  );
+
+  const applySuggestion = useCallback((key: string, value: unknown) => {
+    if (key in trenchAttrs) {
+      setTrenchAttrs((prev) => ({ ...prev, [key]: value }));
+    } else {
+      setValues((prev) => ({ ...prev, [key]: value }));
+    }
+    setDismissedSuggestions((prev) => ({ ...prev, [key]: true }));
+    showToast('Applied suggestion');
+  }, [trenchAttrs]);
 
   // Toast
   const [toastMsg, setToastMsg] = useState('');
@@ -910,6 +944,34 @@ export default function SurveyForm({ formData, onDismiss, onSave, onDelete }: Su
             {/* ── Field Evidence Section ── */}
             {section.id === 'evidence' && (
               <View>
+                {/* ── A3: Auto-fill suggestions from the classified photo ── */}
+                {Object.keys(activeSuggestions).length > 0 && (
+                  <View style={[styles.suggestionPanel, { backgroundColor: colors.primary + '08', borderColor: colors.primary + '40' }]}>
+                    <Text style={[styles.suggestionTitle, { color: colors.primary }]}>
+                      Suggested from your photo
+                    </Text>
+                    {Object.entries(activeSuggestions).map(([key, sugg]) => (
+                      <View key={key} style={styles.suggestionRow}>
+                        <Text style={[styles.suggestionText, { color: colors.textPrimary }]} numberOfLines={1}>
+                          {key.replace(/_/g, ' ')}: {String(sugg.value)}
+                        </Text>
+                        <TouchableOpacity
+                          style={[styles.suggestionApply, { backgroundColor: colors.primary }]}
+                          onPress={() => applySuggestion(key, sugg.value)}
+                        >
+                          <Text style={[styles.suggestionBtnText, { color: '#FFF' }]}>Apply</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[styles.suggestionDismiss, { borderColor: colors.outline }]}
+                          onPress={() => setDismissedSuggestions((prev) => ({ ...prev, [key]: true }))}
+                        >
+                          <Text style={[styles.suggestionBtnText, { color: colors.textSecondary }]}>Dismiss</Text>
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                  </View>
+                )}
+
                 <View style={styles.evidenceRow}>
                   <TouchableOpacity
                     style={[styles.evidenceBtn, { backgroundColor: colors.primary + '15', borderColor: colors.primary }]}
@@ -1113,6 +1175,43 @@ export default function SurveyForm({ formData, onDismiss, onSave, onDelete }: Su
 // ── Main Styles ───────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
+  suggestionPanel: {
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    padding: Spacing.sm,
+    marginBottom: Spacing.sm,
+  },
+  suggestionTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    marginBottom: Spacing.xs,
+  },
+  suggestionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.xs,
+    marginBottom: Spacing.xs,
+  },
+  suggestionText: {
+    fontSize: 12,
+    flex: 1,
+    textTransform: 'capitalize',
+  },
+  suggestionApply: {
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 4,
+    borderRadius: Radius.sm,
+  },
+  suggestionDismiss: {
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 4,
+    borderRadius: Radius.sm,
+    borderWidth: 1,
+  },
+  suggestionBtnText: {
+    fontSize: 11,
+    fontWeight: '600',
+  },
   container: {
     position: 'absolute',
     bottom: Spacing.xxl + 140,

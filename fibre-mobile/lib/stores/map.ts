@@ -24,12 +24,16 @@ interface MapState {
   selectedFeatureId: string | null;
   selectedFeaturePopup: FeaturePopup | null;
   userLocation: { latitude: number; longitude: number } | null;
+  /** Device-reported horizontal accuracy of the latest fix (metres, null = unknown) */
+  userLocationAccuracyM: number | null;
   followUser: boolean;
 
   setLayers: (layers: MapLayer[]) => void;
   toggleLayer: (id: string) => void;
   selectFeature: (featureId: string | null, popup?: FeaturePopup | null) => void;
-  setUserLocation: (location: { latitude: number; longitude: number } | null) => void;
+  setUserLocation: (
+    location: { latitude: number; longitude: number; accuracyM?: number | null } | null,
+  ) => void;
   setFollowUser: (follow: boolean) => void;
 }
 
@@ -38,6 +42,7 @@ export const useMapStore = create<MapState>((set) => ({
   selectedFeatureId: null,
   selectedFeaturePopup: null,
   userLocation: null,
+  userLocationAccuracyM: null,
   followUser: false,
 
   setLayers: (layers) => set({ layers }),
@@ -49,6 +54,15 @@ export const useMapStore = create<MapState>((set) => ({
     })),
   selectFeature: (featureId, popup = null) =>
     set({ selectedFeatureId: featureId, selectedFeaturePopup: popup }),
-  setUserLocation: (location) => set({ userLocation: location }),
+  setUserLocation: (location) =>
+    set((s) => ({
+      userLocation: location
+        ? { latitude: location.latitude, longitude: location.longitude }
+        : null,
+      userLocationAccuracyM:
+        location && location.accuracyM != null && Number.isFinite(location.accuracyM)
+          ? location.accuracyM
+          : null,
+    })),
   setFollowUser: (follow) => set({ followUser: follow }),
 }));

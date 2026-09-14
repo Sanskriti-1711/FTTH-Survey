@@ -20,6 +20,9 @@ import {
 import { useThemeStore } from '../stores/theme';
 import { Spacing, Radius } from '../theme/colors';
 import { getLayerSchema } from '../stores/layer-schemas';
+import { useMapStore } from '../stores/map';
+import { GPSQualityBadge } from './GPSQualityBadge';
+import { gradeGpsAccuracy } from '../utils/gps-quality';
 import type { LayerSchema, FieldSchemaField } from '../utils/types';
 import {
   Eye,
@@ -258,6 +261,43 @@ function PhotoRequirements({ photos, layerName }: { photos: string[]; layerName:
   );
 }
 
+// ── Live GPS Quality Gate (A2) ────────────────────────────────────────────
+
+/**
+ * Shows the live fix quality against the layer requirement. Warn-grade
+ * captures are allowed but flagged; reject-grade shows a red banner telling
+ * the engineer to wait for a better fix (the save button stays enabled —
+ * enforcement happens at capture time where the fix is actually known).
+ */
+function GPSQualityGate({ requiredM }: { requiredM: number | null | undefined }) {
+  const accuracyM = useMapStore((s) => s.userLocationAccuracyM);
+  const colors = useThemeStore((s) => s.colors);
+  const q = gradeGpsAccuracy(accuracyM, requiredM);
+  if (q.grade === 'ok') return null; // silent when healthy
+  return (
+    <View
+      style={[
+        styles.section,
+        {
+          borderTopColor: colors.outlineLight,
+          backgroundColor:
+            q.grade === 'reject' ? colors.error + '10' : colors.warning + '10',
+          borderRadius: Radius.md,
+        },
+      ]}
+    >
+      <View style={styles.sectionHeader}>
+        <GPSQualityBadge accuracyM={accuracyM} requiredM={requiredM} />
+      </View>
+      <Text style={{ fontSize: 12, color: colors.textSecondary, marginTop: 4 }}>
+        {q.grade === 'reject'
+          ? 'GPS accuracy is too poor for reliable capture. Wait for a better fix or move to open sky.'
+          : 'GPS accuracy is degraded — the capture will be flagged for review.'}
+      </Text>
+    </View>
+  );
+}
+
 // ── GPS Accuracy Requirement ───────────────────────────────────────────────
 
 function GPSRequirement({ accuracyM }: { accuracyM: number }) {
@@ -422,6 +462,9 @@ export default function LayerEditor({
 
       {/* ── GPS Accuracy ─────────────────────────────────────────────────── */}
       {schema.gpsAccuracyM && <GPSRequirement accuracyM={schema.gpsAccuracyM} />}
+
+      {/* ── Live GPS Quality (A2) — grades the current fix against the layer requirement */}
+      <GPSQualityGate requiredM={schema.gpsAccuracyM} />
 
       {/* ── Geometry Edit Permission ─────────────────────────────────────── */}
       <GeometryPermission allowed={schema.allowGeometryEdit} />
