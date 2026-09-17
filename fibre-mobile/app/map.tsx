@@ -28,6 +28,7 @@ import SurveyForm from '../lib/components/SurveyForm';
 import type { SurveyFormData } from '../lib/components/SurveyForm';
 import { Card, Badge } from '../components/ui/Card';
 import { StatusBadge } from '../components/ui/StatusBadge';
+import { Toast } from '../components/ui/Toast';
 import MapLibreMap, { BASEMAPS } from '../lib/components/MapLibreMap';
 import MapLegend, { buildLayerGroups, DEFAULT_LAYER_GROUPS } from '../lib/components/MapLegend';
 import MapFeaturePopup from '../lib/components/MapFeaturePopup';
@@ -452,6 +453,19 @@ export default function MapScreen() {
     deleteSurveyFeature,
     getSurveyFeatureForHld,
   } = useSurveyFeaturesStore();
+
+  // ── Save feedback: toasts for every survey save (success / failure / no-op) ──
+  // Release builds strip console.log, so the Toast is the ONLY way the
+  // engineer can see whether a reroute save reached the server. Without it,
+  // a dead API connection silently swallows saves and reroutes "do nothing".
+  const [toastVisible, setToastVisible] = useState(false);
+  const [toastMsg, setToastMsg] = useState('');
+  const [toastType, setToastType] = useState<'success' | 'error' | 'warning' | 'info'>('info');
+  const showToast = (msg: string, type: 'success' | 'error' | 'warning' | 'info' = 'info') => {
+    setToastMsg(msg);
+    setToastType(type);
+    setToastVisible(true);
+  };
 
   // ── GPS: track the device's real location ─────────────────────────────
   // Requests foreground permission on mount, reads the current fix, then
@@ -2271,7 +2285,7 @@ export default function MapScreen() {
   // ── Save the temporary line geometry to the survey-features store ──────
   // Creates or updates a SurveyFeature with the modified geometry.
   // HLD geometry is never touched.
-  const handleSaveLine = useCallback(() => {
+  const handleSaveLine = useCallback(async () => {
     if (!selectedLineFeature || !tempLineCoords || !tempLineOriginal) return;
     // Draw Segment: block saving before both points are placed.
     if (lineToolMode === 'continue-line' && continueLinePoints === 0) {
@@ -2312,6 +2326,7 @@ export default function MapScreen() {
       }
       if (maxShift < 0.5) {
         console.log(`[MoveMode] Save blocked — line ${featureId.slice(-8)} unchanged (max shift ${maxShift.toFixed(1)}m). No SurveyFeature written.`);
+        showToast('No change detected — drag a vertex before saving', 'warning');
         setTempLineCoords(null);
         setTempLineOriginal(null);
         setLineMoveMode(false);
@@ -2367,22 +2382,30 @@ export default function MapScreen() {
           description: `Undo line move for ${featureId.slice(-8)}`,
         },
       });
-      updateSurveyFeature(existingSurvey.id, layerId, {
-        survey_geometry: surveyGeometry,
-        survey_attributes: surveyAttrs,
-        survey_status: 'modified',
-      });
+      try {
+        await updateSurveyFeature(existingSurvey.id, layerId, {
+          survey_geometry: surveyGeometry,
+          survey_attributes: surveyAttrs,
+          survey_status: 'modified',
+        });
+        showToast(`Saved — ${layerName || 'line'} updated`, 'success');
+      } catch (err) {
+        console.error('[MoveMode] Save failed:', err);
+        showToast('Save failed — check the server connection and retry', 'error');
+        return; // keep the temp geometry so the engineer can retry without redrawing
+      }
     } else {
       // Create new survey feature
-      upsertSurveyFeature(
-        featureId, layerId, layerName,
-        surveyGeometry,
-        surveyAttrs,
-        origGeom, origAttrs,
-        continueSnapTarget
-          ? `Drew segment to ${continueSnapTarget.name} #${continueSnapTarget.id.slice(-6)} (${tempLineOriginal.length} → ${tempLineCoords.length} vertices)`
-          : `Moved line vertices (original: ${tempLineOriginal.length} vertices, new: ${tempLineCoords.length} vertices)`,
-      ).then((sf) => {
+      try {
+        const sf = await upsertSurveyFeature(
+          featureId, layerId, layerName,
+          surveyGeometry,
+          surveyAttrs,
+          origGeom, origAttrs,
+          continueSnapTarget
+            ? `Drew segment to ${continueSnapTarget.name} #${continueSnapTarget.id.slice(-6)} (${tempLineOriginal.length} → ${tempLineCoords.length} vertices)`
+            : `Moved line vertices (original: ${tempLineOriginal.length} vertices, new: ${tempLineCoords.length} vertices)`,
+        );
         if (sf) {
           pushUndo({
             featureId, layerId,
@@ -2396,8 +2419,18 @@ export default function MapScreen() {
               description: `Undo: remove survey feature for line ${featureId.slice(-8)}`,
             },
           });
+          showToast(`Saved — ${layerName || 'line'} change recorded`, 'success');
+        } else if (activeProject?.id.startsWith('imported-')) {
+          showToast('Imported project — edit kept on device only', 'info');
+        } else {
+          showToast('Save failed — check the server connection and retry', 'error');
+          return;
         }
-      });
+      } catch (err) {
+        console.error('[MoveMode] Save failed:', err);
+        showToast('Save failed — check the server connection and retry', 'error');
+        return;
+      }
     }    // Bundle propagation belongs only to Reroute. Draw Segment is an
     // independent two-point addition and must never rewrite neighbouring
     // corridor features as if the selected line had been diverted.
@@ -2418,7 +2451,7 @@ export default function MapScreen() {
     lastContinueTapRef.current = null;
     setDeleteSectionRange(null);
     console.log(`[MoveMode] Saved line geometry for ${featureId.slice(-8)} — SurveyFeature ${existingSurvey ? 'updated' : 'created'}${continueSnapTarget ? ` (snapped to ${continueSnapTarget.name})` : ''}`);
-  }, [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, continueSnapTarget, surveyFeatures, propagateBundleReroute, lineToolMode, continueLinePoints]);
+  },    [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, continueSnapTarget, surveyFeatures, propagateBundleReroute, lineToolMode, continueLinePoints, showToast]);
 
   // ── Delete Section handlers ────────────────────────────────────────────
 
@@ -4084,6 +4117,12 @@ export default function MapScreen() {
           </View>
         </View>
       )}
+      <Toast
+        visible={toastVisible}
+        message={toastMsg}
+        type={toastType}
+        onDismiss={() => setToastVisible(false)}
+      />
     </SafeAreaView>
   );
 }
