@@ -1497,19 +1497,21 @@ export default function MapScreen() {
         return;
       }
 
-      // ── LINE features: show View popup first, then Edit toolbar on demand ──
+      // ── LINE features: open the line toolbar DIRECTLY (tap → edit tools) ──
+      // One hop: Reroute / Del Section / Draw Segment / Undo / Save are
+      // immediately available. A separate "View popup → Edit → toolbar"
+      // chain made the interaction feel broken.
       if (geomType === 'LineString') {
-        // Highlight line on map
         setSelectedMapFeatureId(featureId);
-        // Show popup with feature info + Edit button
-        selectFeature(featureId, {
+        setSelectedLineFeature({
           id: featureId,
+          layerId: popupLayerId,
+          geometryType: 'LineString',
           name: featureName,
           layerName,
-          status,
-          layerId: popupLayerId,
         });
-        // Close popup screen coords are set above
+        selectFeature(null);
+        setPopupScreenCoords(null);
         return;
       }
 

@@ -318,6 +318,8 @@ export const BASEMAPS: Record<string, BasemapStyle> = {
 };
 
 const OAKWOOD_CENTER: [number, number] = [-0.1100, 51.5900];
+/** Sensible project-region fallback: Berlin (the survey area of record). */
+const DEFAULT_CENTER: [number, number] = [13.3775, 52.5162];
 const DEFAULT_MAP_STYLE: string | Record<string, unknown> = OSM_STREETS_STYLE;
 const LOADING_TIMEOUT_MS = 30000;
 
@@ -1773,8 +1775,8 @@ function NativeMapView({
       >
         <MapLibreGL.Camera
           ref={cameraRef}
-          centerCoordinate={OAKWOOD_CENTER}
-          zoomLevel={15}
+          centerCoordinate={flyToCenter ? [flyToCenter.lng, flyToCenter.lat] : DEFAULT_CENTER}
+          zoomLevel={flyToCenter?.zoom ?? 13}
         />
 
         {layers.map((layerData) => {
@@ -2748,71 +2750,15 @@ function WebMapView({
   const onPolygonMoveEndRef = useRef(onPolygonMoveEnd);
   onPolygonMoveEndRef.current = onPolygonMoveEnd;
 
-  // Effect: render/update edit handles when the active vertex target changes
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || status !== 'ready') return;
-
-    // Remove existing edit handles first
-    removeVertexMarkers(map);
-
-    const target = vertexDragTarget ?? polygonEditTarget;
-    if (!target) return;
-
-    for (const layerData of layersRef.current) {
-      if (layerData.id !== target.layerId) continue;
-      for (const feat of layerData.features) {
-        const fid = (feat.properties as any)?.id ?? (feat.properties as any)?._id ?? '';
-        if (fid !== target.featureId) continue;
-
-        const geom = feat.geometry;
-        if (geom?.type === 'LineString') {
-          const coords = geom.coordinates as [number, number][];
-          addVertexMarkers(
-            map,
-            target.featureId,
-            target.layerId,
-            coords,
-            vertexDragTarget?.vertexIdx ?? -1,
-            layerData.color ?? '#0D5CFF',
-          );
-        } else if (geom?.type === 'Polygon') {
-          const outerRing = (geom.coordinates as [number, number][][])[0] ?? [];
-          addPolygonHighlight(map, target.featureId, target.layerId, feat, layerData.color ?? '#0D5CFF');
-          addVertexMarkers(
-            map,
-            target.featureId,
-            target.layerId,
-            outerRing as [number, number][],
-            -1,
-            layerData.color ?? '#0D5CFF',
-            0,
-          );
-        } else if (geom?.type === 'MultiPolygon') {
-          const firstRing = ((geom.coordinates as [number, number][][][])[0]?.[0] ?? []) as [number, number][];
-          addPolygonHighlight(map, target.featureId, target.layerId, feat, layerData.color ?? '#0D5CFF');
-          addVertexMarkers(
-            map,
-            target.featureId,
-            target.layerId,
-            firstRing,
-            -1,
-            layerData.color ?? '#0D5CFF',
-            0,
-          );
-        }
-
-        console.log(`[Vertex] Edit handles rendered for ${target.featureId.slice(-8)} on ${target.layerId}`);
-        return;
-      }
-    }
-
-    console.warn(
-      `[Vertex] Feature ${target.featureId.slice(-8)} not found in any rendered layer ` +
-      `(layerId: ${target.layerId}). Available layers: ` +
-      layersRef.current.map(l => `${l.id}(${l.features.length}feat)`).join(', ')
-    );
-  }, [vertexDragTarget, polygonEditTarget, status]);
+  // NOTE: Vertex/edit handles are rendered DECLARATIVELY below (the
+  // editHandleData JSX block), which attaches onPress to the vertex source
+  // so taps actually start drags. An earlier imperative addVertexMarkers()
+  // effect created layers with the SAME IDs but WITHOUT onPress, so taps
+  // landed on a layer that could never start a drag — vertex handles
+  // appeared frozen or vanished. The imperative path was removed; only
+  // the declarative JSX path renders handles now.
+  // removeVertexMarkers() is still used on unmount to clear any stray
+  // native layers left by older builds.
 
   // Clean up vertex markers on unmount
   useEffect(() => {
