@@ -37,6 +37,9 @@ interface SurveyChangesPanelProps {
   onClose: () => void;
   /** Called when user taps a feature (e.g. to fly to it on the map) */
   onFeaturePress?: (featureId: string, layerId: string) => void;
+  /** Height of any bar already pinned to the bottom of the screen (e.g. the
+   *  commit bar), so this panel floats above it instead of under it. */
+  bottomOffset?: number;
 }
 
 // ── Status colors ──────────────────────────────────────────────────────────
@@ -349,6 +352,7 @@ export default function SurveyChangesPanel({
   layerNames,
   onClose,
   onFeaturePress,
+  bottomOffset = 0,
 }: SurveyChangesPanelProps) {
   const colors = useThemeStore((s) => s.colors);
   const slideAnim = useRef(new Animated.Value(0)).current;
@@ -404,6 +408,7 @@ export default function SurveyChangesPanel({
     <Animated.View
       style={[
         styles.container,
+        { bottom: Spacing.xxl + bottomOffset },
         {
           backgroundColor: colors.surface + 'F8',
           borderColor: colors.outline,

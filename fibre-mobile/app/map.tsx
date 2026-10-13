@@ -14,16 +14,18 @@ import { useThemeStore } from '../lib/stores/theme';
 import { useMapStore } from '../lib/stores/map';
 import { useProjectStore } from '../lib/stores/project';
 import { useSurveyStore } from '../lib/stores/survey';
-import { useSurveyFeaturesStore, SURVEY_COLOR } from '../lib/stores/survey-features';
+import { useSurveyFeaturesStore, SURVEY_COLOR, HLD_COLOR_OVERRIDE } from '../lib/stores/survey-features';
 import { recalculateDependentProperties } from '../lib/utils/spatial';
 import { getLayerSchema } from '../lib/stores/layer-schemas';
 import { gradeGpsAccuracy } from '../lib/utils/gps-quality';
+import { summarizeCommit } from '../lib/utils/commit';
 // Geometry operation utilities removed — all edits now route through survey-features store
 import GeometryEditor from '../lib/components/GeometryEditor';
 import type { GeometryMode, EditingFeature } from '../lib/components/GeometryEditor';
 import LineSelectionToolbar from '../lib/components/LineSelectionToolbar';
 import PolygonToolbar from '../lib/components/PolygonToolbar';
 import SurveyChangesPanel from '../lib/components/SurveyChangesPanel';
+import CommitBar from '../lib/components/CommitBar';
 import SurveyForm from '../lib/components/SurveyForm';
 import type { SurveyFormData } from '../lib/components/SurveyForm';
 import { Card, Badge } from '../components/ui/Card';
@@ -35,7 +37,7 @@ import MapFeaturePopup from '../lib/components/MapFeaturePopup';
 import * as Location from 'expo-location';
 import type { MapLayerData, BasemapStyle } from '../lib/components/MapLibreMap';
 import type { GeoJSONFeature, LayerDisplayMode, SurveyFeatureData } from '../lib/utils/types';
-import { Spacing, Radius } from '../lib/theme/colors';
+import { Spacing, Radius, Touch, Type } from '../lib/theme/colors';
 import ArrowLeft from 'lucide-react-native/icons/arrow-left';
 import X from 'lucide-react-native/icons/x';
 import Plus from 'lucide-react-native/icons/plus';
@@ -47,6 +49,9 @@ import Crosshair from 'lucide-react-native/icons/crosshair';
 import Search from 'lucide-react-native/icons/search';
 import Move from 'lucide-react-native/icons/move';
 import Undo2 from 'lucide-react-native/icons/undo-2';
+import Satellite from 'lucide-react-native/icons/satellite';
+import Layers from 'lucide-react-native/icons/layers';
+import AlertTriangle from 'lucide-react-native/icons/triangle-alert';
 
 // ── Layer config ──────────────────────────────────────────────────────────
 const LAYER_COLORS: Record<string, string> = {
@@ -105,6 +110,15 @@ const IMPORT_COLORS: Record<string, string> = {
 };
 
 const IMPORT_ID_PREFIX = 'imp-';
+
+// Basemaps are a matter of appearance, so the switcher shows the appearance: a
+// colour chip per basemap instead of an emoji that renders differently on every
+// device and says nothing to a screen reader.
+const BASEMAP_SWATCH: Record<string, string> = {
+  streets: '#DCE3EC',
+  satellite: '#2F4F3A',
+  light: '#F1F3F6',
+};
 
 // ── Bundle reroute propagation (the whole corridor moves together) ────────
 // Rerouting ANY line layer in the survey means that route has a problem
@@ -610,6 +624,14 @@ export default function MapScreen() {
   // ── Survey Changes Panel state — toggle to review all engineer edits ──
   const [surveyPanelVisible, setSurveyPanelVisible] = useState(false);
 
+  // ── Commit path state — one submit for the whole survey ──────────────
+  // The CommitBar at the bottom of this screen is the survey's only Submit;
+  // `submittingSurvey` keeps the bar honest while the request is in flight.
+  const [submittingSurvey, setSubmittingSurvey] = useState(false);
+  // Measured, not hardcoded: the changes panel floats above the bar, and the
+  // bar grows with the user's font size like everything else.
+  const [commitBarHeight, setCommitBarHeight] = useState(0);
+
   // ── Undo Stack for drag + geometry operations ─────────────────────────
   // Single-feature entries track old/new coordinates.
   // Multi-feature entries (split, merge, create, delete) store a full layer
@@ -864,6 +886,7 @@ export default function MapScreen() {
     fetchProjectGeojsons,
     layerFetchProgress,
     layerLoadFailed,
+    submitSurveyCopy,
     isLoading: storeIsLoading,
     error: storeError,
   } = useProjectStore();
@@ -3364,6 +3387,44 @@ export default function MapScreen() {
     }
   };
 
+  // ── Commit path: one summary, one submit, where the work happens ───────
+  // The project list is the live source of status: submitSurveyCopy() applies
+  // the backend transition into `projects`, so a stale activeProject can never
+  // make the bar claim the survey is still open.
+  const liveProject = projects.find((p) => p.id === activeProject?.id) ?? activeProject;
+
+  // Unsaved counts are intentionally absent here: while an editor toolbar is
+  // open the bar steps aside and that toolbar owns Save, so there is never a
+  // second, competing save button on screen.
+  const commitSummary = useMemo(() => summarizeCommit(surveyFeatures), [surveyFeatures]);
+
+  const handleSubmitSurvey = useCallback(async () => {
+    if (!activeProject) {
+      showToast('No project open — nothing to submit', 'warning');
+      return;
+    }
+    if (activeProject.id.startsWith('imported-')) {
+      showToast('This project only exists on this device — nothing to submit', 'warning');
+      return;
+    }
+
+    setSubmittingSurvey(true);
+    try {
+      await submitSurveyCopy(activeProject.id);
+      // applyProjectTransition() swallows its own errors, so the refreshed
+      // project list — not the absence of a throw — is the honest success
+      // signal. A failed submit must never be reported as sent.
+      const after = useProjectStore.getState().projects.find((p) => p.id === activeProject.id);
+      if (after?.status === 'submitted') {
+        showToast('Survey submitted — the planner has it now', 'success');
+      } else {
+        showToast('Submit failed — check the connection and try again', 'error');
+      }
+    } finally {
+      setSubmittingSurvey(false);
+    }
+  }, [activeProject, submitSurveyCopy, showToast]);
+
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]} edges={['top']}>
       {/* Header */}
@@ -3373,7 +3434,9 @@ export default function MapScreen() {
           <TouchableOpacity
             onPress={() => (router.canGoBack() ? router.back() : router.replace('/(tabs)/home'))}
             style={styles.backBtn}
-            hitSlop={8}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            accessibilityRole="button"
+            accessibilityLabel="Back to my projects"
           >
             <ArrowLeft size={22} stroke={colors.textPrimary} />
           </TouchableOpacity>
@@ -3393,12 +3456,20 @@ export default function MapScreen() {
           <TouchableOpacity
             style={[styles.headerBtn, { backgroundColor: viewMode === 'list' ? colors.primary + '15' : colors.surface }]}
             onPress={() => setViewMode('list')}
+            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+            accessibilityRole="button"
+            accessibilityLabel="Show list view"
+            accessibilityState={{ selected: viewMode === 'list' }}
           >
             <List size={18} stroke={viewMode === 'list' ? colors.primary : colors.textSecondary} />
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.headerBtn, { backgroundColor: viewMode === 'map' ? colors.primary + '15' : colors.surface }]}
             onPress={() => setViewMode('map')}
+            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+            accessibilityRole="button"
+            accessibilityLabel="Show map view"
+            accessibilityState={{ selected: viewMode === 'map' }}
           >
             <MapIcon size={18} stroke={viewMode === 'map' ? colors.primary : colors.textSecondary} />
           </TouchableOpacity>
@@ -3410,9 +3481,14 @@ export default function MapScreen() {
         <View style={styles.mapContainer}>
           {/* Isolated Review Banner — single-feature mode from the approval queue */}
           {isolateFeatureId && (
-            <View style={styles.isolateBanner}>
+            <View
+              style={styles.isolateBanner}
+              accessible
+              accessibilityLabel="Reviewing one change, the original HLD is dimmed"
+            >
+              <Search size={14} stroke={colors.onPrimary} />
               <Text style={styles.isolateBannerText} numberOfLines={1}>
-                🔍 Reviewing 1 change — original HLD dimmed
+                Reviewing 1 change — original HLD dimmed
               </Text>
               <TouchableOpacity
                 onPress={() => {
@@ -3421,9 +3497,12 @@ export default function MapScreen() {
                   setSelectedMapFeatureId(null);
                 }}
                 style={styles.isolateExitBtn}
-                hitSlop={8}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                accessibilityRole="button"
+                accessibilityLabel="Exit review"
               >
-                <Text style={styles.isolateExitText}>✕ Exit</Text>
+                <X size={14} stroke={colors.onPrimary} />
+                <Text style={styles.isolateExitText}>Exit</Text>
               </TouchableOpacity>
             </View>
           )}
@@ -3443,7 +3522,9 @@ export default function MapScreen() {
               <View style={[styles.loadingBox, { backgroundColor: colors.surface }]}>
                 {layerFetchProgress ? (
                   <>
-                    <Text style={{ fontSize: 32, marginBottom: 8 }}>📡</Text>
+                    <View style={{ marginBottom: Spacing.sm }}>
+                    <Satellite size={32} stroke={colors.textTertiary} />
+                  </View>
                     <Text style={[styles.loadingTitle, { color: colors.textPrimary }]}>
                       Loading Project Data
                     </Text>
@@ -3473,7 +3554,9 @@ export default function MapScreen() {
                   // Fetch settled but nothing loaded — show a failure state
                   // instead of an endless spinner.
                   <>
-                    <Text style={{ fontSize: 32, marginBottom: 8 }}>⚠️</Text>
+                    <View style={{ marginBottom: Spacing.sm }}>
+                    <AlertTriangle size={32} stroke={colors.warning} />
+                  </View>
                     <Text style={[styles.loadingTitle, { color: colors.textPrimary }]}>
                       Couldn't Load Project Data
                     </Text>
@@ -3504,7 +3587,9 @@ export default function MapScreen() {
                   </>
                 ) : (
                   <>
-                    <Text style={{ fontSize: 32, marginBottom: 8 }}>📡</Text>
+                    <View style={{ marginBottom: Spacing.sm }}>
+                    <Satellite size={32} stroke={colors.textTertiary} />
+                  </View>
                     <Text style={[styles.loadingTitle, { color: colors.textPrimary }]}>
                       Loading Project Data
                     </Text>
@@ -3567,10 +3652,10 @@ export default function MapScreen() {
             <View style={styles.viewSwitcher}>
               {(
                 [
-                  { key: 'hld', label: 'HLD', icon: '🔵', activeColor: '#2563EB' },
-                  { key: 'survey', label: 'Survey', icon: '🟠', activeColor: SURVEY_COLOR },
-                  { key: 'overlay', label: 'Overlay', icon: '🔀', activeColor: '#8B5CF6' },
-                ] as { key: LayerDisplayMode; label: string; icon: string; activeColor: string }[]
+                  { key: 'hld', label: 'HLD', dot: HLD_COLOR_OVERRIDE, activeColor: HLD_COLOR_OVERRIDE, onActive: colors.onPrimary },
+                  { key: 'survey', label: 'Survey', dot: SURVEY_COLOR, activeColor: SURVEY_COLOR, onActive: colors.onSecondary },
+                  { key: 'overlay', label: 'Overlay', dot: '#7C3AED', activeColor: '#7C3AED', onActive: colors.onPrimary },
+                ] as { key: LayerDisplayMode; label: string; dot: string; activeColor: string; onActive: string }[]
               ).map((m) => {
                 const active = displayMode === m.key;
                 return (
@@ -3588,12 +3673,15 @@ export default function MapScreen() {
                       setDisplayMode(m.key);
                     }}
                     activeOpacity={0.8}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${m.label} view`}
+                    accessibilityState={{ selected: active }}
                   >
-                    <Text style={{ fontSize: 13 }}>{m.icon}</Text>
+                    <View style={[styles.modeDot, { backgroundColor: active ? colors.surface : m.dot }]} />
                     <Text
                       style={[
                         styles.viewSegText,
-                        { color: active ? '#FFFFFF' : colors.textSecondary },
+                        { color: active ? m.onActive : colors.textSecondary },
                       ]}
                     >
                       {m.label}
@@ -3914,6 +4002,9 @@ export default function MapScreen() {
                   onPress={() => { setToolsOpen(false); handleUndo(); }}
                   disabled={undoCount === 0}
                   activeOpacity={0.7}
+                  accessibilityRole="button"
+                  accessibilityLabel={undoCount > 0 ? `Undo, ${undoCount} available` : 'Undo, nothing to undo'}
+                  accessibilityState={{ disabled: undoCount === 0 }}
                 >
                   <Undo2 size={20} stroke={undoCount > 0 ? colors.textSecondary : colors.textTertiary} />
                   {undoCount > 0 && (
@@ -3932,9 +4023,12 @@ export default function MapScreen() {
                 </View>
                 <TouchableOpacity
                   style={[styles.fab, {
-                    backgroundColor: geoMode === 'add_point' ? '#EC4899' : colors.surface,
+                    backgroundColor: geoMode === 'add_point' ? colors.secondary : colors.surface,
                     transform: [{ scale: geoMode === 'add_point' ? 1.1 : 1 }],
                   }]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Add a point to the survey"
+                  accessibilityState={{ selected: geoMode === 'add_point' }}
                   onPress={() => {
                     setToolsOpen(false);
                     if (geoMode === 'add_point') {
@@ -3949,7 +4043,7 @@ export default function MapScreen() {
                   }}
                   activeOpacity={0.8}
                 >
-                  <Text style={{ fontSize: 20, color: geoMode === 'add_point' ? '#FFFFFF' : undefined }}>📍</Text>
+                  <MapPin size={20} stroke={geoMode === 'add_point' ? colors.onSecondary : colors.textSecondary} />
                 </TouchableOpacity>
               </View>
               )}
@@ -3967,10 +4061,13 @@ export default function MapScreen() {
                   onPress={() => { setToolsOpen(false); setSurveyPanelVisible(true); }}
                   disabled={Object.keys(surveyFeatures).length === 0}
                   activeOpacity={0.8}
+                  accessibilityRole="button"
+                  accessibilityLabel="Review survey changes"
+                  accessibilityState={{ disabled: Object.keys(surveyFeatures).length === 0 }}
                 >
-                  <Text style={{ fontSize: 16, fontWeight: '700' as any, color: colors.textSecondary }}>🟠</Text>
+                  <Layers size={20} stroke={colors.textSecondary} />
                   {Object.keys(surveyFeatures).length > 0 && (
-                    <View style={[styles.undoBadge, { backgroundColor: '#FF8C00' }]}>
+                    <View style={[styles.undoBadge, { backgroundColor: colors.secondary }]}>
                       <Text style={styles.undoBadgeText}>
                         {(() => {
                           let total = 0;
@@ -3992,7 +4089,7 @@ export default function MapScreen() {
                 </View>
                 <TouchableOpacity
                   style={[styles.fab, {
-                    backgroundColor: displayMode === 'survey' ? SURVEY_COLOR : displayMode === 'overlay' ? '#2563EB' : colors.surface,
+                    backgroundColor: displayMode === 'survey' ? SURVEY_COLOR : displayMode === 'overlay' ? '#7C3AED' : colors.surface,
                   }]}
                   onPress={() => {
                     setToolsOpen(false);
@@ -4000,10 +4097,21 @@ export default function MapScreen() {
                     setDisplayMode(next);
                   }}
                   activeOpacity={0.8}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    displayMode === 'hld'
+                      ? 'Showing HLD only. Switch to survey view'
+                      : displayMode === 'survey'
+                        ? 'Showing survey only. Switch to overlay view'
+                        : 'Showing HLD and survey overlaid. Switch to HLD view'
+                  }
                 >
-                  <Text style={{ fontSize: 16, fontWeight: '700' as any, color: displayMode === 'hld' ? colors.textSecondary : '#FFFFFF' }}>
-                    {displayMode === 'hld' ? '🔵' : displayMode === 'survey' ? '🟠' : '🔀'}
-                  </Text>
+                  <View
+                    style={[
+                      styles.modeDotLarge,
+                      { backgroundColor: displayMode === 'hld' ? colors.textSecondary : colors.onPrimary },
+                    ]}
+                  />
                 </TouchableOpacity>
               </View>
 
@@ -4016,8 +4124,10 @@ export default function MapScreen() {
                   style={[styles.fab, { backgroundColor: colors.surface }]}
                   onPress={() => { setToolsOpen(false); setBasemapPanelVisible(true); }}
                   activeOpacity={0.8}
+                  accessibilityRole="button"
+                  accessibilityLabel="Choose a basemap"
                 >
-                  <Text style={{ fontSize: 18 }}>{BASEMAPS[activeBasemap]?.icon ?? '🗺️'}</Text>
+                  <View style={[styles.basemapSwatch, { backgroundColor: BASEMAP_SWATCH[activeBasemap] ?? colors.outline }]} />
                 </TouchableOpacity>
               </View>
 
@@ -4031,6 +4141,9 @@ export default function MapScreen() {
                   style={[styles.fab, { backgroundColor: dragMode ? colors.primary : colors.surface }]}
                   onPress={() => { setToolsOpen(false); setDragMode(!dragMode); }}
                   activeOpacity={0.8}
+                  accessibilityRole="button"
+                  accessibilityLabel={dragMode ? 'Move mode on. Turn off' : 'Move mode. Drag features to reposition them'}
+                  accessibilityState={{ selected: dragMode }}
                 >
                   <Move size={20} stroke={dragMode ? colors.onPrimary : colors.textSecondary} />
                 </TouchableOpacity>
@@ -4044,6 +4157,9 @@ export default function MapScreen() {
                 </View>
                 <TouchableOpacity
                   style={[styles.fab, { backgroundColor: colors.surface }]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Centre the map on my location"
+                  accessibilityState={{ selected: followUser }}
                   onPress={() => {
                     setToolsOpen(false);
                     if (userLocation) {
@@ -4066,6 +4182,9 @@ export default function MapScreen() {
             style={[styles.fab, { backgroundColor: toolsOpen ? colors.primary : colors.surface }]}
             onPress={() => setToolsOpen((v) => !v)}
             activeOpacity={0.8}
+            accessibilityRole="button"
+            accessibilityLabel={toolsOpen ? 'Close the tools menu' : 'Open the tools menu'}
+            accessibilityState={{ expanded: toolsOpen }}
           >
             {toolsOpen ? <X size={22} stroke={colors.onPrimary} /> : <Plus size={22} stroke={colors.textSecondary} />}
             {!toolsOpen && undoCount > 0 && (
@@ -4083,6 +4202,7 @@ export default function MapScreen() {
           visible={surveyPanelVisible}
           surveyFeatures={surveyFeatures}
           layerNames={activeLayerNames}
+          bottomOffset={commitBarHeight}
           onClose={() => setSurveyPanelVisible(false)}
           onFeaturePress={(featureId) => {
             // Highlight the feature on the map
@@ -4097,7 +4217,12 @@ export default function MapScreen() {
         <View style={[styles.panel, { backgroundColor: colors.surface, bottom: Spacing.xxl }]}>
           <View style={styles.panelHeader}>
             <Text style={[styles.panelTitle, { color: colors.textPrimary }]}>Basemap</Text>
-            <TouchableOpacity onPress={() => setBasemapPanelVisible(false)}>
+            <TouchableOpacity
+              onPress={() => setBasemapPanelVisible(false)}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              accessibilityRole="button"
+              accessibilityLabel="Close the basemap chooser"
+            >
               <X size={20} stroke={colors.textSecondary} />
             </TouchableOpacity>
           </View>
@@ -4110,8 +4235,11 @@ export default function MapScreen() {
                   style={[styles.basemapItem, { backgroundColor: isActive ? colors.primary + '15' : colors.background, borderColor: isActive ? colors.primary : colors.outline }]}
                   onPress={() => { setActiveBasemap(bm.id); setBasemapPanelVisible(false); }}
                   activeOpacity={0.7}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Use the ${bm.name} basemap`}
+                  accessibilityState={{ selected: isActive }}
                 >
-                  <Text style={{ fontSize: 24 }}>{bm.icon}</Text>
+                  <View style={[styles.basemapSwatchLarge, { backgroundColor: BASEMAP_SWATCH[bm.id] ?? colors.outline }]} />
                   <Text style={[styles.basemapLabel, { color: isActive ? colors.primary : colors.textPrimary }]}>{bm.name}</Text>
                 </TouchableOpacity>
               );
@@ -4119,6 +4247,30 @@ export default function MapScreen() {
           </View>
         </View>
       )}
+      {/* Commit path — the survey's ONE submit, on the screen where the work
+          happens instead of three taps away on the project list.
+
+          Hidden while a geometry editor toolbar is open (that toolbar owns
+          Save) and during the planner's read-only review isolation. It stays
+          put while the changes panel is open: the panel floats above the bar's
+          measured height, so reviewing changes never costs the engineer the
+          Submit button. */}
+      {!isolateFeatureId && !selectedLineFeature && !selectedPolygonFeature && (
+        <CommitBar
+          summary={commitSummary}
+          onSubmit={handleSubmitSurvey}
+          onLayout={(e) => setCommitBarHeight(e.nativeEvent.layout.height)}
+          onReviewChanges={commitSummary.changes > 0 ? () => setSurveyPanelVisible(true) : undefined}
+          submittedLabel={
+            liveProject?.status === 'submitted' || liveProject?.status === 'under_review'
+              ? 'Submitted — with the planner'
+              : undefined
+          }
+          busy={submittingSurvey}
+          disabled={!activeProject}
+        />
+      )}
+
       <Toast
         visible={toastVisible}
         message={toastMsg}
@@ -4150,7 +4302,7 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 17, fontWeight: '600' },
   headerTitleWrap: { flex: 1, minWidth: 0 },
-  headerSubtitle: { fontSize: 11, marginTop: 1 },
+  headerSubtitle: { fontSize: Type.meta.fontSize, lineHeight: Type.meta.lineHeight, marginTop: 1 },
 
   // ── Map View ───────────────────────────────────────────────────────────
   mapContainer: { flex: 1, position: 'relative' },
@@ -4176,7 +4328,8 @@ const styles = StyleSheet.create({
     elevation: 6,
   },
   dragIndicatorText: {
-    fontSize: 12,
+    fontSize: Type.label.fontSize,
+    lineHeight: Type.label.lineHeight,
     fontWeight: '600',
   },
 
@@ -4191,19 +4344,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.sm,
     borderRadius: Radius.md,
     borderWidth: 1,
-    height: 38,
+    height: Touch.minTarget,
     gap: 6,
   },
   searchInput: {
     flex: 1,
-    fontSize: 13,
+    fontSize: Type.body.fontSize,
     paddingVertical: 0,
     height: '100%',
   },
   searchClear: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
+    width: Touch.minTarget,
+    height: Touch.minTarget,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -4249,14 +4401,14 @@ const styles = StyleSheet.create({
   },
   featureInfo: { flex: 1 },
   featureName: { fontSize: 15, fontWeight: '600' },
-  featureLayer: { fontSize: 12, marginTop: 1 },
+  featureLayer: { fontSize: Type.meta.fontSize, lineHeight: Type.meta.lineHeight, marginTop: 1 },
   featureMeta: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.sm,
     marginBottom: Spacing.md,
   },
-  featureMetaText: { fontSize: 12, flex: 1 },
+  featureMetaText: { fontSize: Type.meta.fontSize, lineHeight: Type.meta.lineHeight, flex: 1 },
   openBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -4306,7 +4458,8 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   countBadgeTextSm: {
-    fontSize: 11,
+    fontSize: Type.label.fontSize,
+    lineHeight: Type.label.lineHeight,
     fontWeight: '700',
   },
   fpCloseBtn: {
@@ -4340,7 +4493,8 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   fpFeatureProps: {
-    fontSize: 11,
+    fontSize: Type.meta.fontSize,
+    lineHeight: Type.meta.lineHeight,
     marginTop: 2,
   },
   fpEmpty: {
@@ -4372,14 +4526,19 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 5,
     paddingHorizontal: 12,
-    paddingVertical: 7,
     borderRadius: Radius.md,
     borderWidth: 1,
+    // 48, not the 32 it used to be: adjacent segments must not share a
+    // hit area, and this is the map's primary view control.
+    minHeight: Touch.minTarget,
   },
   viewSegText: {
-    fontSize: 12.5,
+    fontSize: Type.label.fontSize,
+    lineHeight: Type.label.lineHeight,
     fontWeight: '600',
   },
+  modeDot: { width: 10, height: 10, borderRadius: 5 },
+  modeDotLarge: { width: 18, height: 18, borderRadius: 9 },
 
   // ── FABs ───────────────────────────────────────────────────────────────
   fabs: {
@@ -4422,8 +4581,10 @@ const styles = StyleSheet.create({
   },
   isolateExitText: {
     color: '#FFFFFF',
-    fontSize: 12,
+    fontSize: Type.label.fontSize,
+    lineHeight: Type.label.lineHeight,
     fontWeight: '700',
+    marginLeft: 4,
   },
   fab: {
     width: 48,
@@ -4454,7 +4615,8 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   fabLabelText: {
-    fontSize: 12,
+    fontSize: Type.label.fontSize,
+    lineHeight: Type.label.lineHeight,
     fontWeight: '600',
   },
 
@@ -4463,9 +4625,9 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: -2,
     right: -2,
-    minWidth: 18,
-    height: 18,
-    borderRadius: 9,
+    minWidth: 22,
+    height: 20,
+    borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 4,
@@ -4473,10 +4635,10 @@ const styles = StyleSheet.create({
     borderColor: '#FFFFFF',
   },
   undoBadgeText: {
-    fontSize: 10,
+    fontSize: Type.label.fontSize,
     fontWeight: '700',
     color: '#FFFFFF',
-    lineHeight: 12,
+    lineHeight: 16,
   },
 
   // ── Basemap Switcher Panel ────────────────────────────────────────────
@@ -4514,7 +4676,19 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     gap: 6,
   },
-  basemapLabel: { fontSize: 12, fontWeight: '600' },
+  basemapLabel: { fontSize: Type.label.fontSize, lineHeight: Type.label.lineHeight, fontWeight: '600' },
+  basemapSwatch: {
+    width: 20,
+    height: 20,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  basemapSwatchLarge: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
 
   // ── Loading Overlay ───────────────────────────────────────────────────
   loadingOverlay: {

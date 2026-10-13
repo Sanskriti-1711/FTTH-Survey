@@ -16,7 +16,8 @@ import { Card, StatCard } from '../../components/ui/Card';
 import { StatusBadge } from '../../components/ui/StatusBadge';
 import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
-import { Spacing, Radius, StatusColors, type StatusKey } from '../../lib/theme/colors';
+import CommitBar from '../../lib/components/CommitBar';
+import { Spacing, Radius, StatusColors, Touch, Type, type StatusKey } from '../../lib/theme/colors';
 import {
   Camera,
   Upload,
@@ -141,6 +142,8 @@ export default function HomeScreen() {
             <TouchableOpacity
               style={[styles.iconBtn, { backgroundColor: colors.surface }]}
               onPress={() => router.push('/(tabs)/profile')}
+              accessibilityRole="button"
+              accessibilityLabel="Open my profile"
             >
               <Bell size={20} stroke={colors.textSecondary} />
             </TouchableOpacity>
@@ -174,9 +177,12 @@ export default function HomeScreen() {
             style={[styles.actionBtn, { backgroundColor: colors.secondary }]}
             onPress={() => router.push('/camera')}
             activeOpacity={0.8}
+            accessibilityRole="button"
+            accessibilityLabel="Take a photo"
           >
-            <Camera size={24} color="#FFFFFF" />
-            <Text style={[styles.actionText, { color: '#FFFFFF' }]}>Photo</Text>
+            {/* Never white on the identity orange — it is 2.33:1. */}
+            <Camera size={24} color={colors.onSecondary} />
+            <Text style={[styles.actionText, { color: colors.onSecondary }]}>Photo</Text>
           </TouchableOpacity>
         </View>
 
@@ -188,6 +194,9 @@ export default function HomeScreen() {
             <TouchableOpacity
               style={[styles.importLink, { backgroundColor: colors.primary + '10' }]}
               onPress={() => router.push('/project/import')}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              accessibilityRole="button"
+              accessibilityLabel="Import a survey package"
             >
               <Upload size={14} stroke={colors.primary} />
               <Text style={[styles.importLinkText, { color: colors.primary }]}>Import</Text>
@@ -221,7 +230,12 @@ export default function HomeScreen() {
           <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>
             My Projects
           </Text>
-          <TouchableOpacity onPress={() => router.push('/project/import')}>
+          <TouchableOpacity
+            onPress={() => router.push('/project/import')}
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            accessibilityRole="button"
+            accessibilityLabel="Import a new project"
+          >
             <Text style={[styles.seeAll, { color: colors.primary }]}>+ New</Text>
           </TouchableOpacity>
         </View>
@@ -254,11 +268,14 @@ export default function HomeScreen() {
                   },
                 ]}
                 activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel={`Show ${chip.label} projects, ${count}`}
+                accessibilityState={{ selected: isActive }}
               >
                 <Text
                   style={[
                     styles.filterChipText,
-                    { color: isActive ? '#FFFFFF' : colors.textSecondary },
+                    { color: isActive ? colors.onPrimary : colors.textSecondary },
                   ]}
                 >
                   {chip.label}
@@ -377,6 +394,8 @@ function ProjectCard({
       style={[styles.jobCard, { backgroundColor: colors.surface }]}
       onPress={onPress}
       activeOpacity={0.7}
+      accessibilityRole="button"
+      accessibilityLabel={`${project.name}, ${project.region || 'Field Survey'}, status ${project.status.replace(/_/g, ' ')}`}
     >
       <View style={styles.jobHeader}>
         <View style={styles.jobInfo}>
@@ -400,37 +419,34 @@ function ProjectCard({
           }}
           style={{
             marginTop: 10,
-            paddingVertical: 9,
+            minHeight: Touch.minTarget,
+            justifyContent: 'center',
             borderRadius: 8,
             alignItems: 'center',
             backgroundColor: colors.primary,
           }}
           activeOpacity={0.8}
+          accessibilityRole="button"
+          accessibilityLabel="Accept this survey project"
         >
-          <Text style={{ color: '#FFFFFF', fontSize: 13, fontWeight: '700' }}>
+          <Text style={{ color: colors.onPrimary, fontSize: Type.label.fontSize, fontWeight: '700' }}>
             Accept Survey Project
           </Text>
         </TouchableOpacity>
       )}
-      {showSubmit && (
-        <TouchableOpacity
-          onPress={(e) => {
-            e.stopPropagation();
-            onSubmit();
-          }}
-          style={{
-            marginTop: 10,
-            paddingVertical: 9,
-            borderRadius: 8,
-            alignItems: 'center',
-            backgroundColor: colors.secondary ?? colors.primary,
-          }}
-          activeOpacity={0.8}
-        >
-          <Text style={{ color: '#FFFFFF', fontSize: 13, fontWeight: '700' }}>
-            {project.status === 'redo' ? 'Resubmit Survey' : 'Submit for Review'}
-          </Text>
-        </TouchableOpacity>
+      {/* The card's submit IS the commit bar, so the confirm and the wording
+          are the same here as on the map — this button is only a shortcut for
+          engineers who finish a job without opening the map last. */}
+      {showSubmit && onSubmit && (
+        <View style={{ marginTop: 10 }}>
+          <CommitBar
+            variant="card"
+            onSubmit={onSubmit}
+            submitLabel={project.status === 'redo' ? 'Resubmit survey' : 'Submit survey'}
+            showSummary={false}
+            expectChanges={false}
+          />
+        </View>
       )}
       {reviewActions.length > 0 && (
         <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
@@ -440,14 +456,19 @@ function ProjectCard({
               onPress={(e) => handleReviewPress(e, btn)}
               style={{
                 flex: 1,
-                paddingVertical: 9,
+                minHeight: Touch.minTarget,
+                justifyContent: 'center',
                 borderRadius: 8,
                 alignItems: 'center',
                 backgroundColor: confirmingAction === btn.action ? colors.warning : btn.color,
               }}
               activeOpacity={0.8}
+              accessibilityRole="button"
+              accessibilityLabel={
+                confirmingAction === btn.action ? `${btn.label}, tap again to confirm` : btn.label
+              }
             >
-              <Text style={{ color: '#FFFFFF', fontSize: 13, fontWeight: '700' }}>
+              <Text style={{ color: colors.onPrimary, fontSize: Type.label.fontSize, fontWeight: '700' }}>
                 {confirmingAction === btn.action ? 'Tap again to confirm' : btn.label}
               </Text>
             </TouchableOpacity>
@@ -477,8 +498,8 @@ const styles = StyleSheet.create({
   greeting: { fontSize: 14 },
   name: { fontSize: 22, fontWeight: '700' },
   iconBtn: {
-    width: 40,
-    height: 40,
+    width: Touch.minTarget,
+    height: Touch.minTarget,
     borderRadius: Radius.full,
     alignItems: 'center',
     justifyContent: 'center',
@@ -491,7 +512,7 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderRadius: Radius.full,
   },
-  importLinkText: { fontSize: 12, fontWeight: '600' },
+  importLinkText: { fontSize: Type.label.fontSize, lineHeight: Type.label.lineHeight, fontWeight: '600' },
   importRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -499,7 +520,7 @@ const styles = StyleSheet.create({
   },
   importInfo: { flex: 1 },
   importLabel: { fontSize: 14, fontWeight: '500' },
-  importDesc: { fontSize: 12, marginTop: 2 },
+  importDesc: { fontSize: Type.meta.fontSize, lineHeight: Type.meta.lineHeight, marginTop: 2 },
   statsRow: {
     flexDirection: 'row',
     marginBottom: Spacing.xl,
@@ -565,5 +586,5 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: Spacing.md,
   },
-  jobDate: { fontSize: 12 },
+  jobDate: { fontSize: Type.meta.fontSize, lineHeight: Type.meta.lineHeight },
 });

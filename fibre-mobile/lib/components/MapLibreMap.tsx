@@ -26,6 +26,8 @@ import {
 } from 'react-native';
 import type { GeoJSONFeature } from '../utils/types';
 import Constants from 'expo-constants';
+import { Map as MapIcon, CircleAlert, RotateCw, Ruler, Package } from 'lucide-react-native';
+import { useThemeStore } from '../stores/theme';
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -42,7 +44,6 @@ export interface BasemapStyle {
   id: string;
   name: string;
   style: string | Record<string, unknown>;
-  icon: string;
 }
 
 type MapStatus = 'loading' | 'ready' | 'error' | 'timeout' | 'empty';
@@ -286,7 +287,6 @@ export const BASEMAPS: Record<string, BasemapStyle> = {
     id: 'streets',
     name: 'Streets',
     style: OSM_STREETS_STYLE,
-    icon: '🗺️',
   },
   satellite: {
     id: 'satellite',
@@ -307,13 +307,11 @@ export const BASEMAPS: Record<string, BasemapStyle> = {
         { id: 'esri-satellite-layer', type: 'raster', source: 'esri-satellite', minzoom: 0, maxzoom: 20 },
       ],
     },
-    icon: '🛰️',
   },
   light: {
     id: 'light',
     name: 'Light',
     style: 'https://demotiles.maplibre.org/style.json',
-    icon: '☀️',
   },
 };
 
@@ -390,19 +388,21 @@ function LoadingOverlay({ message = 'Loading map...', progress }: { message?: st
   const dotOpacity = (dot: Animated.Value) =>
     dot.interpolate({ inputRange: [0, 1], outputRange: [0.3, 1] });
 
+  const colors = useThemeStore((s) => s.colors);
+
   return (
-    <View style={styles.overlay}>
+    <View style={styles.overlay} accessibilityRole="progressbar" accessibilityLabel={message}>
       <View style={styles.loadingCard}>
         <Animated.View style={{ opacity: pulseAnim }}>
           <View style={styles.mapIconContainer}>
-            <Text style={styles.mapIconLarge}>🗺️</Text>
+            <MapIcon size={30} stroke={colors.primary} />
           </View>
         </Animated.View>
 
         <View style={styles.loadingDots}>
-          <Animated.View style={[styles.dot, { opacity: dotOpacity(dot1), backgroundColor: '#0D5CFF' }]} />
-          <Animated.View style={[styles.dot, { opacity: dotOpacity(dot2), backgroundColor: '#0D5CFF' }]} />
-          <Animated.View style={[styles.dot, { opacity: dotOpacity(dot3), backgroundColor: '#0D5CFF' }]} />
+          <Animated.View style={[styles.dot, { opacity: dotOpacity(dot1), backgroundColor: colors.primary }]} />
+          <Animated.View style={[styles.dot, { opacity: dotOpacity(dot2), backgroundColor: colors.primary }]} />
+          <Animated.View style={[styles.dot, { opacity: dotOpacity(dot3), backgroundColor: colors.primary }]} />
         </View>
 
         <Text style={styles.loadingTitle}>{message}</Text>
@@ -430,6 +430,7 @@ function ErrorOverlay({
   onRetry?: () => void;
 }) {
   const fadeAnim = useRef(new Animated.Value(0)).current;
+  const colors = useThemeStore((s) => s.colors);
 
   useEffect(() => {
     Animated.timing(fadeAnim, { toValue: 1, duration: 300, useNativeDriver: true }).start();
@@ -439,31 +440,26 @@ function ErrorOverlay({
     switch (error.type) {
       case 'network':
         return {
-          icon: '📡',
           title: 'Network Error',
           description: 'Could not connect to the map tile server. Check your internet connection and try again.',
         };
       case 'style':
         return {
-          icon: '🎨',
           title: 'Style Load Failed',
           description: 'The map style could not be loaded. The style server may be temporarily unavailable.',
         };
       case 'module':
         return {
-          icon: '📦',
           title: 'Map Library Error',
           description: error.message || 'The map rendering library could not be initialized.',
         };
       case 'timeout':
         return {
-          icon: '⏱️',
           title: 'Loading Timeout',
           description: 'The map took too long to load. This may be due to a slow connection or server issue.',
         };
       default:
         return {
-          icon: '⚠️',
           title: 'Map Error',
           description: error.message || 'An unexpected error occurred while loading the map.',
         };
@@ -474,7 +470,7 @@ function ErrorOverlay({
     <Animated.View style={[styles.overlay, { opacity: fadeAnim }]}>
       <View style={styles.errorCard}>
         <View style={styles.errorIconCircle}>
-          <Text style={styles.errorIconLarge}>{errorConfig.icon}</Text>
+          <CircleAlert size={30} stroke={colors.warning} />
         </View>
 
         <Text style={styles.errorTitle}>{errorConfig.title}</Text>
@@ -482,13 +478,22 @@ function ErrorOverlay({
 
         {error.type === 'timeout' && (
           <View style={styles.tipContainer}>
-            <Text style={styles.tipText}>💡 Tip: Try switching to a different basemap style</Text>
+            <Text style={styles.tipText}>Tip: try switching to a different basemap style</Text>
           </View>
         )}
 
         {onRetry && (
-          <TouchableOpacity style={styles.retryButton} onPress={onRetry} activeOpacity={0.7}>
-            <Text style={styles.retryButtonText}>↻  Retry Loading</Text>
+          <TouchableOpacity
+            style={[styles.retryButton, { backgroundColor: colors.primary }]}
+            onPress={onRetry}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading the map"
+          >
+            <RotateCw size={16} stroke={colors.onPrimary} />
+            <Text style={[styles.retryButtonText, { color: colors.onPrimary }]}>
+              Retry loading
+            </Text>
           </TouchableOpacity>
         )}
       </View>
@@ -498,6 +503,7 @@ function ErrorOverlay({
 
 function EmptyOverlay() {
   const fadeAnim = useRef(new Animated.Value(0)).current;
+  const colors = useThemeStore((s) => s.colors);
 
   useEffect(() => {
     Animated.timing(fadeAnim, { toValue: 1, duration: 400, useNativeDriver: true }).start();
@@ -507,7 +513,7 @@ function EmptyOverlay() {
     <Animated.View style={[styles.overlay, { opacity: fadeAnim }]}>
       <View style={styles.emptyCard}>
         <View style={styles.emptyIconContainer}>
-          <Text style={styles.emptyIcon}>🗺️</Text>
+          <MapIcon size={24} stroke={colors.primary} />
           <View style={styles.emptyIconBadge}>
             <Text style={styles.emptyBadgeText}>0</Text>
           </View>
@@ -571,6 +577,7 @@ function NativeMapView({
   const [loadProgress, setLoadProgress] = useState<number | undefined>(undefined);
   const [mapKey, setMapKey] = useState(0);
   const retryCountRef = useRef(0);
+  const colors = useThemeStore((s) => s.colors);
 
   // ── Point Drag State ─────────────────────────────────────────────────
   const [isDragging, setIsDragging] = useState(false);
@@ -2067,7 +2074,7 @@ function NativeMapView({
       {isVertexDragging && vertexDragDistance !== null && (
         <View style={styles.dragDistanceOverlay}>
           <View style={styles.dragDistanceCard}>
-            <Text style={styles.dragDistanceIcon}>📐</Text>
+            <Ruler size={16} stroke={colors.textSecondary} />
             <View style={{ flexDirection: 'row', alignItems: 'baseline' }}>
               <Text style={styles.dragDistanceValue}>{vertexDragDistance}</Text>
               <Text style={styles.dragDistanceUnit}>m</Text>
@@ -3501,10 +3508,11 @@ function WebMapView({
 // ── Main Export ──────────────────────────────────────────────────────────
 
 function NativeMapUnavailableView({ isExpoGo }: { isExpoGo: boolean }) {
+  const colors = useThemeStore((s) => s.colors);
   return (
     <View style={[styles.errorContainer, { minHeight: 300 }]}>
       <View style={styles.errorIconCircle}>
-        <Text style={styles.errorIconLarge}>📦</Text>
+        <Package size={30} stroke={colors.error} />
       </View>
       <Text style={styles.errorTitle}>Map Library Not Available</Text>
       <Text style={styles.errorDescription}>
@@ -3680,12 +3688,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#0D5CFF',
+    gap: 6,
     paddingHorizontal: 24,
     paddingVertical: 12,
     borderRadius: 12,
     marginTop: 4,
     minWidth: 160,
+    minHeight: 48,
   },
   retryButtonText: {
     fontSize: 14,

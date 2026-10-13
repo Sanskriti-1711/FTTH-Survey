@@ -1,19 +1,26 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
-import { StatusColors, type StatusKey, Radius } from '../../lib/theme/colors';
+import { useThemeStore } from '../../lib/stores/theme';
+import { StatusColors, type StatusKey, Radius, Type, Spacing } from '../../lib/theme/colors';
 
 // ── StatusBadge ───────────────────────────────────────────────────────────
+//
+// Status is carried by a word AND a dot, never by colour alone — the word is
+// what a screen reader announces and what a colour-blind engineer reads.
 
 export function StatusBadge({ status }: { status: string }) {
   const key = (status in StatusColors ? status : 'pending') as StatusKey;
   const colors = StatusColors[key];
+  const label = status.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
   return (
-    <View style={[styles.badge, { backgroundColor: colors.bg }]}>
+    <View
+      style={[styles.badge, { backgroundColor: colors.bg }]}
+      accessible
+      accessibilityLabel={`Status: ${label}`}
+    >
       <View style={[styles.dot, { backgroundColor: colors.dot }]} />
-      <Text style={[styles.text, { color: colors.text }]}>
-        {status.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())}
-      </Text>
+      <Text style={[styles.text, { color: colors.text }]}>{label}</Text>
     </View>
   );
 }
@@ -31,25 +38,33 @@ export function ProgressBar({
   color?: string;
   showLabel?: boolean;
 }) {
+  const colors = useThemeStore((s) => s.colors);
   const clamped = Math.max(0, Math.min(1, progress));
+  const pct = Math.round(clamped * 100);
 
   return (
-    <View style={styles.progressWrapper}>
-      <View style={[styles.track, { height }]}>
+    <View
+      style={styles.progressWrapper}
+      accessibilityRole="progressbar"
+      accessibilityValue={{ min: 0, max: 100, now: pct }}
+    >
+      <View style={[styles.track, { height, backgroundColor: colors.outlineLight }]}>
         <View
           style={[
             styles.fill,
             {
               width: `${clamped * 100}%`,
               height,
-              backgroundColor: color ?? (clamped >= 1 ? StatusColors.approved.dot : '#0D5CFF'),
+              backgroundColor: color ?? (clamped >= 1 ? colors.success : colors.primary),
               borderRadius: height / 2,
             },
           ]}
         />
       </View>
       {showLabel && (
-        <Text style={styles.label}>{Math.round(clamped * 100)}%</Text>
+        <Text style={[styles.label, { color: colors.textTertiary }]} maxFontSizeMultiplier={Type.maxScale}>
+          {pct}%
+        </Text>
       )}
     </View>
   );
@@ -59,8 +74,8 @@ const styles = StyleSheet.create({
   badge: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.xs,
     borderRadius: Radius.full,
     alignSelf: 'flex-start',
   },
@@ -71,17 +86,17 @@ const styles = StyleSheet.create({
     marginRight: 6,
   },
   text: {
-    fontSize: 12,
+    fontSize: Type.label.fontSize,
+    lineHeight: Type.label.lineHeight,
     fontWeight: '600',
   },
   progressWrapper: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: Spacing.sm,
   },
   track: {
     flex: 1,
-    backgroundColor: '#E5E7EB',
     borderRadius: 4,
     overflow: 'hidden',
   },
@@ -89,10 +104,10 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   label: {
-    fontSize: 12,
+    fontSize: Type.meta.fontSize,
+    lineHeight: Type.meta.lineHeight,
     fontWeight: '600',
-    color: '#6B7280',
-    minWidth: 36,
+    minWidth: 40,
     textAlign: 'right',
   },
 });

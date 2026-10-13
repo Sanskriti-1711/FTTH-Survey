@@ -30,6 +30,7 @@ import Server from 'lucide-react-native/icons/server';
 import ChevronDown from 'lucide-react-native/icons/chevron-down';
 import ChevronUp from 'lucide-react-native/icons/chevron-up';
 import CheckCircle2 from 'lucide-react-native/icons/circle-check';
+import CircleX from 'lucide-react-native/icons/circle-x';
 
 // ── Login Screen ──────────────────────────────────────────────────────────
 
@@ -107,10 +108,10 @@ export default function LoginScreen() {
       clearTimeout(abortTimer);
       if (res.status >= 400) {
         setServerStatus('ok');
-        setServerStatusMsg('Server reachable ✓');
+        setServerStatusMsg('Server reachable');
       } else {
         setServerStatus('ok');
-        setServerStatusMsg('Server responded ✓');
+        setServerStatusMsg('Server responded');
       }
     } catch (err: unknown) {
       clearTimeout(abortTimer);
@@ -288,7 +289,7 @@ export default function LoginScreen() {
                     ) : serverStatus === 'ok' ? (
                       <CheckCircle2 size={16} stroke={colors.success} />
                     ) : (
-                      <Text style={[styles.serverStatusIcon, { color: colors.error }]}>✕</Text>
+                      <CircleX size={16} stroke={colors.error} />
                     )}
                     <Text
                       style={[

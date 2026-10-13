@@ -6,7 +6,6 @@ import {
   ScrollView,
   TextInput,
   TouchableOpacity,
-  Alert,
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -25,11 +24,11 @@ import { Toast } from '../../components/ui/Toast';
 import LayerEditor from '../../lib/components/LayerEditor';
 import FeatureSurveySections from '../../lib/components/FeatureSurveySections';
 import SurveyChangeDiff from '../../lib/components/SurveyChangeDiff';
+import CommitBar from '../../lib/components/CommitBar';
+import { EMPTY_COMMIT_SUMMARY } from '../../lib/utils/commit';
 import { Spacing, Radius } from '../../lib/theme/colors';
 import {
   ArrowLeft,
-  Save,
-  CheckCircle,
   Camera,
   MapPin,
   Edit3,
@@ -60,6 +59,18 @@ function seedMeasurements(
     }
   }
   return base;
+}
+
+/** Order-independent field comparison — JSON.stringify would call two equal
+ *  measurements "dirty" just because their keys came back in another order. */
+function sameValues(
+  a: Record<string, unknown> | null | undefined,
+  b: Record<string, unknown> | null | undefined
+): boolean {
+  const keysA = Object.keys(a ?? {}).sort();
+  const keysB = Object.keys(b ?? {}).sort();
+  if (keysA.length !== keysB.length) return false;
+  return keysA.every((k, i) => k === keysB[i] && String(a?.[k] ?? '') === String(b?.[k] ?? ''));
 }
 
 // ── Feature Detail Screen ─────────────────────────────────────────────────
@@ -281,6 +292,13 @@ export default function FeatureDetailScreen() {
     setToastVisible(true);
   };
 
+  // Unsaved = what is on screen differs from what the server holds. Saving the
+  // measurements is what makes a later submit carry them, which is why the
+  // commit bar warns instead of quietly submitting the old values.
+  const hasUnsavedEdits =
+    !sameValues(measurements, feature?.field_measurements) ||
+    notes !== (feature?.comparison_notes ?? '');
+
   const handleSave = async () => {
     if (!featureId || !feature) return;
     try {
@@ -291,29 +309,19 @@ export default function FeatureDetailScreen() {
     }
   };
 
+  // The commit bar owns the confirm (two taps, which also works in the web
+  // build where Alert.alert is a no-op) — this is only the request itself.
   const handleSubmit = async () => {
     if (!featureId || !user) return;
-    Alert.alert(
-      'Submit for Review',
-      'Are you sure you want to submit this feature for review?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Submit',
-          onPress: async () => {
-            try {
-              await submitFeatures([featureId as string], user.id);
-              showToast('Feature submitted for review', 'success');
-              if (feature) {
-                setFeature({ ...feature, status: 'under_review' });
-              }
-            } catch {
-              showToast('Failed to submit', 'error');
-            }
-          },
-        },
-      ]
-    );
+    try {
+      await submitFeatures([featureId as string], user.id);
+      showToast('Feature submitted — the planner has it', 'success');
+      if (feature) {
+        setFeature({ ...feature, status: 'under_review' });
+      }
+    } catch {
+      showToast('Submit failed — check the connection and try again', 'error');
+    }
   };
 
   const renderFieldSchema = (schema: FieldSchemaField[] | null) => {
@@ -638,27 +646,24 @@ export default function FeatureDetailScreen() {
         </Card>
       </ScrollView>
 
-      {/* Sticky Bottom Actions */}
-      <View style={[styles.bottomBar, { backgroundColor: colors.surface, borderTopColor: colors.outline }]}>
-        <Button
-          title="Save Draft"
-          variant="tertiary"
-          size="sm"
-          icon={<Save size={16} stroke={colors.textSecondary} />}
-          onPress={handleSave}
-          loading={isLoading}
-          style={{ flex: 1 }}
-        />
-        <Button
-          title="Submit"
-          variant="primary"
-          size="sm"
-          icon={<CheckCircle size={16} stroke={colors.onPrimary} />}
-          onPress={handleSubmit}
-          loading={isLoading}
-          style={{ flex: 1 }}
-        />
-      </View>
+      {/* Sticky Bottom Actions — the same commit bar as the map, so Save and
+          Submit always live in the same place with the same words. */}
+      <CommitBar
+        onSave={handleSave}
+        onSubmit={handleSubmit}
+        summary={{ ...EMPTY_COMMIT_SUMMARY, unsaved: hasUnsavedEdits ? 1 : 0 }}
+        summaryText={
+          hasUnsavedEdits
+            ? 'Unsaved edits on this feature — Save to keep them'
+            : 'Measurements saved'
+        }
+        submitLabel="Submit feature"
+        submittedLabel={
+          feature?.status === 'under_review' ? 'Submitted — with the planner' : undefined
+        }
+        busy={isLoading}
+        expectChanges={false}
+      />
 
       <Toast visible={toastVisible} message={toastMsg} type={toastType} onDismiss={() => setToastVisible(false)} />
     </SafeAreaView>
@@ -761,14 +766,4 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
   },
 
-  bottomBar: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    gap: Spacing.sm,
-    padding: Spacing.md,
-    borderTopWidth: 1,
-  },
 });

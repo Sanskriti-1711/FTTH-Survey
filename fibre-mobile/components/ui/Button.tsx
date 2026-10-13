@@ -6,10 +6,9 @@ import {
   ActivityIndicator,
   type TouchableOpacityProps,
   type ViewStyle,
-  type TextStyle,
 } from 'react-native';
 import { useThemeStore } from '../../lib/stores/theme';
-import { Colors, Radius, Touch } from '../../lib/theme/colors';
+import { Radius, Touch, Type, Spacing } from '../../lib/theme/colors';
 
 // ── Button ────────────────────────────────────────────────────────────────
 
@@ -20,6 +19,8 @@ interface ButtonProps extends TouchableOpacityProps {
   loading?: boolean;
   icon?: React.ReactNode;
   fullWidth?: boolean;
+  /** Overrides the spoken label when `title` alone is ambiguous. */
+  accessibilityLabel?: string;
 }
 
 export function Button({
@@ -31,6 +32,7 @@ export function Button({
   fullWidth = true,
   style,
   disabled,
+  accessibilityLabel,
   ...props
 }: ButtonProps) {
   const colors = useThemeStore((s) => s.colors);
@@ -46,10 +48,12 @@ export function Button({
     danger: { bg: colors.error, text: '#FFFFFF' },
   };
 
+  // sm used to be 40px — under the field floor. Every size now clears
+  // Touch.minTarget, and the primary action clears Touch.minHeight.
   const sizeStyles: Record<string, { height: number; fontSize: number; paddingH: number }> = {
-    sm: { height: 40, fontSize: 13, paddingH: 16 },
-    md: { height: Touch.minHeight, fontSize: 15, paddingH: 24 },
-    lg: { height: 64, fontSize: 17, paddingH: 32 },
+    sm: { height: Touch.minTarget, fontSize: Type.label.fontSize, paddingH: Spacing.lg },
+    md: { height: Touch.minHeight, fontSize: Type.body.fontSize, paddingH: Spacing.xl },
+    lg: { height: 64, fontSize: Type.title.fontSize, paddingH: Spacing.xxl },
   };
 
   const vs = variantStyles[variant];
@@ -73,6 +77,9 @@ export function Button({
       ]}
       disabled={isDisabled}
       activeOpacity={0.7}
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel ?? title}
+      accessibilityState={{ disabled: isDisabled, busy: loading }}
       {...props}
     >
       {loading ? (
@@ -84,8 +91,9 @@ export function Button({
             style={[
               styles.text,
               { color: vs.text, fontSize: ss.fontSize },
-              icon ? { marginLeft: 8 } : undefined,
+              icon ? { marginLeft: Spacing.sm } : undefined,
             ]}
+            maxFontSizeMultiplier={Type.maxScale}
           >
             {title}
           </Text>

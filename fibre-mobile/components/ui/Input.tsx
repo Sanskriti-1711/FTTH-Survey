@@ -8,7 +8,7 @@ import {
   type TextInputProps,
 } from 'react-native';
 import { useThemeStore } from '../../lib/stores/theme';
-import { Radius, Spacing } from '../../lib/theme/colors';
+import { Radius, Spacing, Touch, Type } from '../../lib/theme/colors';
 import { Eye, EyeOff } from 'lucide-react-native';
 
 // ── Input ─────────────────────────────────────────────────────────────────
@@ -45,7 +45,9 @@ export function Input({
   return (
     <View style={styles.wrapper}>
       {label && (
-        <Text style={[styles.label, { color: colors.textPrimary }]}>{label}</Text>
+        <Text style={[styles.label, { color: colors.textPrimary }]} maxFontSizeMultiplier={Type.maxScale}>
+          {label}
+        </Text>
       )}
       <View
         style={[
@@ -66,6 +68,11 @@ export function Input({
           ]}
           placeholderTextColor={colors.textTertiary}
           secureTextEntry={isPassword && !showPassword}
+          // A visible label is not a programmatic one: the field carries the
+          // label it is drawn under so a screen reader hears it on focus.
+          accessibilityLabel={props.accessibilityLabel ?? label}
+          accessibilityState={{ disabled: props.editable === false }}
+          maxFontSizeMultiplier={Type.maxScale}
           onFocus={(e) => {
             setFocused(true);
             props.onFocus?.(e);
@@ -80,7 +87,9 @@ export function Input({
           <TouchableOpacity
             onPress={() => setShowPassword(!showPassword)}
             style={styles.iconRight}
-            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            accessibilityRole="button"
+            accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}
+            accessibilityState={{ checked: showPassword }}
           >
             {showPassword ? (
               <EyeOff size={20} color={colors.textSecondary} />
@@ -90,9 +99,19 @@ export function Input({
           </TouchableOpacity>
         )}
       </View>
-      {error && <Text style={[styles.error, { color: colors.error }]}>{error}</Text>}
+      {error && (
+        <Text
+          style={[styles.error, { color: colors.error }]}
+          accessibilityRole="alert"
+          accessibilityLiveRegion="polite"
+        >
+          {error}
+        </Text>
+      )}
       {hint && !error && (
-        <Text style={[styles.hint, { color: colors.textTertiary }]}>{hint}</Text>
+        <Text style={[styles.hint, { color: colors.textTertiary }]} maxFontSizeMultiplier={Type.maxScale}>
+          {hint}
+        </Text>
       )}
     </View>
   );
@@ -101,8 +120,9 @@ export function Input({
 const styles = StyleSheet.create({
   wrapper: { marginBottom: Spacing.lg },
   label: {
-    fontSize: 14,
-    fontWeight: '500',
+    fontSize: Type.label.fontSize,
+    lineHeight: Type.label.lineHeight,
+    fontWeight: '600',
     marginBottom: Spacing.xs,
   },
   inputContainer: {
@@ -114,22 +134,29 @@ const styles = StyleSheet.create({
   },
   input: {
     flex: 1,
-    height: 56,
+    height: Touch.minHeight,
     paddingHorizontal: Spacing.lg,
     fontSize: 16,
+    lineHeight: 21,
   },
   iconLeft: {
     paddingLeft: Spacing.lg,
   },
   iconRight: {
-    paddingRight: Spacing.lg,
+    width: Touch.minTarget,
+    height: Touch.minTarget,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: Spacing.xs,
   },
   error: {
-    fontSize: 13,
+    fontSize: Type.meta.fontSize,
+    lineHeight: Type.meta.lineHeight,
     marginTop: Spacing.xs,
   },
   hint: {
-    fontSize: 13,
+    fontSize: Type.meta.fontSize,
+    lineHeight: Type.meta.lineHeight,
     marginTop: Spacing.xs,
   },
 });

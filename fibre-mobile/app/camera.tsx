@@ -182,9 +182,12 @@ export default function CameraScreen() {
             <Image source={{ uri: selectedPhoto.localUri }} style={styles.previewImage} resizeMode="contain" />
             <View style={styles.previewInfo}>
               {selectedPhoto.featureId ? (
-                <Text style={[styles.previewAttached, { color: colors.success }]} numberOfLines={1}>
-                  ✓ Attached to feature {selectedPhoto.featureId.slice(-6)}
-                </Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Check size={14} stroke={colors.success} />
+                  <Text style={[styles.previewAttached, { color: colors.success }]} numberOfLines={1}>
+                    Attached to feature {selectedPhoto.featureId.slice(-6)}
+                  </Text>
+                </View>
               ) : (
                 <Text style={[styles.previewAttached, { color: colors.textTertiary }]}>
                   Not attached to a feature yet

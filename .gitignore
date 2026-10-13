@@ -18,6 +18,10 @@ fibre-mobile/web-prod-old-0824/
 fibre-mobile/web-prod-stale-0817/
 web-prod/
 
+# Static web export used to verify the UI on a host where the Metro file
+# watcher cannot start (no Watchman); regenerated, never committed.
+fibre-mobile/web-verify/
+
 # ── Machine-specific local APK dev scripts (hardcoded paths & creds) ──
 # Local build helpers only; never commit — they embed the dev machine's
 # D:/C: paths, LAN IP and PGPASSWORD, and would break or leak on any other

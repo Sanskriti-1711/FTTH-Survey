@@ -10,6 +10,7 @@
 //   Save — persists the temporary geometry to the survey-features store
 
 import React, { useEffect, useRef } from 'react';
+import type { ComponentType } from 'react';
 import {
   View,
   Text,
@@ -22,6 +23,13 @@ import {
 import { useThemeStore } from '../stores/theme';
 import { Spacing, Radius } from '../theme/colors';
 import type { EditingFeature } from './GeometryEditor';
+import Route from 'lucide-react-native/icons/route';
+import Axe from 'lucide-react-native/icons/axe';
+import Trash2 from 'lucide-react-native/icons/trash-2';
+import CornerUpLeft from 'lucide-react-native/icons/corner-up-left';
+import Undo2 from 'lucide-react-native/icons/undo-2';
+import Save from 'lucide-react-native/icons/save';
+import X from 'lucide-react-native/icons/x';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -69,18 +77,18 @@ interface LineSelectionToolbarProps {
 interface ActionDef {
   id: string;
   label: string;
-  icon: string;
+  icon: ComponentType<{ size?: number; stroke?: string }>;
   danger?: boolean;
   accent?: boolean;
 }
 
 const ACTIONS: ActionDef[] = [
-  { id: 'move', label: 'Reroute', icon: '↔️' },
-  { id: 'del_section', label: 'Del Section', icon: '🪓', danger: true },
-  { id: 'del_feature', label: 'Delete', icon: '🗑️', danger: true },
-  { id: 'continue', label: 'Draw Segment', icon: '▶️', accent: true },
-  { id: 'undo', label: 'Undo', icon: '↩️' },
-  { id: 'save', label: 'Save', icon: '💾', accent: true },
+  { id: 'move', label: 'Reroute', icon: Route },
+  { id: 'del_section', label: 'Del Section', icon: Axe, danger: true },
+  { id: 'del_feature', label: 'Delete', icon: Trash2, danger: true },
+  { id: 'continue', label: 'Draw Segment', icon: CornerUpLeft, accent: true },
+  { id: 'undo', label: 'Undo', icon: Undo2 },
+  { id: 'save', label: 'Save', icon: Save, accent: true },
 ];
 
 // ── Component ───────────────────────────────────────────────────────────────
@@ -164,8 +172,10 @@ export default function LineSelectionToolbar({
           onPress={onDeselect}
           activeOpacity={0.7}
           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          accessibilityRole="button"
+          accessibilityLabel="Close"
         >
-          <Text style={{ fontSize: 14, color: colors.textSecondary }}>✕</Text>
+          <X size={16} stroke={colors.textSecondary} />
         </TouchableOpacity>
       </View>
 
@@ -237,7 +247,7 @@ export default function LineSelectionToolbar({
                   else if (isContinue && onContinue) onContinue();
                 }}
               >
-                <Text style={styles.actionIcon}>{action.icon}</Text>
+                <action.icon size={18} stroke={textColor} />
                 <Text
                   style={[styles.actionLabel, { color: textColor }]}
                   numberOfLines={1}
@@ -262,7 +272,7 @@ export default function LineSelectionToolbar({
               )}
               {isContinue && (
                 <Text style={[styles.soonLabel, { color: continueMode ? (continueSnapLabel ? colors.success : '#FF8C00') : colors.textTertiary }]} numberOfLines={1}>
-                  {continueMode ? (continueLineStep === 0 ? 'Tap start' : continueLineStep === 1 ? 'Tap destination' : continueSnapLabel ? 'Snapped ✓' : 'Tap to extend') : 'Tap to start'}
+                  {continueMode ? (continueLineStep === 0 ? 'Tap start' : continueLineStep === 1 ? 'Tap destination' : continueSnapLabel ? 'Snapped' : 'Tap to extend') : 'Tap to start'}
                 </Text>
               )}
               {isDeleteFeature && (
@@ -297,14 +307,14 @@ export default function LineSelectionToolbar({
           : deleteSectionMode
             ? deleteSectionStep === 0 ? 'Tap the line near a vertex to select start point'
             : deleteSectionStep === 1 ? 'Tap the line near another vertex to select end point'
-            : 'Tap Confirm to remove the section, or ✕ to cancel'
+            : 'Tap Confirm to remove the section, or Close to cancel'
           : continueMode
             ? continueLineStep === 0 ? 'Tap the map to place the segment start (snaps to nearest point)'
             : continueLineStep === 1 ? 'Tap the destination point; it will snap to the nearest point'
             : continueSnapLabel
               ? `${continueSnapLabel} · Save to finish the segment`
               : 'One segment ready · Save to finish'
-          : 'Tap empty area or ✕ to deselect'}
+          : 'Tap an empty area or Close to deselect'}
       </Text>
     </Animated.View>
   );

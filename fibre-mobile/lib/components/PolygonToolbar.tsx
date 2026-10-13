@@ -8,6 +8,7 @@
 //   Undo — reverts the last vertex drag
 
 import React, { useEffect, useRef, useState } from 'react';
+import type { ComponentType } from 'react';
 import {
   View,
   Text,
@@ -20,6 +21,11 @@ import {
 import { useThemeStore } from '../stores/theme';
 import { Spacing, Radius } from '../theme/colors';
 import type { EditingFeature } from './GeometryEditor';
+import Move from 'lucide-react-native/icons/move';
+import Undo2 from 'lucide-react-native/icons/undo-2';
+import X from 'lucide-react-native/icons/x';
+import Trash2 from 'lucide-react-native/icons/trash-2';
+import Save from 'lucide-react-native/icons/save';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -51,18 +57,18 @@ interface PolygonToolbarProps {
 interface ActionDef {
   id: string;
   label: string;
-  icon: string;
+  icon: ComponentType<{ size?: number; stroke?: string }>;
   danger?: boolean;
   accent?: boolean;
   enabled?: boolean;
 }
 
 const ACTIONS: ActionDef[] = [
-  { id: 'move', label: 'Move', icon: '✥', enabled: true },
-  { id: 'undo', label: 'Undo', icon: '↩️', enabled: true },
-  { id: 'cancel', label: 'Cancel', icon: '✕', danger: true, enabled: true },
-  { id: 'delete', label: 'Delete', icon: '🗑️', danger: true, enabled: true },
-  { id: 'save', label: 'Save', icon: '💾', accent: true, enabled: true },
+  { id: 'move', label: 'Move', icon: Move, enabled: true },
+  { id: 'undo', label: 'Undo', icon: Undo2, enabled: true },
+  { id: 'cancel', label: 'Cancel', icon: X, danger: true, enabled: true },
+  { id: 'delete', label: 'Delete', icon: Trash2, danger: true, enabled: true },
+  { id: 'save', label: 'Save', icon: Save, accent: true, enabled: true },
 ];
 
 // ── Component ───────────────────────────────────────────────────────────────
@@ -137,8 +143,10 @@ export default function PolygonToolbar({
           onPress={onDeselect}
           activeOpacity={0.7}
           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          accessibilityRole="button"
+          accessibilityLabel="Close"
         >
-          <Text style={{ fontSize: 14, color: colors.textSecondary }}>✕</Text>
+          <X size={16} stroke={colors.textSecondary} />
         </TouchableOpacity>
       </View>
 
@@ -216,7 +224,7 @@ export default function PolygonToolbar({
                   }
                 }}
               >
-                <Text style={styles.actionIcon}>{action.icon}</Text>
+                <action.icon size={18} stroke={textColor} />
                 <Text
                   style={[styles.actionLabel, { color: textColor }]}
                   numberOfLines={1}
@@ -263,10 +271,10 @@ export default function PolygonToolbar({
         {moveMode
           ? hasUnsavedChanges
             ? 'Drag the polygon body to move it · Tap Save to persist'
-            : 'Drag the polygon body to move it as a whole · Tap ✕ to deselect'
+            : 'Drag the polygon body to move it as a whole · Tap Close to deselect'
           : hasUnsavedChanges
             ? 'Drag corners to adjust · Tap Save to persist · Tap Cancel to discard'
-            : 'Drag corners to adjust the polygon · Tap Move to translate it · Tap ✕ to deselect'}
+            : 'Drag corners to adjust the polygon · Tap Move to translate it · Tap Close to deselect'}
       </Text>
     </Animated.View>
   );

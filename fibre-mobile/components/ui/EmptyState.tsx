@@ -2,8 +2,8 @@ import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { useThemeStore } from '../../lib/stores/theme';
 import { useOfflineStore } from '../../lib/stores/offline';
-import { Radius, Spacing } from '../../lib/theme/colors';
-import { Inbox } from 'lucide-react-native';
+import { Radius, Spacing, StatusColors, Type } from '../../lib/theme/colors';
+import { Inbox, CloudOff } from 'lucide-react-native';
 
 // ── EmptyState ────────────────────────────────────────────────────────────
 
@@ -42,8 +42,16 @@ export function ConnectionStatus() {
   if (isOnline) return null;
 
   return (
-    <View style={styles.offlineBanner}>
-      <Text style={styles.offlineText}>You're offline. Changes will sync when connected.</Text>
+    <View
+      style={[styles.offlineBanner, { backgroundColor: StatusColors.flagged.bg }]}
+      accessibilityRole="alert"
+      accessibilityLiveRegion="polite"
+      accessible
+    >
+      <CloudOff size={16} color={StatusColors.flagged.text} />
+      <Text style={[styles.offlineText, { color: StatusColors.flagged.text }]}>
+        You're offline. Changes will sync when connected.
+      </Text>
     </View>
   );
 }
@@ -64,27 +72,31 @@ const styles = StyleSheet.create({
     marginBottom: Spacing.lg,
   },
   title: {
-    fontSize: 17,
+    fontSize: Type.title.fontSize,
+    lineHeight: Type.title.lineHeight,
     fontWeight: '600',
     textAlign: 'center',
     marginBottom: Spacing.xs,
   },
   description: {
-    fontSize: 14,
+    fontSize: Type.body.fontSize,
+    lineHeight: Type.body.lineHeight,
     textAlign: 'center',
-    lineHeight: 20,
     marginBottom: Spacing.lg,
   },
   action: { marginTop: Spacing.sm },
   offlineBanner: {
-    backgroundColor: '#FEF3C7',
-    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.sm,
+    paddingVertical: Spacing.md,
     paddingHorizontal: Spacing.lg,
   },
   offlineText: {
-    color: '#B45309',
-    fontSize: 13,
-    fontWeight: '500',
+    fontSize: Type.label.fontSize,
+    lineHeight: Type.label.lineHeight,
+    fontWeight: '600',
     textAlign: 'center',
   },
 });

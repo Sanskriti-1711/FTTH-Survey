@@ -23,6 +23,7 @@ import X from 'lucide-react-native/icons/x';
 import ChevronRight from 'lucide-react-native/icons/chevron-right';
 import FileText from 'lucide-react-native/icons/file-text';
 import Edit3 from 'lucide-react-native/icons/pen-line';
+import Move from 'lucide-react-native/icons/move';
 import Camera from 'lucide-react-native/icons/camera';
 import Crosshair from 'lucide-react-native/icons/crosshair';
 import ChevronDown from 'lucide-react-native/icons/chevron-down';
@@ -326,9 +327,10 @@ export default function MapFeaturePopup({
               onPress={onStartEdit}
               activeOpacity={0.7}
             >
-              <Text style={[styles.actionText, { color: colors.onPrimary }]}>
-                ✏️ Edit
-              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Edit3 size={14} stroke={colors.onPrimary} />
+                <Text style={[styles.actionText, { color: colors.onPrimary }]}>Edit</Text>
+              </View>
               <ChevronRight size={13} stroke={colors.onPrimary} />
             </TouchableOpacity>
           )}
@@ -338,9 +340,10 @@ export default function MapFeaturePopup({
               onPress={onQuickMove}
               activeOpacity={0.7}
             >
-              <Text style={[styles.actionText, { color: colors.onPrimary }]}>
-                ✥ Move
-              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Move size={14} stroke={colors.onPrimary} />
+                <Text style={[styles.actionText, { color: colors.onPrimary }]}>Move</Text>
+              </View>
               <ChevronRight size={13} stroke={colors.onPrimary} />
             </TouchableOpacity>
           )}
