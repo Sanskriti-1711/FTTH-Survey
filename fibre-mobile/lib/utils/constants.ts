@@ -1,12 +1,13 @@
 // ── App Constants ────────────────────────────────────────────────────────
 
-// Change this to your actual backend URL
+// Production backend is the default; EXPO_PUBLIC_API_URL overrides it.
 // For local dev: http://localhost:8000 (Django on same machine)
 // For LAN:       http://YOUR_IP:8000 (other devices on network)
-// For cloud:     https://your-domain.com
-// During development, always use localhost.
-// For production deployment, set the EXPO_PUBLIC_API_URL env var
-// or override this constant before deploying.
+// For production: https://fibre-backend-wml3.onrender.com (the default below)
+// Leave it unset and every build targets production; pass it to point a
+// build at a LAN server (e.g. EXPO_PUBLIC_API_URL=http://192.168.1.103:8000).
+// EAS bakes EXPO_PUBLIC_API_URL from eas.json (the preview/production env).
+// The in-app "Server URL" setting still overrides both at runtime.
 //
 // The base URL is runtime-overridable: engineers on the field can change
 // it in-app (login screen → Server settings) without rebuilding the APK.
@@ -35,9 +36,9 @@ const webStorage = {
 // Runtime override — populated by loadServerUrl() at startup / saveServerUrl()
 let runtimeServerUrl: string | null = null;
 
-/** Build-time default: env var (baked by EAS) or localhost fallback. */
+/** Build-time default: env var (baked by EAS) or the production backend. */
 export const API_BASE_URL =
-  process.env.EXPO_PUBLIC_API_URL || 'http://localhost:8000';
+  process.env.EXPO_PUBLIC_API_URL || 'https://fibre-backend-wml3.onrender.com';
 
 /**
  * Effective API base URL. Prefers the runtime override (set by the user in
