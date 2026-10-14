@@ -16,6 +16,7 @@ import {
 } from 'react-native';
 import { useThemeStore } from '../stores/theme';
 import { Radius, Spacing } from '../theme/colors';
+import { normalizeLayerId } from '../utils/layer-ids';
 import ChevronDown from 'lucide-react-native/icons/chevron-down';
 import ChevronUp from 'lucide-react-native/icons/chevron-up';
 import ChevronRight from 'lucide-react-native/icons/chevron-right';
@@ -558,6 +559,11 @@ export default function MapLegend({
 
 // ── Default Layer Groupings ───────────────────────────────────────────────
 // These map HLD layer IDs to group names for convenience.
+//
+// Keys are compared through normalizeLayerId (see lib/utils/layer-ids.ts), so
+// one entry covers every spelling of the same layer — the package's
+// `Distribution_Trench` and this table's `distribution_trench` are one key, not
+// two. Writing the keys in lower snake case is a convention, not a requirement.
 export const DEFAULT_LAYER_GROUPS: Record<string, string> = {
   // Trenches
   trenches: 'Trenches',
@@ -565,6 +571,9 @@ export const DEFAULT_LAYER_GROUPS: Record<string, string> = {
   distribution_trench: 'Trenches',
   garden_trench: 'Trenches',
   final_trenches: 'Trenches',
+  // Trenches — where the route crosses something. Part of the trench network,
+  // which is why it is not left in Other.
+  tangent_crossings: 'Trenches',
   // Cables
   cables: 'Cables',
   feeder_cable: 'Cables',
@@ -573,12 +582,28 @@ export const DEFAULT_LAYER_GROUPS: Record<string, string> = {
   ducts: 'Ducts',
   feeder_ducts: 'Ducts',
   distribution_ducts: 'Ducts',
+  drop_ducts: 'Ducts',
+  // Aerial — the spans a run chose not to excavate. Kept together because the
+  // decision is per leg, and an engineer checking "what is not being dug"
+  // wants the three of them in one place.
+  aerial_cable: 'Aerial',
+  aerial_spans: 'Aerial',
+  aerial_drops: 'Aerial',
   // Premises & Areas
   objects: 'Premises',
+  served_premises: 'Premises',
+  pseudo_hh: 'Premises',
   polygons: 'Service Areas',
   // Infrastructure
   pdps: 'Infrastructure',
   mfg: 'Infrastructure',
+  chambers: 'Infrastructure',
+  coupleurs: 'Infrastructure',
+  trench_nodes: 'Infrastructure',
+  // Existing plant — what was already in the ground before this survey, which
+  // is the first thing an engineer compares the design against.
+  existing_infrastructure: 'Existing',
+  existing_infrastructure_points: 'Existing',
 };
 
 /** Order in which groups should appear in the panel */
@@ -586,6 +611,8 @@ export const DEFAULT_GROUP_ORDER = [
   'Premises',
   'Service Areas',
   'Infrastructure',
+  'Existing',
+  'Aerial',
   'Trenches',
   'Cables',
   'Ducts',
@@ -607,10 +634,18 @@ export function buildLayerGroups(
   const groupsMap = new Map<string, LegendLayer[]>();
   const seenOrders = new Map<string, number>();
 
+  // Normalise the table once rather than the layer, so a caller handing in
+  // `Distribution_Trench`-style keys is matched too. A layer id no longer has
+  // to be spelled the way this file happens to spell it.
+  const normalizedMap: Record<string, string> = {};
+  for (const [id, label] of Object.entries(groupMap)) {
+    normalizedMap[normalizeLayerId(id)] = label;
+  }
+
   for (const layer of layers) {
-    // For imported layers, strip prefix before looking up group
-    const cleanId = layer.id.startsWith('imp-') ? layer.id.slice(4) : layer.id;
-    let groupKey = groupMap[cleanId] ?? groupMap[layer.id] ?? 'Other';
+    // The 'imp-' the map puts in front of an imported layer is not part of the
+    // layer's identity, and neither is any other store prefix.
+    const groupKey = normalizedMap[normalizeLayerId(layer.id)] ?? 'Other';
 
     // Determine sort order
     if (!seenOrders.has(groupKey)) {

@@ -19,6 +19,7 @@ import { recalculateDependentProperties } from '../lib/utils/spatial';
 import { getLayerSchema } from '../lib/stores/layer-schemas';
 import { gradeGpsAccuracy } from '../lib/utils/gps-quality';
 import { summarizeCommit } from '../lib/utils/commit';
+import { normalizeLayerId } from '../lib/utils/layer-ids';
 // Geometry operation utilities removed — all edits now route through survey-features store
 import GeometryEditor from '../lib/components/GeometryEditor';
 import type { GeometryMode, EditingFeature } from '../lib/components/GeometryEditor';
@@ -91,6 +92,13 @@ const LAYER_NAMES: Record<string, string> = {
 };
 
 // Distinct colors for imported features
+// One colour per layer, looked up through normalizeLayerId — see
+// lib/utils/layer-ids.ts. Keys are written in lower snake case; the lookup
+// normalises both sides, so the package's `Distribution_Trench` gets the entry
+// this table keeps for `distribution_trench` instead of falling through to
+// IMPORT_FALLBACK_COLOR. Measured 2026-10-14 on project `24cd3573…`: with an
+// exact-match lookup only 8 of 23 layers matched and **15 were painted the same
+// fallback colour**, which is what made the map unreadable.
 const IMPORT_COLORS: Record<string, string> = {
   objects: '#EF4444',                // Red
   polygons: '#D946EF',               // Fuchsia
@@ -105,9 +113,38 @@ const IMPORT_COLORS: Record<string, string> = {
   distribution_ducts: '#0D9488',     // Dark Teal
   feeder_trench: '#4F46E5',          // Indigo
   distribution_trench: '#C026D3',    // Purple
-  garden_trench: '#D946EF',          // Fuchsia
+  // Dark green, not the fuchsia this table used to hold: `polygons` (Service
+  // Areas) is also #D946EF, and a garden trench drawn in the same colour as the
+  // translucent service-area fill over it is the one collision left once the
+  // fallback above is gone. The fill keeps its colour — it is context, and this
+  // is a layer the engineer is here to look at.
+  garden_trench: '#166534',          // Dark Green
   final_trenches: '#BE123C',         // Dark Rose
+  // Ducts — the section from the chamber to the premises.
+  drop_ducts: '#22D3EE',             // Light Cyan
+  // Aerial: the legs a run decided NOT to excavate. Amber is the colour the
+  // admin UI already paints these with, kept consistent here; the three are
+  // shades of it so "this leg is not being dug" reads at a glance.
+  aerial_cable: '#F59E0B',           // Amber
+  aerial_spans: '#FBBF24',           // Light Amber
+  aerial_drops: '#B45309',           // Dark Amber
+  // Nodes and structures. Violet, so a point's layer is still separable from
+  // the trench/duct/cable it sits on.
+  chambers: '#7C3AED',               // Violet
+  coupleurs: '#A78BFA',              // Light Violet
+  trench_nodes: '#4C1D95',           // Dark Violet
+  // Premises variants — green, against the red of `objects`.
+  served_premises: '#22C55E',        // Green
+  pseudo_hh: '#059669',              // Emerald
+  // Existing plant, which is context rather than design: greys.
+  existing_infrastructure: '#64748B',        // Slate
+  existing_infrastructure_points: '#94A3B8', // Light Slate
+  // Where the route crosses something — brown, distinct from every trench.
+  tangent_crossings: '#78350F',      // Brown
 };
+
+/** Colour for a layer id this table does not know. */
+const IMPORT_FALLBACK_COLOR = '#FF6B6B';
 
 const IMPORT_ID_PREFIX = 'imp-';
 
@@ -298,6 +335,39 @@ function detectGeoType(features: GeoJSONFeature[]): 'Point' | 'LineString' | 'Po
     if (t === 'MultiPoint') return 'Point';
   }
   return 'Point';
+}
+
+/**
+ * Where a layer's geometry belongs in the map's z-order.
+ *
+ * Lower is drawn first (further back). Edit layers — survey copies and the live
+ * previews — are always on top: they are what the engineer is being asked to
+ * look at, and they are the only thing on screen that is not the HLD.
+ */
+function drawRank(layer: MapLayerData): number {
+  if (layer.id.startsWith('survey-') || layer.id.startsWith('temp-preview-')) return 3;
+  const geom = layer.geometryType ?? detectGeoType(layer.features);
+  if (geom === 'Polygon') return 0;  // service areas — context, underneath
+  if (geom === 'Point') return 1;    // premises, nodes, couplers
+  return 2;                          // trenches, ducts, cables on top
+}
+
+/**
+ * Order layers the way they should be painted, first layer at the back.
+ *
+ * The array's order *is* the z-order: the map adds each layer in turn, so the
+ * last one added paints on top. That array used to arrive in the API's order,
+ * which is sorted by layer name — so the premises/node circles and the
+ * service-area fill landed after the trench, duct and cable lines. On project
+ * `24cd3573…` (2026-10-14) that drew ~1,200 circles and 31 polygons over a
+ * 1,269-feature network, which is why the network could not be read on the map
+ * even though every layer was loaded.
+ *
+ * `Array.prototype.sort` is stable, so layers of equal rank keep the order the
+ * API returned them in.
+ */
+export function orderLayersForDrawing(layers: MapLayerData[]): MapLayerData[] {
+  return [...layers].sort((a, b) => drawRank(a) - drawRank(b));
 }
 
 function buildMapLayerData(
@@ -1029,7 +1099,7 @@ export default function MapScreen() {
     const colors: Record<string, string> = { ...LAYER_COLORS };
     if (hasImportedData) {
       for (const [key] of Object.entries(projectGeojsons)) {
-        colors[`${IMPORT_ID_PREFIX}${key}`] = IMPORT_COLORS[key] ?? '#FF6B6B';
+        colors[`${IMPORT_ID_PREFIX}${key}`] = IMPORT_COLORS[normalizeLayerId(key)] ?? IMPORT_FALLBACK_COLOR;
       }
     }
     return colors;
@@ -1379,11 +1449,40 @@ export default function MapScreen() {
     [allPanelLayers, activeLayerColors, layerVisibility]
   );
 
+  // ── The legend lists what the map is actually drawing ────────────────────
+  // In Survey view the HLD layers are hidden on purpose (see the hldLayers
+  // guard in mapLayerData), so a panel built from every *loaded* layer listed
+  // 23 layers with their toggles on beside an empty map, and the map's own
+  // overlay said "No Layers Visible". Measured 2026-10-14: both were on screen
+  // at once, contradicting each other. The panel now follows the view mode.
+  const legendPanelLayers = useMemo(() => {
+    const drawn = new Set(mapLayerData.map((l) => l.id));
+    return panelLayerData.filter((l) => drawn.has(l.id));
+  }, [panelLayerData, mapLayerData]);
+
   // ── Build grouped legend from the CURRENT panel data (not a stale ref) ──
   const legendGroups = useMemo(
-    () => buildLayerGroups(panelLayerData, DEFAULT_LAYER_GROUPS),
-    [panelLayerData]
+    () => buildLayerGroups(legendPanelLayers, DEFAULT_LAYER_GROUPS),
+    [legendPanelLayers]
   );
+
+  // ── Draw order: the network above the dots (see orderLayersForDrawing) ──
+  const orderedMapLayers = useMemo(() => orderLayersForDrawing(mapLayerData), [mapLayerData]);
+
+  // ── Empty-state copy, per view mode ─────────────────────────────────────
+  // "All layers are currently hidden or contain no features. Toggle layers on
+  // using the layers panel." is the wrong thing to say in Survey view, where
+  // the HLD layers are hidden *by design* and there is nothing to toggle: a
+  // project with no recorded changes is legitimately empty there.
+  const mapEmptyState = useMemo(() => {
+    if (displayMode !== 'survey') return undefined; // HLD / Overlay keep the default copy
+    return {
+      title: 'No survey changes yet',
+      description:
+        'Survey view shows only the changes the engineer records.' +
+        '\nOpen HLD view to see the design this survey starts from.',
+    };
+  }, [displayMode]);
 
   // ── Compute point layers for Add Point mode layer picker ────────────────
   const addPointLayers = useMemo(() => {
@@ -3605,7 +3704,8 @@ export default function MapScreen() {
 
           {/* Interactive MapLibre Map */}
           <MapLibreMap
-            layers={mapLayerData}
+            layers={orderedMapLayers}
+            emptyState={mapEmptyState}
             onFeatureClick={(featureId, layerId, lngLat, screenPt) => {
               if (geoMode === 'delete_feature') {
                 handleDeleteFeature(featureId, layerId);
@@ -3722,7 +3822,7 @@ export default function MapScreen() {
 
           {/* Layer Legend Overlay — with collapsible group headers */}
           <MapLegend
-            layers={panelLayerData}
+            layers={legendPanelLayers}
             groups={legendGroups}
             maxVisible={0}
             onToggleLayer={toggleLayerVisibility}

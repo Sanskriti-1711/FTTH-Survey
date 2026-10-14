@@ -213,6 +213,13 @@ interface MapErrorInfo {
 
 interface MapLibreMapProps {
   layers: MapLayerData[];
+  /**
+   * Replaces the default "No Layers Visible" copy when nothing on the map has
+   * anything to draw. The caller knows *why* it is empty (a view mode that
+   * hides some layers by design, say) and the map does not, so the wording is
+   * the caller's. Omit it for the generic message.
+   */
+  emptyState?: { title: string; description: string };
   onFeatureClick?: (featureId: string, layerId: string, lngLat: [number, number], screenPoint?: { x: number; y: number }) => void;
   /** Called when clicking on empty map area (no feature found). Used for draw bypass mode. */
   onEmptyAreaClick?: (lng: number, lat: number, screenPoint?: { x: number; y: number }) => void;
@@ -501,7 +508,13 @@ function ErrorOverlay({
   );
 }
 
-function EmptyOverlay() {
+const DEFAULT_EMPTY_STATE = {
+  title: 'No Layers Visible',
+  description: 'All layers are currently hidden or contain no features.\nToggle layers on using the layers panel.',
+};
+
+function EmptyOverlay({ emptyState }: { emptyState?: { title: string; description: string } }) {
+  const { title, description } = emptyState ?? DEFAULT_EMPTY_STATE;
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const colors = useThemeStore((s) => s.colors);
 
@@ -518,11 +531,8 @@ function EmptyOverlay() {
             <Text style={styles.emptyBadgeText}>0</Text>
           </View>
         </View>
-        <Text style={styles.emptyTitle}>No Layers Visible</Text>
-        <Text style={styles.emptyDescription}>
-          All layers are currently hidden or contain no features.{'\n'}
-          Toggle layers on using the layers panel.
-        </Text>
+        <Text style={styles.emptyTitle}>{title}</Text>
+        <Text style={styles.emptyDescription}>{description}</Text>
       </View>
     </Animated.View>
   );
@@ -569,6 +579,7 @@ function NativeMapView({
   flyToUserTarget,
   snapEnabled,
   snapRadiusM,
+  emptyState,
 }: MapLibreMapProps) {
   const cameraRef = useRef<any>(null);
   const mapRef = useRef<any>(null);
@@ -2109,7 +2120,7 @@ function NativeMapView({
       )}
 
       {/* Empty State Overlay */}
-      {status === 'ready' && isEmpty && <EmptyOverlay />}
+      {status === 'ready' && isEmpty && <EmptyOverlay emptyState={emptyState} />}
     </View>
   );
 }
@@ -2422,6 +2433,7 @@ function WebMapView({
   loadingTimeoutMs = LOADING_TIMEOUT_MS,
   flyToCenter,
   flyToUserTarget,
+  emptyState,
 }: MapLibreMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
@@ -3500,7 +3512,7 @@ function WebMapView({
         </View>
       )}
 
-      {status === 'ready' && isEmpty && <EmptyOverlay />}
+      {status === 'ready' && isEmpty && <EmptyOverlay emptyState={emptyState} />}
     </View>
   );
 }
