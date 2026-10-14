@@ -10,7 +10,9 @@ import type {
   Feature,
   GeoJSONFeature,
   LayerSchema,
+  FieldSchemaField,
 } from '../utils/types';
+import { normalizeLayerId } from '../utils/layer-ids';
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -278,7 +280,304 @@ export const CABLE_SCHEMA: LayerSchema = {
   allowGeometryEdit: true,
 };
 
+// ── The layers the map serves but no schema covered ───────────────────────
+// Eight of the layers a project hands the app had no entry and no fuzzy match,
+// so `getLayerSchema` returned null and the survey form rendered **"No editable
+// fields for this layer type."** with no fields at all (measured 2026-10-14 over
+// the three survey projects: `coupleurs` 509 features, `chambers` 275,
+// `pseudo_hh` 224, `existing_infrastructure` 170,
+// `existing_infrastructure_points` 82, `aerial_spans` 63, `aerial_drops` 60,
+// `tangent_crossings` 40 — an engineer could move them on the map but record
+// nothing against them, including the aerial drop and span the aerial chain
+// exists to decide).
+//
+// The read-only fields are the layer's **published** attributes, read out of the
+// live API (`tmp/diag/schema_field_probe.py`) rather than guessed; the editable
+// ones are the field observations, and where a dropdown is used its values are
+// the vocabulary the layers and the existing schemas already carry
+// (Overhead/Underground, Verified/Assumed, the access and condition lists).
+
+// --- AERIAL DROPS (the drop leg the trench stage classifies as not-dug) ---
+export const AERIAL_DROP_SCHEMA: LayerSchema = {
+  layerName: 'AERIAL DROPS',
+  layerId: 'aerial_drops',
+  readOnlyFields: [
+    { key: 'DROP_ID', label: 'Drop ID' },
+    { key: 'PDP_ID', label: 'Planned PDP' },
+    { key: 'addr_id', label: 'Address ID' },
+    { key: 'households', label: 'Households', type: 'number', unit: 'units' },
+    { key: 'POLYGON_ID', label: 'Planned Polygon' },
+    { key: 'CONSTRUCTION_METHOD', label: 'Construction Method' },
+    { key: 'EXCAVATION', label: 'Excavation' },
+    { key: 'length_m', label: 'Route Length', type: 'number', unit: 'm' },
+    { key: 'AERIAL_REASON', label: 'Aerial Reason' },
+    { key: 'EXISTING_POLE_M', label: 'Nearest Existing Pole', type: 'number', unit: 'm' },
+  ],
+  editableFields: [
+    { key: 'construction_method', label: 'Construction Method (as surveyed)', type: 'select', required: true, options: [
+      { label: 'Overhead', value: 'Overhead' },
+      { label: 'Underground', value: 'Underground' },
+    ]},
+    { key: 'pole_attachments_ok', label: 'Pole Attachments Usable', type: 'boolean' },
+    { key: 'permit_required', label: 'Permit Required', type: 'boolean' },
+    { key: 'route_clear', label: 'Route Clear of Obstructions', type: 'boolean' },
+    { key: 'obstacle_notes', label: 'Obstructions Found', type: 'textarea', placeholder: 'Trees, signage, structures, access...' },
+    { key: 'survey_notes', label: 'Survey Notes', type: 'textarea', placeholder: 'Route changes, access issues...' },
+  ],
+  requiredPhotos: ['Route Overview', 'Pole Attachment'],
+  gpsAccuracyM: 5,
+  allowGeometryEdit: true,
+};
+
+// --- AERIAL SPANS (the pole-to-pole span the aerial drop hangs on) ---
+export const AERIAL_SPAN_SCHEMA: LayerSchema = {
+  layerName: 'AERIAL SPANS',
+  layerId: 'aerial_spans',
+  readOnlyFields: [
+    { key: 'AERIAL_TRENCH_ID', label: 'Aerial ID' },
+    { key: 'POLE_ID', label: 'Pole' },
+    { key: 'FROM_POLE', label: 'From Pole' },
+    { key: 'TO_PREMISE', label: 'To Premise' },
+    { key: 'LENGTH_M', label: 'Span Length', type: 'number', unit: 'm' },
+    { key: 'FIBER_COUNT', label: 'Fibre Count', type: 'number' },
+    { key: 'AVAILABLE_FIBERS', label: 'Available Fibres', type: 'number' },
+    { key: 'RESERVED_SPARE_FIBERS', label: 'Reserved Spare Fibres', type: 'number' },
+    { key: 'POLE_SPACING_M', label: 'Planned Pole Spacing', type: 'number', unit: 'm' },
+    { key: 'UTIL_PCT', label: 'Pole Utilisation', type: 'number', unit: '%' },
+    { key: 'CROSSINGS', label: 'Crossings', type: 'number' },
+    { key: 'POLE_SOURCE', label: 'Pole Source' },
+    { key: 'CAPACITY_STATUS', label: 'Capacity Status' },
+    { key: 'PERMIT_REQUIRED', label: 'Permit Required (design)' },
+    { key: 'AERIAL_REASON', label: 'Aerial Reason' },
+  ],
+  editableFields: [
+    { key: 'pole_height_m', label: 'Attachment Height', type: 'number', unit: 'm' },
+    { key: 'pole_condition', label: 'Pole Condition', type: 'select', options: [
+      { label: 'Sound', value: 'sound' },
+      { label: 'Damaged', value: 'damaged' },
+      { label: 'Leaning', value: 'leaning' },
+      { label: 'Missing', value: 'missing' },
+    ]},
+    { key: 'crossing_clearance_m', label: 'Clearance at Crossing', type: 'number', unit: 'm' },
+    { key: 'permit_required', label: 'Permit Required (as surveyed)', type: 'boolean' },
+    { key: 'capacity_status', label: 'Capacity Status (as surveyed)', type: 'select', options: [
+      { label: 'OK', value: 'OK' },
+      { label: 'Warning', value: 'Warning' },
+      { label: 'Full', value: 'Full' },
+    ]},
+    { key: 'survey_notes', label: 'Survey Notes', type: 'textarea', placeholder: 'Attachment points, clearance, wayleaves...' },
+  ],
+  requiredPhotos: ['Span Overview', 'Attachment Point'],
+  gpsAccuracyM: 5,
+  allowGeometryEdit: false,
+};
+
+// --- CHAMBERS (every trench run produces one) ---
+export const CHAMBER_SCHEMA: LayerSchema = {
+  layerName: 'CHAMBERS',
+  layerId: 'chambers',
+  readOnlyFields: [
+    { key: 'STRUCT_ID', label: 'Structure ID' },
+    { key: 'CHAMBER_TYPE', label: 'Chamber Type' },
+    { key: 'SUBTYPE', label: 'Subtype' },
+    { key: 'SIZE', label: 'Size' },
+    { key: 'REASON', label: 'Design Reason' },
+    { key: 'EQUIPMENT', label: 'Design Equipment' },
+    { key: 'PDP_ID', label: 'Planned PDP' },
+    { key: 'POLYGON_ID', label: 'Planned Polygon' },
+    { key: 'PARENT_TRENCH', label: 'Parent Trench' },
+    { key: 'CONN_DUCTS', label: 'Connected Ducts', type: 'number' },
+    { key: 'CAPACITY_TOTAL', label: 'Planned Capacity', type: 'number' },
+    { key: 'CAPACITY_USED', label: 'Planned Capacity Used', type: 'number' },
+    { key: 'REUSE_SOURCE', label: 'Reused Brownfield Asset' },
+  ],
+  editableFields: [
+    { key: 'condition', label: 'Condition', type: 'select', required: true, options: [
+      { label: 'New', value: 'new' },
+      { label: 'Sound', value: 'sound' },
+      { label: 'Damaged', value: 'damaged' },
+      { label: 'Blocked', value: 'blocked' },
+      { label: 'Missing', value: 'missing' },
+    ]},
+    { key: 'depth_mm', label: 'Measured Depth', type: 'number', unit: 'mm' },
+    { key: 'cover_type', label: 'Cover Type', type: 'select', options: [
+      { label: 'Concrete', value: 'concrete' },
+      { label: 'Metal', value: 'metal' },
+      { label: 'Composite', value: 'composite' },
+      { label: 'Plastic', value: 'plastic' },
+      { label: 'None', value: 'none' },
+    ]},
+    { key: 'capacity_total', label: 'Capacity (as surveyed)', type: 'number', unit: 'ways' },
+    { key: 'equipment', label: 'Equipment Fitted', type: 'text', placeholder: 'Splitters, joints, draw pits...' },
+    { key: 'access_ok', label: 'Accessible', type: 'boolean' },
+    { key: 'survey_notes', label: 'Survey Notes', type: 'textarea', placeholder: 'Access, depth, water, obstructions...' },
+  ],
+  requiredPhotos: ['Chamber Open', 'Chamber Interior', 'Cover'],
+  gpsAccuracyM: 3,
+  allowGeometryEdit: true,
+};
+
+// --- COUPLEURS (the splitter at the premise end of a drop) ---
+export const COUPLEUR_SCHEMA: LayerSchema = {
+  layerName: 'COUPLEURS',
+  layerId: 'coupleurs',
+  readOnlyFields: [
+    { key: 'coupler_id', label: 'Coupler ID' },
+    { key: 'COUPLER_TYPE', label: 'Coupler Type' },
+    { key: 'PREMISE_ID', label: 'Premise' },
+    { key: 'ADDR_ID', label: 'Address ID' },
+    { key: 'PDP_ID', label: 'Planned PDP' },
+    { key: 'POLYGON_ID', label: 'Planned Polygon' },
+    { key: 'SIDE', label: 'Route Side' },
+    { key: 'HH_ID', label: 'Household' },
+    { key: 'DUCT_UID', label: 'Duct' },
+    { key: 'DIST_DUCT_ID', label: 'Distribution Duct' },
+    { key: 'DROP_DUCT_UID', label: 'Drop Duct' },
+    { key: 'DIST_DUCT_SAME_POLY', label: 'Duct in Same Polygon' },
+  ],
+  editableFields: [
+    { key: 'installed', label: 'Coupler Installed', type: 'boolean' },
+    { key: 'condition', label: 'Condition', type: 'select', options: [
+      { label: 'New', value: 'new' },
+      { label: 'Sound', value: 'sound' },
+      { label: 'Damaged', value: 'damaged' },
+      { label: 'Missing', value: 'missing' },
+    ]},
+    { key: 'port_count', label: 'Ports', type: 'number', unit: 'ports' },
+    { key: 'splice_loss_db', label: 'Splice Loss', type: 'number', unit: 'dB' },
+    { key: 'mounting', label: 'Mounting', type: 'select', options: [
+      { label: 'Pole', value: 'pole' },
+      { label: 'Wall', value: 'wall' },
+      { label: 'Chamber', value: 'chamber' },
+      { label: 'Cabinet', value: 'cabinet' },
+    ]},
+    { key: 'survey_notes', label: 'Survey Notes', type: 'textarea', placeholder: 'Access, mounting, condition...' },
+  ],
+  requiredPhotos: ['Coupler Fitted'],
+  gpsAccuracyM: 3,
+  allowGeometryEdit: true,
+};
+
+// --- PSEUDO HOUSEHOLDS (the premises the design places where no register row is) ---
+export const PSEUDO_HH_SCHEMA: LayerSchema = {
+  layerName: 'PSEUDO HOUSEHOLDS',
+  layerId: 'pseudo_hh',
+  readOnlyFields: [
+    { key: 'hh_id', label: 'Household ID' },
+    { key: 'addr_id', label: 'Address ID' },
+    { key: 'pdp_id', label: 'Planned PDP' },
+    { key: 'POLYGON_ID', label: 'Planned Polygon' },
+    { key: 'pdp_pol_id', label: 'PDP / Polygon' },
+    { key: 'side', label: 'Route Side' },
+    { key: 'sidewalk', label: 'Surface' },
+    { key: 'dist_m', label: 'Distance from Route', type: 'number', unit: 'm' },
+    { key: 'method', label: 'Placement Method' },
+  ],
+  editableFields: [
+    { key: 'households_confirmed', label: 'Households Confirmed', type: 'number', required: true, unit: 'units' },
+    { key: 'building_type', label: 'Building Type', type: 'select', options: [
+      { label: 'Detached', value: 'detached' },
+      { label: 'Semi Detached', value: 'semi_detached' },
+      { label: 'Terraced', value: 'terraced' },
+      { label: 'Apartment', value: 'apartment' },
+      { label: 'Commercial', value: 'commercial' },
+      { label: 'Mixed Use', value: 'mixed_use' },
+    ]},
+    { key: 'access_type', label: 'Access Type', type: 'select', options: [
+      { label: 'Easy', value: 'easy' },
+      { label: 'Restricted', value: 'restricted' },
+      { label: 'Private', value: 'private' },
+      { label: 'Locked', value: 'locked' },
+      { label: 'No Access', value: 'no_access' },
+    ]},
+    { key: 'side_correct', label: 'Side of Route Correct', type: 'boolean' },
+    { key: 'survey_notes', label: 'Survey Notes', type: 'textarea', placeholder: 'Address confirmed, access, additions...' },
+  ],
+  requiredPhotos: ['Premise Front'],
+  gpsAccuracyM: 3,
+  allowGeometryEdit: true,
+};
+
+// --- EXISTING INFRASTRUCTURE (brownfield assets the design reuses) ---
+// One schema per geometry: the ducts are lines, the chambers and cabinets are
+// points, and the platform publishes them as two layers with the same fields.
+const EXISTING_INFRA_FIELDS = {
+  readOnlyFields: [
+    { key: 'SRC_ID', label: 'Source Asset ID' },
+    { key: 'ASSET_TYPE', label: 'Asset Type' },
+    { key: 'CAPACITY_TOTAL', label: 'Design Capacity', type: 'number' },
+    { key: 'CAPACITY_USED', label: 'Design Capacity Used', type: 'number' },
+    { key: 'INFRA_STATUS', label: 'Infrastructure Status' },
+    { key: 'VERIFY_STATUS', label: 'Verification Status' },
+  ],
+  editableFields: [
+    { key: 'verify_status', label: 'Verified in Field', type: 'select', required: true, options: [
+      { label: 'Verified', value: 'Verified' },
+      { label: 'Assumed', value: 'Assumed' },
+      { label: 'Rejected', value: 'Rejected' },
+    ]},
+    { key: 'condition', label: 'Condition', type: 'select', options: [
+      { label: 'Sound', value: 'sound' },
+      { label: 'Damaged', value: 'damaged' },
+      { label: 'Blocked', value: 'blocked' },
+      { label: 'Missing', value: 'missing' },
+    ]},
+    { key: 'capacity_total', label: 'Capacity (as surveyed)', type: 'number', unit: 'ways' },
+    { key: 'reusable', label: 'Reusable for this Design', type: 'boolean' },
+    { key: 'survey_notes', label: 'Survey Notes', type: 'textarea', placeholder: 'Condition, depth, obstructions, reuse...' },
+  ] as FieldSchemaField[],
+  gpsAccuracyM: 3,
+  allowGeometryEdit: false,
+};
+
+export const EXISTING_INFRA_SCHEMA: LayerSchema = {
+  layerName: 'EXISTING INFRASTRUCTURE',
+  layerId: 'existing_infrastructure',
+  ...EXISTING_INFRA_FIELDS,
+  requiredPhotos: ['Asset Overview'],
+};
+
+export const EXISTING_INFRA_POINT_SCHEMA: LayerSchema = {
+  layerName: 'EXISTING INFRASTRUCTURE (POINTS)',
+  layerId: 'existing_infrastructure_points',
+  ...EXISTING_INFRA_FIELDS,
+  requiredPhotos: ['Asset Open', 'Asset Interior'],
+};
+
+// --- TANGENT CROSSINGS (where the route crosses something, HDD or otherwise) ---
+export const TANGENT_CROSSING_SCHEMA: LayerSchema = {
+  layerName: 'TANGENT CROSSINGS',
+  layerId: 'tangent_crossings',
+  readOnlyFields: [
+    { key: 'DRILL_ID', label: 'Drill / Crossing ID' },
+    { key: 'ROAD_CLASS', label: 'Road Class' },
+    { key: 'WIDTH_M', label: 'Crossing Width', type: 'number', unit: 'm' },
+    { key: 'MFG_ID', label: 'MFG' },
+    { key: 'TRENCH_TYPE', label: 'Design Method' },
+    { key: 'INFRA_STATUS', label: 'Infrastructure Status' },
+  ],
+  editableFields: [
+    { key: 'crossing_type', label: 'Method Used', type: 'select', required: true, options: [
+      { label: 'HDD', value: 'HDD' },
+      { label: 'Open Cut', value: 'open_cut' },
+      { label: 'Aerial', value: 'Aerial' },
+      { label: 'Existing', value: 'existing' },
+    ]},
+    { key: 'depth_mm', label: 'Measured Depth', type: 'number', unit: 'mm' },
+    { key: 'permit_required', label: 'Permit Required', type: 'boolean' },
+    { key: 'clearance_ok', label: 'Clearance to Services OK', type: 'boolean' },
+    { key: 'obstacle_notes', label: 'Obstructions Found', type: 'textarea', placeholder: 'Services struck, utility records...' },
+    { key: 'survey_notes', label: 'Survey Notes', type: 'textarea', placeholder: 'Method change, road authority notes...' },
+  ],
+  requiredPhotos: ['Crossing Entry', 'Crossing Exit'],
+  gpsAccuracyM: 3,
+  allowGeometryEdit: true,
+};
+
 /** Master lookup table: layerId → LayerSchema */
+// Keys are written in lower snake case and matched through normalizeLayerId
+// (see lib/utils/layer-ids.ts), so one entry covers every spelling of the same
+// layer: the package's `Pseudo_HH` and this table's `pseudo_hh` are one key.
 export const LAYER_SCHEMAS: Record<string, LayerSchema> = {
   objects: PREMISE_SCHEMA,
   polygons: POLYGON_SCHEMA,
@@ -287,12 +586,24 @@ export const LAYER_SCHEMAS: Record<string, LayerSchema> = {
   trenches: TRENCH_SCHEMA,
   ducts: DUCT_SCHEMA,
   cables: CABLE_SCHEMA,
-  // Handle imported layers by stripping imp- prefix
+  // The eight the map serves and no schema used to cover.
+  aerial_drops: AERIAL_DROP_SCHEMA,
+  aerial_spans: AERIAL_SPAN_SCHEMA,
+  chambers: CHAMBER_SCHEMA,
+  coupleurs: COUPLEUR_SCHEMA,
+  pseudo_hh: PSEUDO_HH_SCHEMA,
+  existing_infrastructure: EXISTING_INFRA_SCHEMA,
+  existing_infrastructure_points: EXISTING_INFRA_POINT_SCHEMA,
+  tangent_crossings: TANGENT_CROSSING_SCHEMA,
 };
 
 /** Get schema for a layer ID, handling imported prefix + fuzzy keyword matching */
 export function getLayerSchema(layerId: string): LayerSchema | null {
-  const cleanId = layerId.startsWith('imp-') ? layerId.slice(4) : layerId;
+  // Normalised, not prefix-stripped: the id arrives spelled however the
+  // publisher wrote it (`Pseudo_HH`, `Distribution_Trench`, `imp-<key>`) and the
+  // table is written in one spelling. Exact matching here is what left eight
+  // served layers with no schema at all.
+  const cleanId = normalizeLayerId(layerId);
   const direct = LAYER_SCHEMAS[cleanId];
   if (direct) return direct;
 
