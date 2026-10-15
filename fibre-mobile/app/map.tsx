@@ -22,7 +22,7 @@ import { gradeGpsAccuracy } from '../lib/utils/gps-quality';
 import { summarizeCommit } from '../lib/utils/commit';
 import { normalizeLayerId } from '../lib/utils/layer-ids';
 import { insertVertexAtPoint, deleteVertex, splitLineAtPoint, createLineString } from '../lib/utils/geometry-operations';
-import { routeAroundObstacle, detourImpact, formatDetourImpact } from '../lib/utils/obstacle-reroute';
+import { planObstacleDetour } from '../lib/utils/obstacle-reroute';
 // Geometry operation utilities removed — all edits now route through survey-features store
 import GeometryEditor from '../lib/components/GeometryEditor';
 import type { GeometryMode, EditingFeature } from '../lib/components/GeometryEditor';
@@ -3223,20 +3223,19 @@ export default function MapScreen() {
 
   const applyObstacleDetour = useCallback(
     (centre: { lng: number; lat: number }, radiusM: number, baseline: [number, number][]) => {
-      const obstacle = { lng: centre.lng, lat: centre.lat, radiusM };
-      const result = routeAroundObstacle(baseline, obstacle, 2);
-      const impact = detourImpact(baseline, result.coords, obstacle, otherLineCoords);
-      setTempLineCoords(result.coords);
-      setDetourImpactLabel(formatDetourImpact(impact));
-      if (!result.rerouted) {
-        showToast('The line does not cross that zone — nothing to re-route', 'warning');
-      } else {
-        showToast(`Routed around the works — ${formatDetourImpact(impact)}`, 'success');
-      }
+      // The whole tap→baseline decision lives in planObstacleDetour (pure and
+      // unit-tested): this screen only holds the result. The reroute is always
+      // computed from the baseline, so changing the radius replaces the
+      // diversion instead of stacking detours on top of each other.
+      const plan = planObstacleDetour([centre.lng, centre.lat], radiusM, baseline, otherLineCoords, 2);
+      setTempLineCoords(plan.coords);
+      setDetourImpactLabel(plan.label);
+      showToast(plan.impact.rerouted ? `Routed around the works — ${plan.label}` : plan.label, plan.impact.rerouted ? 'success' : 'warning');
       console.log(
-        `[RouteAround] radius ${radiusM} m → ${result.insertedVertices} new vertices, ` +
-          `${impact.lengthDeltaM >= 0 ? '+' : ''}${impact.lengthDeltaM.toFixed(1)} m, ` +
-          `${impact.extraChambers} chambers, ${impact.otherLinesCrossing} other lines in the zone`,
+        `[RouteAround] radius ${radiusM} m, tap ${plan.tapDistanceM.toFixed(1)} m from the line → ` +
+          `${plan.impact.rerouted ? 'rerouted' : 'no crossing'}, ${plan.impact.insertedVertices} new vertices, ` +
+          `${plan.impact.lengthDeltaM >= 0 ? '+' : ''}${plan.impact.lengthDeltaM.toFixed(1)} m, ` +
+          `${plan.impact.extraChambers} chambers, ${plan.impact.otherLinesCrossing} other lines in the zone`,
       );
     },
     [otherLineCoords, showToast],
