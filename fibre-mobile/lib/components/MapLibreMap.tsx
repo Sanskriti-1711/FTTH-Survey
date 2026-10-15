@@ -221,12 +221,27 @@ interface MapLibreMapProps {
    */
   emptyState?: { title: string; description: string };
   onFeatureClick?: (featureId: string, layerId: string, lngLat: [number, number], screenPoint?: { x: number; y: number }) => void;
+  /**
+   * Fired when a tap hits MORE THAN ONE feature (e.g. a premise point sitting
+   * on a trench). Ordered point-first, then top-most; the first entry is the
+   * feature onFeatureClick was called with, so the caller can offer a
+   * "cycle overlapping features" chip without guessing the order.
+   */
+  onFeatureCandidates?: (
+    candidates: { featureId: string; layerId: string; geometryType: string }[],
+    lngLat: [number, number],
+    screenPoint?: { x: number; y: number },
+  ) => void;
   /** Called when clicking on empty map area (no feature found). Used for draw bypass mode. */
   onEmptyAreaClick?: (lng: number, lat: number, screenPoint?: { x: number; y: number }) => void;
   /** Called when a point feature is dragged to a new location. Only fires when dragMode is true. */
   onFeatureDragEnd?: (featureId: string, layerId: string, newLng: number, newLat: number) => void;
   /** Called when a vertex of a LineString or polygon corner is dragged to a new location. */
   onVertexDragEnd?: (featureId: string, layerId: string, vertexIdx: number, newLng: number, newLat: number) => void;
+  /** Long-press on a vertex handle (Reroute) — remove that vertex from the working copy. */
+  onVertexLongPress?: (featureId: string, layerId: string, vertexIdx: number) => void;
+  /** Long-press on the line being edited (Reroute) — insert a bend at that point. */
+  onSegmentLongPress?: (featureId: string, layerId: string, lng: number, lat: number) => void;
   /** When set, renders draggable vertex markers for the target feature's LineString vertices. */
   vertexDragTarget?: { featureId: string; layerId: string; vertexIdx: number } | null;
   /** When set, renders a highlighted polygon and draggable corner markers for the target polygon feature. */
@@ -559,6 +574,7 @@ function hasVisibleFeatures(layers: MapLayerData[]): boolean {
 function NativeMapView({
   layers,
   onFeatureClick,
+  onFeatureCandidates,
   onFeatureDragEnd,
   onEmptyAreaClick,
   onVertexDragEnd,
@@ -842,12 +858,20 @@ function NativeMapView({
         return;
       }
 
-      const feature = features[0];
+      // A point is a far smaller target than the trench it sits on, so a point
+      // hit always wins over a line/polygon — otherwise object points on
+      // trenches could never be tapped, edited or attribute-filled. The full
+      // stack (>1) is reported so the popup can offer a cycle chip.
+      const feature = pickTappedFeature(features);
       if (!feature) {
         if (onEmptyAreaClick && lngLat) {
           onEmptyAreaClick(lngLat[0], lngLat[1], undefined);
         }
         return;
+      }
+      if (onFeatureCandidates) {
+        const stack = tapCandidates(features);
+        if (stack.length > 1 && lngLat) onFeatureCandidates(stack, lngLat, undefined);
       }
       const props = feature.properties || {};
       const fid = props.id || props._id;
@@ -923,7 +947,7 @@ function NativeMapView({
         onFeatureClick(fid, lid, lngLat ?? geomPoint, undefined);
       }
     },
-    [onFeatureClick, onEmptyAreaClick, dragMode]
+    [onFeatureClick, onEmptyAreaClick, onFeatureCandidates, dragMode]
   );
 
   // ── Vertex Drag State ──────────────────────────────────────────────────
@@ -1616,62 +1640,10 @@ function NativeMapView({
   // ── Vertex markers / polygon highlight data derivation ────────────────
   // When vertexDragTarget or polygonEditTarget is set, find the target
   // feature in the layers and build point features for each vertex.
-  const editHandleData = useMemo(() => {
-    const target = vertexDragTarget ?? polygonEditTarget ?? polygonMoveTarget;
-    if (!target) return null;
-    for (const layerData of layers) {
-      // Match exact layer ID OR temp-preview- prefixed version (used during Move Mode)
-      const layerId = layerData.id;
-      const previewLayerId = `temp-preview-${target.layerId}`;
-      if (layerId !== target.layerId && layerId !== previewLayerId) continue;
-      for (const feat of layerData.features) {
-        const fid = (feat.properties as any)?.id ?? (feat.properties as any)?._id ?? '';
-        if (fid !== target.featureId) continue;
-
-        const geom = feat.geometry;
-        const color = layerData.color ?? '#0D5CFF';
-        let coords: [number, number][] = [];
-        let isPolygon = false;
-
-        if (geom?.type === 'LineString') {
-          coords = (geom.coordinates as [number, number][]) ?? [];
-        } else if (geom?.type === 'MultiLineString') {
-          coords = ((geom.coordinates as [number, number][][])[0] ?? []) as [number, number][];
-        } else if (geom?.type === 'Polygon') {
-          coords = ((geom.coordinates as [number, number][][])[0] ?? []) as [number, number][];
-          isPolygon = true;
-        } else if (geom?.type === 'MultiPolygon') {
-          coords = ((geom.coordinates as [number, number][][][])[0]?.[0] ?? []) as [number, number][];
-          isPolygon = true;
-        }
-
-        if (coords.length === 0) return null;
-
-        const pointFeatures = coords.map(([lng, lat], idx) => ({
-          type: 'Feature' as const,
-          geometry: { type: 'Point' as const, coordinates: [lng, lat] },
-          properties: {
-            _id: `vert-${target.layerId}-${target.featureId}-${idx}`,
-            _layer_id: target.layerId,
-            _parent_feature_id: target.featureId,
-            _vertex_idx: idx,
-            _is_vertex: true,
-          },
-        }));
-
-        return {
-          featureId: target.featureId,
-          layerId: target.layerId,
-          coords,
-          color,
-          isPolygon: isPolygon || geom?.type === 'Polygon' || geom?.type === 'MultiPolygon',
-          polygonGeom: (isPolygon || geom?.type === 'Polygon' || geom?.type === 'MultiPolygon') ? geom : null,
-          vertexFeatures: pointFeatures,
-        };
-      }
-    }
-    return null;
-  }, [layers, vertexDragTarget, polygonEditTarget]);
+  const editHandleData = useMemo(
+    () => buildEditHandleData(layers, vertexDragTarget ?? polygonEditTarget ?? polygonMoveTarget),
+    [layers, vertexDragTarget, polygonEditTarget, polygonMoveTarget],
+  );
 
   // Keep the ref in sync so the gesture responder (created once) can see
   // current vertex positions without stale closures.
@@ -2173,6 +2145,130 @@ function loadMapLibreJS(): Promise<void> {
 }
 
 /** Remove all vertex marker layers and sources from the map */
+/**
+ * True for any Point-family geometry (Point / MultiPoint).
+ * Points are small, manually placed targets (premises, PDP, MFG, chambers) —
+ * they must always beat the line or polygon rendered underneath them.
+ */
+function isPointFeature(f: any): boolean {
+  const t = f?.geometry?.type;
+  return t === 'Point' || t === 'MultiPoint';
+}
+
+/**
+ * Pick the feature a tap means when several overlap.
+ * Priority: our own layer features > point geometry > top-most (first in
+ * MapLibre's render order, which is bottom-to-top for the layers array).
+ */
+function pickTappedFeature(features: any[]): any | null {
+  if (!features || features.length === 0) return null;
+  const ours = features.filter((f) => f?.properties?._id || f?.properties?._layer_id);
+  const pool = ours.length > 0 ? ours : features;
+  return pool.find(isPointFeature) ?? pool[0] ?? null;
+}
+
+/**
+ * All tappable features at a press, ordered exactly as the tap resolver ranks
+ * them (point-first, top-most ties preserved). The popup offers a "cycle"
+ * chip from this list, so its order must match what was selected.
+ */
+function tapCandidates(
+  features: any[],
+): { featureId: string; layerId: string; geometryType: string }[] {
+  const out: { featureId: string; layerId: string; geometryType: string }[] = [];
+  for (const f of features ?? []) {
+    if (f?.properties?._is_user_location) continue;
+    const id = f?.properties?._id;
+    const lid = f?.properties?._layer_id;
+    if (id && lid) {
+      out.push({
+        featureId: String(id),
+        layerId: String(lid),
+        geometryType: String(f?.geometry?.type ?? ''),
+      });
+    }
+  }
+  // Stable sort (JS sort is stable) keeps top-most order inside each group.
+  return out.sort(
+    (a, b) =>
+      (a.geometryType === 'Point' || a.geometryType === 'MultiPoint' ? 0 : 1) -
+      (b.geometryType === 'Point' || b.geometryType === 'MultiPoint' ? 0 : 1),
+  );
+}
+
+/**
+ * Derive the vertex-handle data for the feature currently being edited.
+ * Shared by the native renderer (declarative <GeoJSONSource>) and the web
+ * renderer (imperative maplibre-gl layers) so both draw identical ml-vert-*
+ * handles for the same target.
+ */
+function buildEditHandleData(
+  layers: MapLayerData[],
+  target: { featureId: string; layerId: string } | null | undefined,
+): {
+  featureId: string;
+  layerId: string;
+  coords: [number, number][];
+  color: string;
+  isPolygon: boolean;
+  polygonGeom: any;
+  vertexFeatures: any[];
+} | null {
+  if (!target) return null;
+  for (const layerData of layers) {
+    // Match exact layer ID OR temp-preview- prefixed version (used during Move Mode)
+    const layerId = layerData.id;
+    const previewLayerId = `temp-preview-${target.layerId}`;
+    if (layerId !== target.layerId && layerId !== previewLayerId) continue;
+    for (const feat of layerData.features) {
+      const fid = (feat.properties as any)?.id ?? (feat.properties as any)?._id ?? '';
+      if (fid !== target.featureId) continue;
+
+      const geom = feat.geometry as any;
+      const color = layerData.color ?? '#0D5CFF';
+      let coords: [number, number][] = [];
+      let isPolygon = false;
+
+      if (geom?.type === 'LineString') {
+        coords = (geom.coordinates as [number, number][]) ?? [];
+      } else if (geom?.type === 'MultiLineString') {
+        coords = ((geom.coordinates as [number, number][][])[0] ?? []) as [number, number][];
+      } else if (geom?.type === 'Polygon') {
+        coords = ((geom.coordinates as [number, number][][])[0] ?? []) as [number, number][];
+        isPolygon = true;
+      } else if (geom?.type === 'MultiPolygon') {
+        coords = ((geom.coordinates as [number, number][][][])[0]?.[0] ?? []) as [number, number][];
+        isPolygon = true;
+      }
+
+      if (coords.length === 0) return null;
+
+      const pointFeatures = coords.map(([lng, lat], idx) => ({
+        type: 'Feature' as const,
+        geometry: { type: 'Point' as const, coordinates: [lng, lat] },
+        properties: {
+          _id: `vert-${target.layerId}-${target.featureId}-${idx}`,
+          _layer_id: target.layerId,
+          _parent_feature_id: target.featureId,
+          _vertex_idx: idx,
+          _is_vertex: true,
+        },
+      }));
+
+      return {
+        featureId: target.featureId,
+        layerId: target.layerId,
+        coords,
+        color,
+        isPolygon: isPolygon || geom?.type === 'Polygon' || geom?.type === 'MultiPolygon',
+        polygonGeom: (isPolygon || geom?.type === 'Polygon' || geom?.type === 'MultiPolygon') ? geom : null,
+        vertexFeatures: pointFeatures,
+      };
+    }
+  }
+  return null;
+}
+
 function removeVertexMarkers(map: any): void {
   const vertexPrefixes = ['ml-vert-src-', 'ml-vert-lyr-', 'ml-vert-hl-', 'ml-vert-drag-', 'ml-poly-hl-src-', 'ml-poly-hl-fill-', 'ml-poly-hl-line-'];
   const style = map.getStyle();
@@ -2301,11 +2397,11 @@ function addVertexMarkers(
       type: 'circle',
       source: sourceId,
       paint: {
-        'circle-radius': 6,
+        'circle-radius': 7,
         'circle-color': '#FFFFFF',
         'circle-stroke-width': 2.5,
         'circle-stroke-color': color,
-        'circle-opacity': 0.9,
+        'circle-opacity': 0.95,
       },
     });
 
@@ -2330,9 +2426,10 @@ function addVertexMarkers(
       type: 'circle',
       source: sourceId,
       paint: {
-        'circle-radius': 18,
+        'circle-radius': 20,
         'circle-color': 'transparent',
         'circle-stroke-width': 0,
+        'circle-opacity': 0.01,
       },
     });
   } catch (e) {
@@ -2415,9 +2512,12 @@ function addGeoJSONLayers(map: any, layers: MapLayerData[]): void {
 function WebMapView({
   layers,
   onFeatureClick,
+  onFeatureCandidates,
   onEmptyAreaClick,
   onFeatureDragEnd,
   onVertexDragEnd,
+  onVertexLongPress,
+  onSegmentLongPress,
   vertexDragTarget,
   polygonEditTarget,
   polygonMoveTarget,
@@ -2586,11 +2686,36 @@ function WebMapView({
   }, [mapStyle, status]);
 
   // ── Layer updates ──────────────────────────────────────────────────────
+  // addGeoJSONLayers() rebuilds every drawn layer, so skipping the call is
+  // never safe: bailing out while the style was mid-update (which is the
+  // state right after another effect adds its own layers) silently left the
+  // working copy off the map — the orange preview line, and with it the
+  // surface a bend is added on. Wait for the style instead of dropping the
+  // update, and let the next render replace the queued one.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || status !== 'ready') return;
-    if (!map.isStyleLoaded()) return;
-    addGeoJSONLayers(map, layers);
+    const apply = () => {
+      if (!mapRef.current) return;
+      addGeoJSONLayers(map, layers);
+    };
+    if (map.isStyleLoaded()) { apply(); return; }
+    // Not loaded yet: retry as soon as it settles. Waiting for a full
+    // 'idle' instead delays the working copy by seconds on a busy map.
+    let cancelled = false;
+    let tries = 0;
+    let timer: any = null;
+    const poll = () => {
+      if (cancelled) return;
+      if (map.isStyleLoaded()) { apply(); return; }
+      if (tries++ > 100) return; // ~5 s, then give up quietly
+      timer = setTimeout(poll, 50);
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, [layers, status]);
 
   // ── User Location Dot (GPS) ── blue dot + halo when the device has a fix ──
@@ -2681,6 +2806,7 @@ function WebMapView({
     const handleClick = (e: any) => {
       const features = map.queryRenderedFeatures(e.point);
       const screenPt = e.point ? { x: e.point.x, y: e.point.y } : undefined;
+      const tapLngLat: [number, number] = [e.lngLat.lng, e.lngLat.lat];
 
       // Taps that land ONLY on the GPS user-location dot are not feature
       // interactions — ignore them so draw/continue-line modes don't place a
@@ -2688,7 +2814,44 @@ function WebMapView({
       const nonUserFeatures = (features ?? []).filter(
         (f: any) => !f?.properties?._is_user_location
       );
-      if (nonUserFeatures.length === 0) return;
+
+      if (nonUserFeatures.length === 0) {
+        // ── Padded retry for small point targets ──
+        // A PDP/premise circle is a couple of pixels of ink on top of a trench.
+        // If nothing at all was hit, look for a point feature of ours within
+        // ~12 px before treating the tap as empty ground.
+        const px = e.point?.x ?? 0;
+        const py = e.point?.y ?? 0;
+        let padded: any[] = [];
+        try {
+          padded = map.queryRenderedFeatures([[px - 12, py - 12], [px + 12, py + 12]]) ?? [];
+        } catch { padded = []; }
+        const paddedPoints = padded.filter(
+          (f: any) =>
+            !f?.properties?._is_user_location &&
+            isPointFeature(f) &&
+            (f.properties?._id || f.properties?._layer_id),
+        );
+        if (paddedPoints.length > 0) {
+          const chosen = pickTappedFeature(paddedPoints);
+          const props = (chosen?.properties ?? {}) as Record<string, unknown>;
+          const fid = props._id as string | undefined;
+          const lid = props._layer_id as string | undefined;
+          if (fid && lid) {
+            if (onFeatureCandidates) {
+              const stack = tapCandidates(padded);
+              if (stack.length > 1) onFeatureCandidates(stack, tapLngLat, screenPt);
+            }
+            onFeatureClick(fid, lid, tapLngLat, screenPt);
+            return;
+          }
+        }
+        // No custom feature at click point — fire empty-area click for draw/geometry modes
+        if (onEmptyAreaClick) {
+          onEmptyAreaClick(e.lngLat.lng, e.lngLat.lat, screenPt);
+        }
+        return;
+      }
 
       // Check if ANY of the returned features belong to our custom layers
       // (basemap features like street labels won't have _id/_layer_id)
@@ -2704,21 +2867,23 @@ function WebMapView({
         return;
       }
 
-      for (const feature of nonUserFeatures) {
-        const props = feature.properties as Record<string, unknown> | null;
-        if (!props) continue;
-        const fid = props._id as string | undefined;
-        const lid = props._layer_id as string | undefined;
-        if (fid && lid) {
-          onFeatureClick(fid, lid, [e.lngLat.lng, e.lngLat.lat], screenPt);
-          break;
-        }
+      if (onFeatureCandidates) {
+        const stack = tapCandidates(nonUserFeatures);
+        if (stack.length > 1) onFeatureCandidates(stack, tapLngLat, screenPt);
       }
+
+      // Point beating line / top-most first — see pickTappedFeature.
+      const chosen = pickTappedFeature(nonUserFeatures);
+      const props = (chosen?.properties ?? null) as Record<string, unknown> | null;
+      if (!props) return;
+      const fid = props._id as string | undefined;
+      const lid = props._layer_id as string | undefined;
+      if (fid && lid) onFeatureClick(fid, lid, tapLngLat, screenPt);
     };
 
     map.on('click', handleClick);
     return () => { try { map.off('click', handleClick); } catch {} };
-  }, [status, onFeatureClick, onEmptyAreaClick]);
+  }, [status, onFeatureClick, onFeatureCandidates, onEmptyAreaClick]);
 
   // ── Hover cursor ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -2760,6 +2925,10 @@ function WebMapView({
   onPolygonVertexDragEndRef.current = onPolygonVertexDragEnd;
   const vertexDragTargetRef = useRef(vertexDragTarget);
   vertexDragTargetRef.current = vertexDragTarget;
+  const onVertexLongPressRef = useRef(onVertexLongPress);
+  onVertexLongPressRef.current = onVertexLongPress;
+  const onSegmentLongPressRef = useRef(onSegmentLongPress);
+  onSegmentLongPressRef.current = onSegmentLongPress;
   const polygonEditTargetRef = useRef(polygonEditTarget);
   polygonEditTargetRef.current = polygonEditTarget;
   const polygonMoveTargetRef = useRef(polygonMoveTarget);
@@ -3090,6 +3259,42 @@ function WebMapView({
     return undefined;
   }, []);
 
+  // ── Vertex handles (web) ───────────────────────────────────────────────
+  // The native renderer draws these declaratively from editHandleData; on web
+  // they must be added to the maplibre style imperatively. Without this the
+  // "drag vertex handles" affordance draws NOTHING and the drag effect below
+  // has no ml-vert-drag-* layer to bind its mousedown listener to.
+  // Hidden in whole-polygon Move mode (the corners stay put there), matching
+  // the native renderer.
+  const editHandleData = useMemo(
+    () => (polygonMoveTarget ? null : buildEditHandleData(layers, vertexDragTarget ?? polygonEditTarget)),
+    [layers, vertexDragTarget, polygonEditTarget, polygonMoveTarget],
+  );
+  const editHandleDataRef = useRef(editHandleData);
+  editHandleDataRef.current = editHandleData;
+  const editHandleSignature = useMemo(
+    () => (editHandleData
+      ? `${editHandleData.layerId}|${editHandleData.featureId}|${editHandleData.color}|${editHandleData.coords
+          .map((c) => `${c[0].toFixed(7)},${c[1].toFixed(7)}`)
+          .join(';')}`
+      : null),
+    [editHandleData],
+  );
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || status !== 'ready') return;
+    const data = editHandleDataRef.current;
+    // Drop any previous handle set first so vertices from another feature
+    // can never linger on the map.
+    try { removeVertexMarkers(map); } catch {}
+    if (!data) return;
+    addVertexMarkers(map, data.featureId, data.layerId, data.coords, -1, data.color, 0);
+    return () => {
+      try { removeVertexMarkers(map); } catch {}
+    };
+  }, [status, editHandleSignature]);
+
   // ── Vertex drag effect (runs independently of dragMode) ────────────────
   useEffect(() => {
     const map = mapRef.current;
@@ -3107,6 +3312,7 @@ function WebMapView({
     const parentSourceId = `ml-src-${vt.layerId}`;
     const canvas = map.getCanvas();
     const cleanupFns: (() => void)[] = [];
+
 
     const containerToLngLat = (e: any) => {
       if (e.lngLat) return e.lngLat;
@@ -3246,6 +3452,84 @@ function WebMapView({
       }
     };
 
+    // ── Hold gestures ───────────────────────────────────────────────────
+    // A press that stays put for ~0.55 s acts on what is under it: a vertex
+    // handle drops that vertex, the working copy gains a bend. Both are
+    // hit-tested at press time, so this never depends on the drag state
+    // surviving the hold; a moving press or a quick release cancels the
+    // timer, which leaves drag, select and tap behaviour untouched.
+    let holdTimer: any = null;
+    let holdStart: { x: number; y: number } | null = null;
+    const containerPoint = (e: any) => {
+      const r = map.getContainer().getBoundingClientRect();
+      return { x: e.clientX - r.left, y: e.clientY - r.top };
+    };
+    const cancelHold = () => {
+      if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+      holdStart = null;
+    };
+    const fireHold = (press: { x: number; y: number }) => {
+      const hits = (layerId: string) => {
+        try { return map.getLayer(layerId) ? map.queryRenderedFeatures([press.x, press.y], { layers: [layerId] }) : []; } catch { return []; }
+      };
+      // 1. a handle removes that vertex
+      const vertexHits = hits(vertDragLayerId);
+      if (vertexHits.length && onVertexLongPressRef.current) {
+        const idx = (vertexHits[0].properties || {})._vertex_idx;
+        if (typeof idx === 'number') {
+          // Cancel the pending drag so a hold does not also move the line.
+          dragStateRef.current = null;
+          isVertexDragRef.current = false;
+          setDragDistance(null);
+          dragOriginRef.current = null;
+          try { map.getCanvas().style.cursor = ''; } catch {}
+          try {
+            const hlId = `ml-vert-hl-${vt.layerId}-${vt.featureId}`;
+            if (map.getLayer(hlId)) map.removeLayer(hlId);
+          } catch {}
+          onVertexLongPressRef.current(vt.featureId, vt.layerId, idx);
+          return;
+        }
+      }
+      // 2. the working copy itself gains a bend
+      if (!onSegmentLongPressRef.current) return;
+      const lineIds = [`ml-lyr-${vt.layerId}`, `ml-out-${vt.layerId}`].filter((id) => {
+        try { return !!map.getLayer(id); } catch { return false; }
+      });
+      if (lineIds.length === 0) return;
+      let lineHits: any[] = [];
+      try { lineHits = map.queryRenderedFeatures([press.x, press.y], { layers: lineIds }); } catch { return; }
+      if (!lineHits.length) return;
+      const lngLat = map.unproject([press.x, press.y]);
+      onSegmentLongPressRef.current(vt.featureId, vt.layerId, lngLat.lng, lngLat.lat);
+    };
+    const onHoldDown = (e: any) => {
+      cancelHold();
+      holdStart = containerPoint(e);
+      const press = holdStart;
+      holdTimer = setTimeout(() => {
+        holdTimer = null;
+        holdStart = null;
+        fireHold(press);
+      }, 550);
+    };
+    const onHoldMove = (e: any) => {
+      if (!holdTimer || !holdStart) return;
+      const p = containerPoint(e);
+      if (Math.abs(p.x - holdStart.x) > 8 || Math.abs(p.y - holdStart.y) > 8) cancelHold();
+    };
+    canvas.addEventListener('mousedown', onHoldDown);
+    canvas.addEventListener('mousemove', onHoldMove);
+    canvas.addEventListener('mouseup', cancelHold);
+    canvas.addEventListener('mouseleave', cancelHold);
+    cleanupFns.push(() => {
+      cancelHold();
+      canvas.removeEventListener('mousedown', onHoldDown);
+      canvas.removeEventListener('mousemove', onHoldMove);
+      canvas.removeEventListener('mouseup', cancelHold);
+      canvas.removeEventListener('mouseleave', cancelHold);
+    });
+
     canvas.addEventListener('mousemove', onDragMove);
     canvas.addEventListener('mouseup', onDragEnd);
     canvas.addEventListener('mouseleave', cancelDrag);
@@ -3305,6 +3589,7 @@ function WebMapView({
           parentSourceId,
           initialCoords,
         };
+
       };
 
       try {

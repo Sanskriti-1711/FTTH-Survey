@@ -15,15 +15,20 @@ import { useMapStore } from '../lib/stores/map';
 import { useProjectStore } from '../lib/stores/project';
 import { useSurveyStore } from '../lib/stores/survey';
 import { useSurveyFeaturesStore, SURVEY_COLOR, HLD_COLOR_OVERRIDE } from '../lib/stores/survey-features';
+import { useOfflineStore } from '../lib/stores/offline';
 import { recalculateDependentProperties } from '../lib/utils/spatial';
 import { getLayerSchema } from '../lib/stores/layer-schemas';
 import { gradeGpsAccuracy } from '../lib/utils/gps-quality';
 import { summarizeCommit } from '../lib/utils/commit';
 import { normalizeLayerId } from '../lib/utils/layer-ids';
+import { insertVertexAtPoint, deleteVertex, splitLineAtPoint, createLineString } from '../lib/utils/geometry-operations';
+import { routeAroundObstacle, detourImpact, formatDetourImpact } from '../lib/utils/obstacle-reroute';
 // Geometry operation utilities removed — all edits now route through survey-features store
 import GeometryEditor from '../lib/components/GeometryEditor';
 import type { GeometryMode, EditingFeature } from '../lib/components/GeometryEditor';
 import LineSelectionToolbar from '../lib/components/LineSelectionToolbar';
+import DrawTrenchPanel from '../lib/components/DrawTrenchPanel';
+import type { TrenchLayerOption } from '../lib/components/DrawTrenchPanel';
 import PolygonToolbar from '../lib/components/PolygonToolbar';
 import SurveyChangesPanel from '../lib/components/SurveyChangesPanel';
 import CommitBar from '../lib/components/CommitBar';
@@ -53,6 +58,7 @@ import Undo2 from 'lucide-react-native/icons/undo-2';
 import Satellite from 'lucide-react-native/icons/satellite';
 import Layers from 'lucide-react-native/icons/layers';
 import AlertTriangle from 'lucide-react-native/icons/triangle-alert';
+import Spline from 'lucide-react-native/icons/spline';
 
 // ── Layer config ──────────────────────────────────────────────────────────
 const LAYER_COLORS: Record<string, string> = {
@@ -304,6 +310,79 @@ function relayFeatureGeom(
 /** Clean a map layer id (imp-/survey- prefixes) to the raw survey layer key. */
 function cleanLayerId(layerId: string): string {
   return layerId.replace(/^imp-/, '').replace(/^survey-/, '').replace(/^temp-preview-/, '').replace(/^ml-/, '');
+}
+
+// ── Bundle reroute PLAN (what Save is about to do) ────────────────────────
+// Rerouting a support line silently relays every corridor layer riding the
+// moved region — a big consequence the engineer only discovered in the LLD.
+// This plan is computed BEFORE Save from the same candidates and the same
+// co-location tolerance the propagation uses, so the toolbar can say
+// "this also moves 3 feeder_ducts, 2 feeder_cable" and let each layer be
+// opted out, without the two ever disagreeing.
+type BundlePlanItem = { hldId: string | null; sfId: string | null; label: string; create: boolean };
+type BundlePlanGroup = { layerId: string; layerName: string; mapKey: string; items: BundlePlanItem[] };
+
+function planBundleReroute(
+  activeGeojson: Record<string, GeoJSONFeature[]>,
+  surveyFeatures: Record<string, SurveyFeatureData[]>,
+  supportLayerId: string,
+  oldPath: [number, number][],
+  newPath: [number, number][],
+  tolM = 8,
+): BundlePlanGroup[] {
+  const cleanLayer = cleanLayerId(supportLayerId);
+  const groups: BundlePlanGroup[] = [];
+  for (const depLayer of BUNDLE_LINE_LAYERS) {
+    if (depLayer === cleanLayer) continue;
+    const depMapKey = `${IMPORT_ID_PREFIX}${depLayer}`;
+    const hldFeats = activeGeojson[depMapKey] ?? [];
+    const surveySfs = surveyFeatures[depMapKey] ?? [];
+    const items: BundlePlanItem[] = [];
+    const seenHld = new Set<string>();
+
+    for (const f of hldFeats) {
+      const props = (f.properties ?? {}) as Record<string, unknown>;
+      const hldId = String(props.id ?? props._id ?? props.feature_id ?? '');
+      if (!hldId) continue;
+      const geom = f.geometry as { type: string; coordinates: unknown } | null;
+      if (!geom || (geom.type !== 'LineString' && geom.type !== 'MultiLineString')) continue;
+      if (!relayFeatureGeom(geom, oldPath, newPath, tolM)) continue;
+      const existingSf = surveySfs.find(
+        (s) => s.original_hld_feature === hldId && s.survey_status !== 'removed',
+      );
+      seenHld.add(hldId);
+      items.push({
+        hldId,
+        sfId: existingSf?.id ?? null,
+        label: `#${hldId.slice(-6)}`,
+        create: !existingSf,
+      });
+    }
+
+    for (const sf of surveySfs) {
+      if (sf.survey_status === 'removed') continue;
+      const sGeom = sf.survey_geometry as { type?: string; coordinates?: unknown } | null;
+      if (!sGeom || (sGeom.type !== 'LineString' && sGeom.type !== 'MultiLineString')) continue;
+      if (sf.original_hld_feature && seenHld.has(sf.original_hld_feature)) continue;
+      if (!relayFeatureGeom(sGeom as { type: string; coordinates: unknown }, oldPath, newPath, tolM)) continue;
+      items.push({
+        hldId: sf.original_hld_feature,
+        sfId: sf.id,
+        label: `#${sf.id.slice(-6)}`,
+        create: false,
+      });
+    }
+
+    if (items.length > 0) {
+      groups.push({
+        layerId: depLayer,
+        layerName: LAYER_NAMES[depLayer] ?? depLayer.toUpperCase(),
+        mapKey: depMapKey,
+        items,
+      });
+    }
+  }
+  return groups;
 }
 
 // ── Extract all [lng, lat] pairs from any GeoJSON geometry ───────────────-
@@ -604,6 +683,13 @@ export default function MapScreen() {
   const [featureNotes, setFeatureNotes] = useState<Record<string, string>>({});
   const [notesDraft, setNotesDraft] = useState('');
   const [popupScreenCoords, setPopupScreenCoords] = useState<{ x: number; y: number } | null>(null);
+  // ── Overlapping features at the last tap ─────────────────────────────────
+  // A premise/PDP point sitting on a trench means one tap hits several
+  // features. The stack (point-first, then top-most) lets the popup offer a
+  // "cycle" chip so the object point is reachable without zooming in.
+  const [tapStack, setTapStack] = useState<{ featureId: string; layerId: string; geometryType: string }[]>([]);
+  const [tapStackLngLat, setTapStackLngLat] = useState<[number, number] | null>(null);
+  const [tapStackScreenPt, setTapStackScreenPt] = useState<{ x: number; y: number } | undefined>(undefined);
   const [searchQuery, setSearchQuery] = useState('');
   const [dragMode, setDragMode] = useState(false);
   // Fly-to-user request — bumped each time the crosshair FAB is pressed
@@ -654,7 +740,26 @@ export default function MapScreen() {
   const [tempLineOriginal, setTempLineOriginal] = useState<[number, number][] | null>(null);
 
   // ── Delete Section state ──────────────────────────────────────────────
-  const [lineToolMode, setLineToolMode] = useState<'delete-section' | 'continue-line' | null>(null);
+  const [lineToolMode, setLineToolMode] = useState<
+    'delete-section' | 'continue-line' | 'split-here' | 'route-around' | null
+  >(null);
+
+  // ── Route around works (roadworks / closure / permit stop-work zone) ─────
+  const [obstacleCentre, setObstacleCentre] = useState<{ lng: number; lat: number } | null>(null);
+  const [obstacleRadiusM, setObstacleRadiusM] = useState(10);
+  const [detourImpactLabel, setDetourImpactLabel] = useState<string | null>(null);
+
+  // ── Draw trench state (polyline CREATE tool) ───────────────────────────
+  // The design can be missing a trench entirely; this places a brand new
+  // survey LineString with a 2-tap minimum instead of editing a designed one.
+  const [drawTrenchActive, setDrawTrenchActive] = useState(false);
+  const [drawTrenchPoints, setDrawTrenchPoints] = useState<[number, number][]>([]);
+  const [drawTrenchLayer, setDrawTrenchLayer] = useState<string>('');
+  const [drawTrenchSnapLabel, setDrawTrenchSnapLabel] = useState<string | null>(null);
+  const [drawTrenchBusy, setDrawTrenchBusy] = useState(false);
+
+  // Layers opted OUT of the bundle reroute relay (pre-Save explanation row).
+  const [bundleSkipLayers, setBundleSkipLayers] = useState<string[]>([]);
   const [deleteSectionRange, setDeleteSectionRange] = useState<[number, number] | null>(null);
 
   // ── Continue Line state ──────────────────────────────────────────────
@@ -1395,8 +1500,35 @@ export default function MapScreen() {
       });
     }
 
+    // ── Draw trench working copy (orange) ──
+    // The drawn trench is NOT a survey feature until Save. Show the vertices
+    // placed so far: a single vertex as a dot (a 1-vertex LineString renders
+    // as nothing), two or more as the growing line.
+    if (drawTrenchActive && drawTrenchPoints.length > 0) {
+      const isSingle = drawTrenchPoints.length === 1;
+      previewLayers.push({
+        id: 'temp-preview-trench-draw',
+        name: 'Draw trench',
+        features: [{
+          type: 'Feature' as const,
+          geometry: isSingle
+            ? { type: 'Point' as const, coordinates: drawTrenchPoints[0] }
+            : { type: 'LineString' as const, coordinates: drawTrenchPoints },
+          properties: {
+            id: 'temp-preview-trench-draw',
+            _id: 'temp-preview-trench-draw',
+            _layer_id: 'temp-preview-trench-draw',
+            _is_preview: true,
+          },
+        }],
+        visible: true,
+        color: SURVEY_COLOR, // Orange
+        geometryType: (isSingle ? 'Point' : 'LineString') as 'Point' | 'LineString',
+      });
+    }
+
     return [...hldLayers, ...previewLayers, ...surveyLayers];
-  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, lineToolMode, continueLinePoints, tempLineCoords, selectedLineFeature, selectedPolygonFeature, polygonEditCoords, isolateFeatureId]);
+  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, lineToolMode, continueLinePoints, tempLineCoords, selectedLineFeature, selectedPolygonFeature, polygonEditCoords, isolateFeatureId, drawTrenchActive, drawTrenchPoints]);
 
   // Build visible layers from the active project's layers
   const visibleLayers = useMemo(() => {
@@ -2181,8 +2313,12 @@ export default function MapScreen() {
       return;
     }
 
-    if (lineMoveMode) {
+    // Toggle against the ACTIVE TOOL, not the shared edit flag: an armed
+    // tool (Del Section / Draw Segment) also sets lineMoveMode, and clicking
+    // Reroute then must SWITCH to Reroute instead of exiting every tool.
+    if (lineMoveMode && lineToolMode === null) {
       // ── Exit Move Mode — discard temp changes ──
+      setBundleSkipLayers([]);
       setLineMoveMode(false);
       setTempLineCoords(null);
       setTempLineOriginal(null);
@@ -2195,6 +2331,32 @@ export default function MapScreen() {
       setDeleteSectionRange(null);
       console.log('[MoveMode] Exited — temp changes discarded');
     } else {
+      // ── Keep an already-dirty working copy ──
+      // Switching tools (e.g. Split here → Edit shape) must not silently throw
+      // away a bend the engineer just placed: if the working copy already
+      // differs from its baseline, keep it and only change the active tool.
+      const copyIsDirty =
+        !!tempLineCoords && !!tempLineOriginal &&
+        tempLineCoords.length >= 2 && tempLineCoords.length === tempLineOriginal.length
+          ? tempLineCoords.some((c, i) => {
+              const b = tempLineOriginal![i];
+              return Math.hypot(c[0] - b[0], c[1] - b[1]) * 111000 > 0.5;
+            })
+          : !!tempLineCoords && !!tempLineOriginal && tempLineCoords.length !== tempLineOriginal.length;
+      if (copyIsDirty) {
+        setLineToolMode(null);
+        setDeleteSectionRange(null);
+        setContinueLineAnchor(null);
+        setContinueLinePoints(0);
+        setContinueSnapTarget(null);
+        setContinueStartPt(null);
+        lastContinueTapRef.current = null;
+        setLineMoveMode(true);
+        autoOverlayOnEdit();
+        console.log('[MoveMode] Switched to Edit shape — keeping the unsaved working copy');
+        return;
+      }
+
       // ── Enter Move Mode — extract HLD coordinates into temp copy ──
       const { id: featureId, layerId } = selectedLineFeature;
       console.log(`[MoveMode] DEBUG: featureId=${featureId}, layerId=${layerId}, hasImported=${hasImportedData}`);
@@ -2288,13 +2450,23 @@ export default function MapScreen() {
       const coordsCopy = coords.map(([lng, lat]) => [lng, lat] as [number, number]);
       const originalCopy = coords.map(([lng, lat]) => [lng, lat] as [number, number]);
 
+      setBundleSkipLayers([]);
       setTempLineCoords(coordsCopy);
       setTempLineOriginal(originalCopy);
+      // Starting Reroute disarms any other line tool so exactly one
+      // tool is ever active (and the hint matches the active tool).
+      setLineToolMode(null);
+      setDeleteSectionRange(null);
+      setContinueLineAnchor(null);
+      setContinueLinePoints(0);
+      setContinueSnapTarget(null);
+      setContinueStartPt(null);
+      lastContinueTapRef.current = null;
       setLineMoveMode(true);
       autoOverlayOnEdit();
       console.log(`[MoveMode] Activated for ${featureId.slice(-8)} — ${coordsCopy.length} vertices`);
     }
-  }, [selectedLineFeature, lineMoveMode, autoOverlayOnEdit, importFeatureIdMap, surveyFeatures, getSurveyFeatureForHld]);
+  }, [selectedLineFeature, lineMoveMode, lineToolMode, autoOverlayOnEdit, importFeatureIdMap, surveyFeatures, getSurveyFeatureForHld, tempLineCoords, tempLineOriginal]);
 
   // ── Bundle reroute propagation ──────────────────────────────────────────
   // Rerouting a support line (trench/duct) means that route has a problem —
@@ -2302,7 +2474,14 @@ export default function MapScreen() {
   // must follow the NEW path in the same survey change. Only the moved
   // REGION is re-laid; shared endpoints and parts on other lines stay put.
   const propagateBundleReroute = useCallback(
-    (supportFeatureId: string, supportLayerId: string, oldPath: [number, number][], newPath: [number, number][]) => {
+    (
+      supportFeatureId: string,
+      supportLayerId: string,
+      oldPath: [number, number][],
+      newPath: [number, number][],
+      /** Layer ids the engineer unticked in the pre-Save bundle list */
+      skipLayers: string[] = [],
+    ) => {
       const cleanLayer = cleanLayerId(supportLayerId);
       // The whole corridor follows: every other line layer (feeder, distribution,
       // garden/drop, duct, cable) that rides on the moved region is re-laid onto
@@ -2317,6 +2496,10 @@ export default function MapScreen() {
       const relayedDesc: string[] = [];
 
       for (const depLayer of dependents) {
+        if (skipLayers.includes(depLayer)) {
+          console.log(`[Bundle] ${depLayer} opted out of the reroute relay — left untouched`);
+          continue;
+        }
         const depLayerName = (LAYER_NAMES[depLayer] ?? depLayer.toUpperCase());
         // Survey store + map layers are keyed by the map layer id ('imp-' prefix)
         const depMapKey = `${IMPORT_ID_PREFIX}${depLayer}`;
@@ -2512,7 +2695,12 @@ export default function MapScreen() {
           survey_attributes: surveyAttrs,
           survey_status: 'modified',
         });
-        showToast(`Saved — ${layerName || 'line'} updated`, 'success');
+        showToast(
+          useOfflineStore.getState().isOnline
+            ? `Saved — ${layerName || 'line'} updated`
+            : `Saved on device — ${layerName || 'line'} will sync when back online`,
+          'success',
+        );
       } catch (err) {
         console.error('[MoveMode] Save failed:', err);
         showToast('Save failed — check the server connection and retry', 'error');
@@ -2543,7 +2731,12 @@ export default function MapScreen() {
               description: `Undo: remove survey feature for line ${featureId.slice(-8)}`,
             },
           });
-          showToast(`Saved — ${layerName || 'line'} change recorded`, 'success');
+          showToast(
+            sf.sync_status === 'pending'
+              ? 'Saved on device — will sync when back online'
+              : `Saved — ${layerName || 'line'} change recorded`,
+            'success',
+          );
         } else if (activeProject?.id.startsWith('imported-')) {
           showToast('Imported project — edit kept on device only', 'info');
         } else {
@@ -2559,8 +2752,9 @@ export default function MapScreen() {
     // independent two-point addition and must never rewrite neighbouring
     // corridor features as if the selected line had been diverted.
     if (lineToolMode !== 'continue-line') {
-      propagateBundleReroute(featureId, layerId, tempLineOriginal, tempLineCoords);
+      propagateBundleReroute(featureId, layerId, tempLineOriginal, tempLineCoords, bundleSkipLayers);
     }
+    setBundleSkipLayers([]);
 
     // Clear temp state + exit move mode + exit any line tool mode so the
     // map tap handler returns to normal popup/selection behavior.
@@ -2575,7 +2769,7 @@ export default function MapScreen() {
     lastContinueTapRef.current = null;
     setDeleteSectionRange(null);
     console.log(`[MoveMode] Saved line geometry for ${featureId.slice(-8)} — SurveyFeature ${existingSurvey ? 'updated' : 'created'}${continueSnapTarget ? ` (snapped to ${continueSnapTarget.name})` : ''}`);
-  },    [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, continueSnapTarget, surveyFeatures, propagateBundleReroute, lineToolMode, continueLinePoints, showToast]);
+  },    [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, continueSnapTarget, surveyFeatures, propagateBundleReroute, lineToolMode, continueLinePoints, showToast, bundleSkipLayers]);
 
   // ── Delete Section handlers ────────────────────────────────────────────
 
@@ -2612,6 +2806,12 @@ export default function MapScreen() {
     setLineMoveMode(true);
     setLineToolMode('delete-section');
     setDeleteSectionRange(null);
+    // Drop any Draw Segment progress so the two tools cannot both be live.
+    setContinueLineAnchor(null);
+    setContinueLinePoints(0);
+    setContinueSnapTarget(null);
+    setContinueStartPt(null);
+    lastContinueTapRef.current = null;
     autoOverlayOnEdit();
   }, [selectedLineFeature, lineToolMode, importFeatureIdMap, autoOverlayOnEdit]);
 
@@ -2658,6 +2858,7 @@ export default function MapScreen() {
     // tap-on-the-line requirement. lineMoveMode stays OFF so the map renders
     // no vertex markers and taps anywhere on the map are accepted.
     setLineToolMode('continue-line');
+    setDeleteSectionRange(null);
     setContinueLineAnchor(null);
     setContinueLinePoints(0);
     setContinueSnapTarget(null);
@@ -2796,6 +2997,487 @@ export default function MapScreen() {
     [lineToolMode, selectedLineFeature, tempLineCoords],
   );
 
+  // ── Split here: cut the working copy into two spans at the tapped point ──
+  // Wires splitLineAtPoint (until now dead code) so routing a new chamber into
+  // the middle of a straight trench no longer means dragging an endpoint and
+  // changing the whole corridor. The cut is an explicit, undoable create — it
+  // is NOT a working-copy drag: span 1 becomes the survey geometry of the HLD
+  // line, span 2 is created as an independent survey feature (same local-create
+  // path Remove span already uses for its extra segments).
+  const loadSelectedLineCoords = useCallback((): [number, number][] | null => {
+    if (!selectedLineFeature) return null;
+    const { id: featureId, layerId } = selectedLineFeature;
+    const features = activeGeojsonRef.current[layerId];
+    if (!features) return null;
+    let hldFeature = features.find((f) => {
+      const fid = (f.properties as any)?.id ?? (f.properties as any)?._id ?? '';
+      return fid === featureId;
+    });
+    if (!hldFeature) {
+      const idMap = importFeatureIdMap?.[layerId];
+      if (idMap) { const idx = idMap.indexOf(featureId); if (idx >= 0 && idx < features.length) hldFeature = features[idx]; }
+    }
+    const geomType = hldFeature?.geometry?.type;
+    if (!hldFeature?.geometry || (geomType !== 'LineString' && geomType !== 'MultiLineString')) return null;
+    const rawCoords =
+      geomType === 'MultiLineString'
+        ? (hldFeature.geometry.coordinates as [number, number][][])[0] ?? []
+        : (hldFeature.geometry.coordinates as [number, number][]);
+    return (rawCoords as [number, number][]).map(([lng, lat]) => [lng, lat] as [number, number]);
+  }, [selectedLineFeature, importFeatureIdMap]);
+
+  const handleSplitToggle = useCallback(() => {
+    if (!selectedLineFeature) return;
+    if (lineToolMode === 'split-here') {
+      setLineMoveMode(false);
+      setLineToolMode(null);
+      setTempLineCoords(null);
+      setTempLineOriginal(null);
+      return;
+    }
+    // Prefer an in-progress working copy (the engineer may have already moved a
+    // vertex); otherwise load the line's current coordinates.
+    const coords = tempLineCoords
+      ? tempLineCoords.map(([lng, lat]) => [lng, lat] as [number, number])
+      : loadSelectedLineCoords();
+    if (!coords || coords.length < 3) {
+      showToast('This line is too short to split — extend it to 3+ vertices first', 'warning');
+      return;
+    }
+    setTempLineCoords(coords);
+    setTempLineOriginal(coords.map(([lng, lat]) => [lng, lat] as [number, number]));
+    // One tool at a time: arming Split here disarms every other line tool.
+    setDeleteSectionRange(null);
+    setContinueLineAnchor(null);
+    setContinueLinePoints(0);
+    setContinueSnapTarget(null);
+    setContinueStartPt(null);
+    lastContinueTapRef.current = null;
+    setLineMoveMode(true);
+    setLineToolMode('split-here');
+    autoOverlayOnEdit();
+    console.log(`[Split] Armed for ${selectedLineFeature.id.slice(-8)} — tap the line at the new chamber`);
+  }, [selectedLineFeature, lineToolMode, tempLineCoords, loadSelectedLineCoords, autoOverlayOnEdit, showToast]);
+
+  const handleSplitTap = useCallback(
+    (featureId: string, layerId: string, lngLat: [number, number]) => {
+      if (lineToolMode !== 'split-here' || !selectedLineFeature || !tempLineCoords) return;
+      const expectedPreview = `temp-preview-${selectedLineFeature.layerId}`;
+      const onSelectedLine =
+        layerId === expectedPreview ||
+        (featureId === selectedLineFeature.id && layerId === selectedLineFeature.layerId);
+      if (!onSelectedLine) {
+        showToast('Tap on the selected line to place the split', 'warning');
+        return;
+      }
+      const res = splitLineAtPoint(tempLineCoords, lngLat[0], lngLat[1]);
+      if (!res) {
+        showToast('Could not split here — tap further from the line ends', 'warning');
+        return;
+      }
+      const { id: hldFeatureId, layerId: targetLayerId, layerName } = selectedLineFeature;
+      const { geometry: origGeom, attributes: origAttrs } = findHldFeatureOriginal(hldFeatureId, targetLayerId);
+      const existing = getSurveyFeatureForHld(hldFeatureId);
+      const reason = `Split at vertex ${res.splitIndex + 1} — new chamber (${tempLineCoords.length} → ${res.coordsA.length} + ${res.coordsB.length} vertices)`;
+
+      // ── Span 1: keeps the HLD link (update existing survey row, else create)
+      const firstGeom = { type: 'LineString', coordinates: res.coordsA } as Record<string, unknown>;
+      if (existing) {
+        pushUndo({
+          featureId: hldFeatureId, layerId: targetLayerId,
+          oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+          timestamp: Date.now(),
+          surveyUndo: {
+            surveyFeatureId: existing.id,
+            layerId: targetLayerId,
+            previousGeometry: existing.survey_geometry,
+            previousAttributes: existing.survey_attributes,
+            previousStatus: existing.survey_status,
+            description: `Undo split for ${hldFeatureId.slice(-8)}`,
+          },
+        });
+        updateSurveyFeature(existing.id, targetLayerId, {
+          survey_geometry: firstGeom,
+          survey_status: 'modified',
+          change_reason: reason,
+        });
+      } else {
+        upsertSurveyFeature(hldFeatureId, targetLayerId, layerName, firstGeom, origAttrs ?? {}, origGeom, origAttrs, reason)
+          .then((sf) => {
+            if (!sf) return;
+            pushUndo({
+              featureId: hldFeatureId, layerId: targetLayerId,
+              oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+              timestamp: Date.now(),
+              surveyUndo: {
+                surveyFeatureId: sf.id,
+                layerId: targetLayerId,
+                previousGeometry: { type: 'LineString', coordinates: tempLineOriginal } as Record<string, unknown>,
+                previousAttributes: (origAttrs as Record<string, unknown>) ?? {},
+                previousStatus: 'new',
+                description: `Undo: remove survey feature for ${hldFeatureId.slice(-8)}`,
+              },
+            });
+          });
+      }
+
+      // ── Span 2: independent survey feature, local-only (synthetic HLD FK
+      // would 500 on the backend — same reason Remove span creates locally).
+      const segHldId = `${hldFeatureId}-split-2-${Date.now()}`;
+      const secondGeom = { type: 'LineString', coordinates: res.coordsB } as Record<string, unknown>;
+      const mockSf: SurveyFeatureData = {
+        id: `local-sf-split-${Date.now()}`,
+        original_hld_feature: segHldId,
+        hld_feature_id: segHldId,
+        project: activeProject?.id ?? '',
+        project_name: activeProject?.name ?? '',
+        engineer: '',
+        engineer_name: '',
+        layer_id: targetLayerId,
+        layer_name: layerName,
+        original_geometry: origGeom,
+        original_attributes: origAttrs ?? null,
+        survey_geometry: secondGeom,
+        survey_attributes: origAttrs ?? {},
+        survey_status: 'new' as const,
+        version_number: 1,
+        sync_status: 'pending' as const,
+        change_reason: `${reason} (span 2)`,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      const store = useSurveyFeaturesStore.getState();
+      useSurveyFeaturesStore.setState({
+        surveyFeatures: {
+          ...store.surveyFeatures,
+          [targetLayerId]: [...(store.surveyFeatures[targetLayerId] ?? []), mockSf],
+        },
+      });
+      pushUndo({
+        featureId: hldFeatureId, layerId: targetLayerId,
+        oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+        timestamp: Date.now(),
+        surveyUndo: {
+          surveyFeatureId: mockSf.id,
+          layerId: targetLayerId,
+          previousGeometry: secondGeom,
+          previousAttributes: (origAttrs as Record<string, unknown>) ?? {},
+          previousStatus: 'removed',
+          description: `Undo: remove split span 2 for ${hldFeatureId.slice(-8)}`,
+        },
+      });
+      showToast(
+        useOfflineStore.getState().isOnline
+          ? `Split done — span 1: ${res.coordsA.length} vertices, span 2: ${res.coordsB.length} vertices`
+          : `Split kept on device — span 1: ${res.coordsA.length} vertices, span 2: ${res.coordsB.length} vertices`,
+        'success',
+      );
+      console.log(`[Split] ${hldFeatureId.slice(-8)} → ${res.coordsA.length} + ${res.coordsB.length} vertices (local span ${mockSf.id})`);
+
+      setLineMoveMode(false);
+      setLineToolMode(null);
+      setDeleteSectionRange(null);
+      setContinueLineAnchor(null);
+      setContinueLinePoints(0);
+      setContinueSnapTarget(null);
+      setContinueStartPt(null);
+      lastContinueTapRef.current = null;
+      setTempLineCoords(null);
+      setTempLineOriginal(null);
+      autoOverlayOnEdit();
+    },
+    [lineToolMode, selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, activeProject, showToast, autoOverlayOnEdit],
+  );
+
+  // ── Attributes for the selected LINE ────────────────────────────────────
+  // Same SurveyForm the point popup opens — one form, two entry points — so
+  // trench field data is captured without leaving the map or the edit session.
+  const handleLineAttributes = useCallback(() => {
+    if (!selectedLineFeature) return;
+    handlePointSurveyForm(selectedLineFeature);
+  }, [selectedLineFeature, handlePointSurveyForm]);
+
+  // ── Route around works ─────────────────────────────────────────────────
+  // The engineer taps the works location and the line is re-routed clear of a
+  // no-go zone there, with the cost shown before Save: metres added, chambers
+  // (2 transition joints), vertices, and how many OTHER lines sit in the same
+  // zone — those are the ones that also need their own closure/reroute. The
+  // detour is always recomputed from the BASELINE, so changing the radius
+  // replaces the diversion instead of stacking detours on top of each other.
+  const otherLineCoords = useMemo<[number, number][][]>(() => {
+    const out: [number, number][][] = [];
+    for (const layer of mapLayerData) {
+      for (const f of layer.features) {
+        const g = f.geometry as { type?: string; coordinates?: unknown } | null;
+        let c: [number, number][] = [];
+        if (g?.type === 'LineString') c = (g.coordinates as [number, number][]) ?? [];
+        else if (g?.type === 'MultiLineString') c = ((g.coordinates as [number, number][][])[0] ?? []) as [number, number][];
+        if (c.length < 2) continue;
+        const fid = String((f.properties as any)?.id ?? (f.properties as any)?._id ?? '');
+        if (selectedLineFeature && fid === selectedLineFeature.id && layer.id === selectedLineFeature.layerId) continue;
+        out.push(c);
+      }
+    }
+    return out;
+  }, [mapLayerData, selectedLineFeature]);
+
+  const applyObstacleDetour = useCallback(
+    (centre: { lng: number; lat: number }, radiusM: number, baseline: [number, number][]) => {
+      const obstacle = { lng: centre.lng, lat: centre.lat, radiusM };
+      const result = routeAroundObstacle(baseline, obstacle, 2);
+      const impact = detourImpact(baseline, result.coords, obstacle, otherLineCoords);
+      setTempLineCoords(result.coords);
+      setDetourImpactLabel(formatDetourImpact(impact));
+      if (!result.rerouted) {
+        showToast('The line does not cross that zone — nothing to re-route', 'warning');
+      } else {
+        showToast(`Routed around the works — ${formatDetourImpact(impact)}`, 'success');
+      }
+      console.log(
+        `[RouteAround] radius ${radiusM} m → ${result.insertedVertices} new vertices, ` +
+          `${impact.lengthDeltaM >= 0 ? '+' : ''}${impact.lengthDeltaM.toFixed(1)} m, ` +
+          `${impact.extraChambers} chambers, ${impact.otherLinesCrossing} other lines in the zone`,
+      );
+    },
+    [otherLineCoords, showToast],
+  );
+
+  const handleRouteAroundToggle = useCallback(() => {
+    if (!selectedLineFeature) return;
+    if (lineToolMode === 'route-around') {
+      setLineMoveMode(false);
+      setLineToolMode(null);
+      setObstacleCentre(null);
+      setDetourImpactLabel(null);
+      setTempLineCoords(null);
+      setTempLineOriginal(null);
+      return;
+    }
+    const coords = tempLineCoords
+      ? tempLineCoords.map(([lng, lat]) => [lng, lat] as [number, number])
+      : loadSelectedLineCoords();
+    if (!coords || coords.length < 2) {
+      showToast('Select a line with at least two vertices first', 'warning');
+      return;
+    }
+    setTempLineCoords(coords);
+    setTempLineOriginal(coords.map(([lng, lat]) => [lng, lat] as [number, number]));
+    setDeleteSectionRange(null);
+    setContinueLineAnchor(null);
+    setContinueLinePoints(0);
+    setContinueSnapTarget(null);
+    setContinueStartPt(null);
+    lastContinueTapRef.current = null;
+    setObstacleCentre(null);
+    setDetourImpactLabel(null);
+    setLineMoveMode(true);
+    setLineToolMode('route-around');
+    autoOverlayOnEdit();
+    console.log(`[RouteAround] Armed for ${selectedLineFeature.id.slice(-8)} — tap the works location`);
+  }, [selectedLineFeature, lineToolMode, tempLineCoords, loadSelectedLineCoords, autoOverlayOnEdit, showToast]);
+
+  const handleObstacleRadiusChange = useCallback(
+    (radiusM: number) => {
+      setObstacleRadiusM(radiusM);
+      if (!obstacleCentre || !tempLineOriginal) return;
+      applyObstacleDetour(obstacleCentre, radiusM, tempLineOriginal);
+    },
+    [obstacleCentre, tempLineOriginal, applyObstacleDetour],
+  );
+
+  const handleRouteAroundTap = useCallback(
+    (lngLat: [number, number]) => {
+      if (lineToolMode !== 'route-around' || !tempLineOriginal) return;
+      const centre = { lng: lngLat[0], lat: lngLat[1] };
+      setObstacleCentre(centre);
+      applyObstacleDetour(centre, obstacleRadiusM, tempLineOriginal);
+    },
+    [lineToolMode, tempLineOriginal, obstacleRadiusM, applyObstacleDetour],
+  );
+
+  // ── Draw trench: polyline CREATE tool ──────────────────────────────────
+  // Creates a NEW survey LineString (never rewrites a designed corridor).
+  // Each tap appends a vertex, snapped to the nearest object point or duct/
+  // chamber endpoint within ~8 m so the drawn trench joins the network
+  // cleanly; nothing reaches the store until Save.
+  const drawLineLayers = useMemo<TrenchLayerOption[]>(() => {
+    const seen = new Set<string>();
+    const out: TrenchLayerOption[] = [];
+    for (const l of mapLayerData) {
+      if (l.geometryType !== 'LineString') continue;
+      if (l.id.startsWith('survey-') || l.id.startsWith('temp-preview-')) continue;
+      if (seen.has(l.id)) continue;
+      seen.add(l.id);
+      out.push({ id: l.id, name: l.name ?? activeLayerNames[l.id] ?? l.id.toUpperCase() });
+    }
+    // Trench/duct layers first — they are what an engineer usually draws into.
+    out.sort((a, b) => {
+      const rank = (x: TrenchLayerOption) => (/trench|duct/i.test(`${x.id} ${x.name}`) ? 0 : 1);
+      return rank(a) - rank(b);
+    });
+    return out;
+  }, [mapLayerData, activeLayerNames]);
+
+  useEffect(() => {
+    if (!drawTrenchActive) return;
+    if (drawTrenchLayer && drawLineLayers.some((l) => l.id === drawTrenchLayer)) return;
+    if (drawLineLayers.length > 0) setDrawTrenchLayer(drawLineLayers[0].id);
+  }, [drawTrenchActive, drawTrenchLayer, drawLineLayers]);
+
+  const drawTrenchLengthM = useMemo(() => {
+    let m = 0;
+    for (let i = 1; i < drawTrenchPoints.length; i++) {
+      const a = drawTrenchPoints[i - 1];
+      const b = drawTrenchPoints[i];
+      m += Math.hypot(a[0] - b[0], a[1] - b[1]) * 111000;
+    }
+    return m;
+  }, [drawTrenchPoints]);
+
+  const findTrenchSnap = useCallback(
+    (pt: [number, number]): { lng: number; lat: number; label: string | null } => {
+      // 1) Object points (premise / PDP / MFG / chamber) — same resolver the
+      //    draw-segment tool uses, so snapping behaves identically.
+      const snapPt = findNearestSnapPoint(mapLayerData, pt[0], pt[1]);
+      if (snapPt) {
+        const label = snapPt.name
+          ? `${snapPt.name} #${String(snapPt.id ?? '').slice(-6)}`
+          : `#${String(snapPt.id ?? '').slice(-6)}`;
+        return { lng: snapPt.lng, lat: snapPt.lat, label };
+      }
+      // 2) Duct / trench / cable ENDPOINTS — the second thing a drawn trench
+      //    must connect to. Only endpoints and vertices, within ~8 m.
+      const maxDeg = 8 / 111000;
+      let best: { lng: number; lat: number; label: string | null } | null = null;
+      let bestD = Infinity;
+      for (const layer of mapLayerData) {
+        for (const f of layer.features) {
+          const g = f.geometry as { type?: string; coordinates?: unknown } | null;
+          let coords: [number, number][] = [];
+          if (g?.type === 'LineString') coords = (g.coordinates as [number, number][]) ?? [];
+          else if (g?.type === 'MultiLineString') coords = ((g.coordinates as [number, number][][])[0] ?? []) as [number, number][];
+          if (coords.length < 2) continue;
+          const candidates = [coords[0], coords[coords.length - 1]];
+          for (const c of candidates) {
+            if (!c) continue;
+            const d = Math.hypot(c[0] - pt[0], c[1] - pt[1]);
+            if (d < bestD) {
+              const fid = String((f.properties as any)?.id ?? (f.properties as any)?._id ?? '');
+              bestD = d;
+              best = { lng: c[0], lat: c[1], label: `${layer.name ?? layer.id} end #${fid.slice(-4)}` };
+            }
+          }
+        }
+      }
+      if (best && bestD <= maxDeg) return best;
+      return { lng: pt[0], lat: pt[1], label: null };
+    },
+    [mapLayerData],
+  );
+
+  const handleTrenchTap = useCallback((lngLat: [number, number]) => {
+    const snap = findTrenchSnap(lngLat);
+    setDrawTrenchSnapLabel(snap.label);
+    setDrawTrenchPoints((prev) => [...prev, [snap.lng, snap.lat] as [number, number]]);
+  }, [findTrenchSnap]);
+
+  const handleTrenchToggle = useCallback(() => {
+    setToolsOpen(false);
+    if (drawTrenchActive) {
+      setDrawTrenchActive(false);
+      setDrawTrenchPoints([]);
+      setDrawTrenchSnapLabel(null);
+      return;
+    }
+    // Draw trench replaces any armed line-edit tool: one tool at a time.
+    setLineMoveMode(false);
+    setLineToolMode(null);
+    setDeleteSectionRange(null);
+    setContinueLineAnchor(null);
+    setContinueLinePoints(0);
+    setContinueSnapTarget(null);
+    setContinueStartPt(null);
+    lastContinueTapRef.current = null;
+    setTempLineCoords(null);
+    setTempLineOriginal(null);
+    setSelectedLineFeature(null);
+    setDrawTrenchPoints([]);
+    setDrawTrenchSnapLabel(null);
+    setDrawTrenchActive(true);
+    console.log('[DrawTrench] Armed — tap the map to place vertices');
+  }, [drawTrenchActive]);
+
+  const handleTrenchUndoPoint = useCallback(() => {
+    setDrawTrenchPoints((prev) => prev.slice(0, -1));
+    setDrawTrenchSnapLabel(null);
+  }, []);
+
+  const handleTrenchCancel = useCallback(() => {
+    setDrawTrenchActive(false);
+    setDrawTrenchPoints([]);
+    setDrawTrenchSnapLabel(null);
+  }, []);
+
+  const handleTrenchSave = useCallback(async () => {
+    if (drawTrenchBusy || drawTrenchPoints.length < 2 || !drawTrenchLayer) return;
+    const coords = createLineString(drawTrenchPoints);
+    if (!coords) {
+      showToast('Draw at least two distinct vertices before saving', 'warning');
+      return;
+    }
+    const layerName = activeLayerNames[drawTrenchLayer] ?? drawTrenchLayer.toUpperCase();
+    const geometry = { type: 'LineString', coordinates: coords } as Record<string, unknown>;
+    const lengthM = drawTrenchLengthM;
+    setDrawTrenchBusy(true);
+    try {
+      // hldFeatureId = null → engineer-created survey feature (no HLD row).
+      const sf = await upsertSurveyFeature(
+        null,
+        drawTrenchLayer,
+        layerName,
+        geometry,
+        {},
+        null,
+        null,
+        `Engineer-drew trench (${coords.length} vertices, ${lengthM.toFixed(1)} m)`,
+      );
+      if (!sf) {
+        showToast('Save failed — check the server connection and retry', 'error');
+        return; // keep the drawn vertices so a retry does not lose the line
+      }
+      pushUndo({
+        featureId: sf.id,
+        layerId: drawTrenchLayer,
+        oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+        timestamp: Date.now(),
+        surveyUndo: {
+          surveyFeatureId: sf.id,
+          layerId: drawTrenchLayer,
+          previousGeometry: geometry,
+          previousAttributes: {},
+          previousStatus: 'removed',
+          description: 'Undo: remove drawn trench',
+        },
+      });
+      showToast(
+        sf.sync_status === 'pending'
+          ? `Trench kept on device (${coords.length} vertices) — will sync when back online`
+          : `Trench saved — ${coords.length} vertices, ${lengthM >= 1000 ? `${(lengthM / 1000).toFixed(3)} km` : `${lengthM.toFixed(1)} m`}`,
+        'success',
+      );
+      setDrawTrenchPoints([]);
+      setDrawTrenchSnapLabel(null);
+      setDrawTrenchActive(false);
+      autoOverlayOnEdit();
+      console.log(`[DrawTrench] Saved ${sf.id} — ${coords.length} vertices on ${drawTrenchLayer}`);
+    } catch (err) {
+      console.error('[DrawTrench] Save failed:', err);
+      showToast('Save failed — check the server connection and retry', 'error');
+    } finally {
+      setDrawTrenchBusy(false);
+    }
+  }, [drawTrenchBusy, drawTrenchPoints, drawTrenchLayer, drawTrenchLengthM, activeLayerNames, upsertSurveyFeature, pushUndo, showToast, autoOverlayOnEdit]);
+
   // ── Draw Segment: independent two-point tool ───────────────────────────
   // Unlike Reroute, this tool never edits the selected line's existing path.
   // It creates exactly one new LineString from the nearest point on the
@@ -2894,21 +3576,32 @@ export default function MapScreen() {
   );
 
   // ── Check if temp line has unsaved changes ──
+  // ── Check if temp line has unsaved changes ──
+  // Dirty means the WORKING COPY differs from the baseline by a real distance.
+  // Merely opening an edit tool (Reroute / Del Section / Draw Segment) must
+  // never show "Unsaved" or arm Save — nothing has moved yet. The 0.5 m
+  // threshold matches handleSaveLine's no-op guard, so a Save that would be
+  // rejected can never look armed.
   const hasUnsavedLineChanges = useMemo(() => {
-    // An active reroute/edit session counts as unsaved so Save is always
-    // enabled mid-edit — a drag can be terminated before the release handler
-    // persists it, and re-entering reroute must never strand the engineer
-    // with a disabled Save button.
-    if (lineMoveMode) return true;
     if (!tempLineCoords || !tempLineOriginal) return false;
     if (tempLineCoords.length !== tempLineOriginal.length) return true;
     for (let i = 0; i < tempLineCoords.length; i++) {
-      if (tempLineCoords[i][0] !== tempLineOriginal[i][0] || tempLineCoords[i][1] !== tempLineOriginal[i][1]) {
-        return true;
-      }
+      const a = tempLineCoords[i];
+      const b = tempLineOriginal[i];
+      if (!a || !b) return true;
+      const meters = Math.hypot(a[0] - b[0], a[1] - b[1]) * 111000;
+      if (meters > 0.5) return true;
     }
     return false;
-  }, [lineMoveMode, tempLineCoords, tempLineOriginal]);
+  }, [tempLineCoords, tempLineOriginal]);
+
+  // ── Exactly ONE active line tool at a time (D2) ─────────────────────────
+  // lineMoveMode is the shared "line is being edited" flag (it drives the temp
+  // preview layer + vertex handles), so it stays true for every tool. The
+  // ACTIVE tool — what the buttons, hint and header advertise — is the armed
+  // lineToolMode, falling back to plain Reroute when no tool is armed.
+  const activeLineTool: 'move' | 'delete-section' | 'continue-line' | 'split-here' | 'route-around' | null =
+    lineToolMode ?? (lineMoveMode ? 'move' : null);
 
   // ── Memoized vertex drag target — points at the temp preview layer during move mode.
   // Vertex markers render on this temp layer so they follow tempLineCoords state.
@@ -2937,6 +3630,63 @@ export default function MapScreen() {
       console.log(`[MoveMode] Vertex ${vertexIdx} moved to [${newLng.toFixed(6)}, ${newLat.toFixed(6)}]`);
     },
     [],
+  );
+
+  // ── Pre-Save bundle plan ───────────────────────────────────────────────
+  // Reroute relays every corridor layer riding the moved region. Show exactly
+  // which ones (and how many features) before Save, with per-layer opt-out,
+  // instead of relaying silently and letting the engineer find out later.
+  // Only plain Reroute relays a bundle: Remove span / Extend line / Split here
+  // are independent operations on the selected line.
+  const bundlePlan = useMemo<BundlePlanGroup[]>(() => {
+    if (!lineMoveMode || lineToolMode !== null) return [];
+    if (!selectedLineFeature || !tempLineCoords || !tempLineOriginal) return [];
+    if (!hasUnsavedLineChanges) return [];
+    return planBundleReroute(
+      activeGeojson,
+      surveyFeatures,
+      selectedLineFeature.layerId,
+      tempLineOriginal,
+      tempLineCoords,
+      8,
+    );
+  }, [lineMoveMode, lineToolMode, selectedLineFeature, tempLineCoords, tempLineOriginal, hasUnsavedLineChanges, activeGeojson, surveyFeatures]);
+
+  // ── Long-press on the working copy: add a bend / remove a vertex ──────
+  // Both gestures edit the temp working copy only — nothing reaches the
+  // survey-features store until Save, and Undo restores the baseline.
+  const handleSegmentLongPress = useCallback(
+    (_featureId: string, _layerId: string, lng: number, lat: number) => {
+      setTempLineCoords((prev) => {
+        if (!prev) return prev;
+        // insertVertexAtPoint projects the press onto the nearest segment
+        // and refuses a point that lands on top of an existing vertex.
+        const res = insertVertexAtPoint(prev, lng, lat);
+        if (!res) {
+          showToast('Too close to an existing vertex — no bend added', 'warning');
+          return prev;
+        }
+        showToast(`Bend added at vertex ${res.insertIdx} — drag it to route around the works`, 'success');
+        return res.updated;
+      });
+    },
+    [showToast],
+  );
+
+  const handleVertexLongPress = useCallback(
+    (_featureId: string, _layerId: string, vertexIdx: number) => {
+      setTempLineCoords((prev) => {
+        if (!prev) return prev;
+        const updated = deleteVertex(prev, vertexIdx);
+        if (!updated) {
+          showToast('A line keeps at least 2 vertices — that one stays', 'warning');
+          return prev;
+        }
+        showToast(`Vertex ${vertexIdx} removed — ${prev.length} → ${updated.length} vertices`, 'success');
+        return updated;
+      });
+    },
+    [showToast],
   );
 
   // ── Undo for in-progress LINE edits ────────────────────────────────────
@@ -3213,12 +3963,26 @@ export default function MapScreen() {
   // original_hld_feature = null indicates this is an engineer-created point.
   const handleEmptyMapClick = useCallback(
     (lng: number, lat: number) => {
+      // ── Draw trench: every map tap appends a vertex (A→B→C→D…). Checked
+      // first so a tap can never deselect or start another tool mid-draw.
+      if (drawTrenchActive) {
+        handleTrenchTap([lng, lat]);
+        return;
+      }
+      // ── Route around works: tapping empty ground still sets the zone ──
+      if (lineToolMode === 'route-around') {
+        handleRouteAroundTap([lng, lat]);
+        return;
+      }
       // ── Draw Segment mode: empty-area taps place the next path point ──
       // (A→B→C→D…). Must be checked BEFORE deselecting the line below.
       if (lineToolMode === 'continue-line' && selectedLineFeature && tempLineCoords) {
         handleContinueLineTap('', '', [lng, lat]);
         return;
       }
+      // Empty ground = no overlapping-feature stack to cycle through.
+      setTapStack([]);
+      setTapStackLngLat(null);
       // Clear line selection when tapping empty area
       setSelectedLineFeature(null);
       setSelectedPolygonFeature(null);
@@ -3285,7 +4049,7 @@ export default function MapScreen() {
         autoOverlayOnEdit();
       }
     },
-    [geoMode, addPointTargetLayer, activeLayerNames, upsertSurveyFeature, autoOverlayOnEdit, lineToolMode, selectedLineFeature, tempLineCoords, handleContinueLineTap],
+    [geoMode, addPointTargetLayer, activeLayerNames, upsertSurveyFeature, autoOverlayOnEdit, lineToolMode, selectedLineFeature, tempLineCoords, handleContinueLineTap, drawTrenchActive, handleTrenchTap, handleRouteAroundTap],
   );
 
   // Clear line selection when geoMode changes away from select (entering add_point)
@@ -3707,6 +4471,14 @@ export default function MapScreen() {
             layers={orderedMapLayers}
             emptyState={mapEmptyState}
             onFeatureClick={(featureId, layerId, lngLat, screenPt) => {
+              // ── Draw trench: a tap on ANY feature (or empty ground) appends a
+              // vertex, snapped to the feature that was hit.
+              if (drawTrenchActive) {
+                const snapped = findTrenchSnap(lngLat);
+                setDrawTrenchSnapLabel(snapped.label);
+                setDrawTrenchPoints((prev) => [...prev, [snapped.lng, snapped.lat] as [number, number]]);
+                return;
+              }
               if (geoMode === 'delete_feature') {
                 handleDeleteFeature(featureId, layerId);
                 return;
@@ -3717,6 +4489,18 @@ export default function MapScreen() {
                 return;
               }
 
+              // ── Split here: cut the line at the tapped point ──
+              if (lineToolMode === 'split-here') {
+                handleSplitTap(featureId, layerId, lngLat);
+                return;
+              }
+
+              // ── Route around works: the tap sets the no-go zone centre ──
+              if (lineToolMode === 'route-around') {
+                handleRouteAroundTap(lngLat);
+                return;
+              }
+
               // ── Continue Line: dedicated vertex-anchor + connect handler ──
               if (lineToolMode === 'continue-line') {
                 handleContinueLineTap(featureId, layerId, lngLat);
@@ -3724,9 +4508,18 @@ export default function MapScreen() {
               }
               handleMapFeatureClick(featureId, layerId, lngLat, screenPt);
             }}
+            onFeatureCandidates={(candidates, lngLat, screenPt) => {
+              setTapStack(candidates);
+              setTapStackLngLat(lngLat);
+              setTapStackScreenPt(screenPt);
+            }}
             onEmptyAreaClick={handleEmptyMapClick}
             onFeatureDragEnd={handleFeatureDragEnd}
             onVertexDragEnd={lineMoveMode && tempLineCoords && lineToolMode === null ? handleVertexDragEnd : undefined}
+            onVertexLongPress={activeLineTool === 'move' ? handleVertexLongPress : undefined}
+            onSegmentLongPress={activeLineTool === 'move' ? handleSegmentLongPress : undefined}
+            // Split here needs vertex handles hidden (there is nothing to drag)
+            // but the line still needs to be tappable, which it is by default.
             vertexDragTarget={memoizedVertexTarget}
             snapEnabled={lineMoveMode && lineToolMode === null}
             snapRadiusM={4}
@@ -3918,6 +4711,28 @@ export default function MapScreen() {
             />
           )}
 
+          {/* Draw Trench panel — polyline create tool */}
+          {viewMode === 'map' && drawTrenchActive && (
+            <DrawTrenchPanel
+              layers={drawLineLayers}
+              targetLayer={drawTrenchLayer}
+              onTargetLayerChange={setDrawTrenchLayer}
+              pointCount={drawTrenchPoints.length}
+              snapLabel={drawTrenchSnapLabel}
+              busy={drawTrenchBusy}
+              onUndoPoint={handleTrenchUndoPoint}
+              onCancel={handleTrenchCancel}
+              onSave={handleTrenchSave}
+              lengthLabel={
+                drawTrenchPoints.length >= 2
+                  ? drawTrenchLengthM >= 1000
+                    ? `${(drawTrenchLengthM / 1000).toFixed(3)} km`
+                    : `${drawTrenchLengthM.toFixed(1)} m`
+                  : null
+              }
+            />
+          )}
+
           {/* Line Selection Toolbar — appears when a line feature is tapped */}
           {viewMode === 'map' && selectedLineFeature && !editingFeature && (
             <LineSelectionToolbar
@@ -3925,16 +4740,35 @@ export default function MapScreen() {
               onDeselect={handleLineDeselect}
               undoCount={hasUnsavedLineChanges ? 1 : undoCount}
               onUndo={handleLineUndo}
-              moveMode={lineMoveMode}
+              moveMode={activeLineTool === 'move'}
               onToggleMove={handleToggleMove}
               onSave={handleSaveLine}
               hasUnsavedChanges={hasUnsavedLineChanges}
               onDeleteSection={handleDeleteSectionToggle}
-              deleteSectionMode={lineToolMode === 'delete-section'}
+              deleteSectionMode={activeLineTool === 'delete-section'}
               deleteSectionStep={deleteSectionRange ? (deleteSectionRange[0] === deleteSectionRange[1] ? 1 : 2) : 0}
               onDeleteConfirm={deleteSectionRange && deleteSectionRange[0] !== deleteSectionRange[1] ? handleDeleteSectionConfirm : undefined}
               onDeleteFeature={handleLineDelete}
-              continueMode={lineToolMode === 'continue-line'}
+              onSplit={handleSplitToggle}
+              splitMode={activeLineTool === 'split-here'}
+              onRouteAround={handleRouteAroundToggle}
+              routeAroundMode={activeLineTool === 'route-around'}
+              obstacleRadiusM={obstacleRadiusM}
+              onObstacleRadiusChange={handleObstacleRadiusChange}
+              detourImpactLabel={detourImpactLabel}
+              onAttributes={handleLineAttributes}
+              bundleGroups={bundlePlan.map((g) => ({
+                layerId: g.layerId,
+                layerName: g.layerName,
+                count: g.items.length,
+                enabled: !bundleSkipLayers.includes(g.layerId),
+              }))}
+              onToggleBundleLayer={(layerId) =>
+                setBundleSkipLayers((prev) =>
+                  prev.includes(layerId) ? prev.filter((l) => l !== layerId) : [...prev, layerId],
+                )
+              }
+              continueMode={activeLineTool === 'continue-line'}
               onContinue={handleContinueToggle}
               continueLineStep={continueLineAnchor === null ? 0 : continueLinePoints >= 1 ? 2 : 1}
               continueLineSegments={continueLinePoints}
@@ -3984,6 +4818,30 @@ export default function MapScreen() {
               onNotesChange={setNotesDraft}
               onSaveNotes={handleSaveNotes}
               hasUnsavedNotes={notesDraft !== (featureNotes[selectedFeaturePopup.id] ?? '')}
+              // Overlapping-feature cycle chip: only shown when the tap really
+              // hit several features AND the popup shows one of them.
+              overlapCount={
+                tapStack.length > 1 &&
+                tapStack.some((c) => c.featureId === selectedFeaturePopup.id)
+                  ? tapStack.length
+                  : 0
+              }
+              overlapIndex={Math.max(
+                0,
+                tapStack.findIndex((c) => c.featureId === selectedFeaturePopup.id),
+              )}
+              onCycleOverlap={() => {
+                if (tapStack.length < 2) return;
+                const cur = tapStack.findIndex((c) => c.featureId === selectedFeaturePopup.id);
+                const next = tapStack[(cur + 1) % tapStack.length];
+                if (!next) return;
+                handleMapFeatureClick(
+                  next.featureId,
+                  next.layerId,
+                  tapStackLngLat ?? [0, 0],
+                  tapStackScreenPt,
+                );
+              }}
             />
           )}
 
@@ -4144,6 +5002,28 @@ export default function MapScreen() {
                   activeOpacity={0.8}
                 >
                   <MapPin size={20} stroke={geoMode === 'add_point' ? colors.onSecondary : colors.textSecondary} />
+                </TouchableOpacity>
+              </View>
+              )}
+
+              {/* Draw trench — create a NEW survey LineString */}
+              {!isolateFeatureId && (
+              <View style={styles.toolRow}>
+                <View style={[styles.fabLabelPill, { backgroundColor: colors.surface }]}>
+                  <Text style={[styles.fabLabelText, { color: colors.textSecondary }]}>Draw Trench</Text>
+                </View>
+                <TouchableOpacity
+                  style={[styles.fab, {
+                    backgroundColor: drawTrenchActive ? '#FF8C00' : colors.surface,
+                    transform: [{ scale: drawTrenchActive ? 1.1 : 1 }],
+                  }]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Draw a new trench line on the map"
+                  accessibilityState={{ selected: drawTrenchActive }}
+                  onPress={handleTrenchToggle}
+                  activeOpacity={0.8}
+                >
+                  <Spline size={20} stroke={drawTrenchActive ? colors.onSecondary : colors.textSecondary} />
                 </TouchableOpacity>
               </View>
               )}

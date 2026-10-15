@@ -28,6 +28,7 @@ import Camera from 'lucide-react-native/icons/camera';
 import Crosshair from 'lucide-react-native/icons/crosshair';
 import ChevronDown from 'lucide-react-native/icons/chevron-down';
 import ChevronUp from 'lucide-react-native/icons/chevron-up';
+import Layers from 'lucide-react-native/icons/layers';
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -60,6 +61,12 @@ export interface FeaturePopupProps {
   onNotesChange: (text: string) => void;
   onSaveNotes: () => void;
   hasUnsavedNotes: boolean;
+  /** How many features were under the tap (0/1 = nothing to cycle) */
+  overlapCount?: number;
+  /** Zero-based position of THIS feature inside that stack */
+  overlapIndex?: number;
+  /** Advance to the next overlapping feature */
+  onCycleOverlap?: () => void;
 }
 
 // ── Arrow pointer size ────────────────────────────────────────────────────
@@ -91,6 +98,9 @@ export default function MapFeaturePopup({
   onNotesChange,
   onSaveNotes,
   hasUnsavedNotes,
+  overlapCount = 0,
+  overlapIndex = 0,
+  onCycleOverlap,
 }: FeaturePopupProps) {
   const colors = useThemeStore((s) => s.colors);
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -240,6 +250,21 @@ export default function MapFeaturePopup({
           {layerName}
         </Text>
 
+        {/* Overlapping features: several features share this tap point (a point
+            on a trench is the common case). Cycling beats zooming in. */}
+        {overlapCount > 1 && onCycleOverlap && (
+          <TouchableOpacity
+            style={[styles.overlapChip, { backgroundColor: colors.warning + '18', borderColor: colors.warning }]}
+            onPress={onCycleOverlap}
+            activeOpacity={0.7}
+          >
+            <Layers size={10} stroke={colors.warning} />
+            <Text style={[styles.overlapText, { color: colors.warning }]} numberOfLines={1}>
+              {overlapIndex + 1} of {overlapCount} here · tap to cycle
+            </Text>
+          </TouchableOpacity>
+        )}
+
         {/* Properties — show up to 6, expandable */}
         {properties.length > 0 && (
           <ScrollView
@@ -378,7 +403,12 @@ export default function MapFeaturePopup({
 const styles = StyleSheet.create({
   container: {
     position: 'absolute',
-    zIndex: 30,
+    // Above the map's view switcher (HLD / Survey / Overlay, zIndex 40) and
+    // below the loading overlay (100). At 30 the switcher sat ON TOP of a
+    // popup opened near the top of the map, covering its header and the
+    // "N of M here · tap to cycle" chip — so both were unclickable exactly
+    // where overlapping features (a point on a trench) are most common.
+    zIndex: 45,
     // pointerEvents: 'box-none', // not valid in RN, handle via View
   },
   card: {
@@ -468,6 +498,21 @@ const styles = StyleSheet.create({
   expandText: {
     fontSize: 9,
     fontWeight: '600',
+  },
+  overlapChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 5,
+    borderWidth: 1,
+    marginTop: 2,
+    marginBottom: 2,
+  },
+  overlapText: {
+    fontSize: 8,
+    fontWeight: '700',
   },
   photoReq: {
     flexDirection: 'row',

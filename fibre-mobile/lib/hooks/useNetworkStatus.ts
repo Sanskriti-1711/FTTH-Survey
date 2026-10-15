@@ -1,6 +1,24 @@
 import { useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
 import { useOfflineStore } from '../stores/offline';
+import { useSurveyFeaturesStore } from '../stores/survey-features';
+
+/**
+ * Replay survey edits that were queued while the device was offline.
+ * Fired every time connectivity comes back (and once on startup, in case a
+ * previous flush never completed).
+ */
+function flushOfflineEdits() {
+  useSurveyFeaturesStore
+    .getState()
+    .flushPendingEdits()
+    .then(({ synced, failed }) => {
+      if (synced > 0 || failed > 0) {
+        console.log(`[Offline] Survey edit replay: ${synced} synced, ${failed} still queued`);
+      }
+    })
+    .catch((err) => console.warn('[Offline] Survey edit replay failed:', err));
+}
 
 // ── Real NetInfo integration ─────────────────────────────────────────────
 // On native: uses @react-native-community/netinfo
@@ -21,6 +39,7 @@ export function useNetworkStatus() {
       const handleOnline = () => {
         useOfflineStore.getState().setOnline(true);
         useOfflineStore.getState().setConnectivitySource('real');
+        flushOfflineEdits();
       };
       const handleOffline = () => {
         useOfflineStore.getState().setOnline(false);
@@ -30,6 +49,7 @@ export function useNetworkStatus() {
       // Set initial state
       store.setOnline(navigator.onLine);
       store.setConnectivitySource('real');
+      if (navigator.onLine) flushOfflineEdits();
 
       window.addEventListener('online', handleOnline);
       window.addEventListener('offline', handleOffline);
@@ -54,8 +74,11 @@ export function useNetworkStatus() {
         const unsubscribe = NetInfo.addEventListener(
           (state: { isConnected: boolean | null; isInternetReachable: boolean | null }) => {
             const online = state.isConnected ?? state.isInternetReachable ?? false;
+            const wasOnline = useOfflineStore.getState().isOnline;
             useOfflineStore.getState().setOnline(online);
             useOfflineStore.getState().setConnectivitySource('real');
+            // Back online after an offline stretch → replay queued edits.
+            if (online && !wasOnline) flushOfflineEdits();
           }
         );
 

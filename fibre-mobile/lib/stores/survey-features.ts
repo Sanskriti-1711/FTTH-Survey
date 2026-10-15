@@ -12,8 +12,64 @@
 import { create } from 'zustand';
 import * as surveyApi from '../api/survey';
 import { useProjectStore } from './project';
+import { useOfflineStore } from './offline';
 import type { TypedSurveyPayload } from '../api/survey';
 import type { SurveyFeatureData, GeoJSONFeature, LayerDisplayMode } from '../utils/types';
+
+// ── Offline edit queue ────────────────────────────────────────────────────
+// Every edit used to be written straight to the API, so a Save in a street
+// with no signal simply failed: the reroute was lost even though the store
+// has an offline mode and a pending-sync counter. Writes that cannot reach
+// the server are now applied to the LOCAL store with sync_status='pending' and
+// queued; they are replayed in order as soon as the device is back online.
+//
+// The queue lives for the app session (the app has no persistent key/value
+// store wired up); the local survey features themselves stay in the store, so
+// nothing is lost while the app is running.
+export type PendingSurveyEdit =
+  | { kind: 'create'; localId: string; layerId: string; body: Parameters<typeof surveyApi.createSurveyFeature>[0] }
+  | { kind: 'upsert'; localId: string; layerId: string; body: Parameters<typeof surveyApi.upsertSurveyFeature>[0] }
+  | { kind: 'update'; surveyFeatureId: string; layerId: string; data: Partial<SurveyFeatureData> };
+
+/** True for failures that mean "no usable network" rather than "server said no". */
+export function isOfflineError(err: unknown): boolean {
+  if (!err) return false;
+  const status = (err as { status?: number }).status;
+  if (status === 0) return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/no internet|network request failed|failed to fetch|networkerror|load failed|timed? ?out/i.test(msg)) return true;
+  // fetch() rejects with a TypeError when the request never reaches a server.
+  return typeof TypeError !== 'undefined' && err instanceof TypeError;
+}
+
+function localFeatureId(): string {
+  return `local-sf-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
+/** Apply a PATCH to the local store only (offline path). */
+function applyLocalUpdate(
+  set: (fn: (s: SurveyFeaturesState) => Partial<SurveyFeaturesState>) => void,
+  get: () => SurveyFeaturesState,
+  surveyFeatureId: string,
+  layerId: string,
+  data: Partial<Pick<SurveyFeatureData, 'survey_geometry' | 'survey_attributes' | 'survey_status' | 'change_reason'>>,
+): void {
+  const cleanData: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(data ?? {})) {
+    if (v !== undefined) cleanData[k] = v;
+  }
+  void get;
+  set((s) => ({
+    surveyFeatures: {
+      ...s.surveyFeatures,
+      [layerId]: (s.surveyFeatures[layerId] ?? []).map((sf) =>
+        sf.id === surveyFeatureId
+          ? ({ ...sf, ...cleanData, sync_status: 'pending', updated_at: new Date().toISOString() } as SurveyFeatureData)
+          : sf,
+      ),
+    },
+  }));
+}
 
 // ── Color scheme for survey features (orange) ─────────────────────────────
 export const SURVEY_COLOR = '#FF8C00'; // Dark orange — survey edits
@@ -84,6 +140,16 @@ interface SurveyFeaturesState {
 
   /** Get survey features for a specific HLD feature (if any exist) */
   getSurveyFeatureForHld: (hldFeatureId: string) => SurveyFeatureData | null;
+
+  // ── Offline queue ───────────────────────────────────────────────────────
+  /** Edits waiting for a connection, in the order they were made */
+  pendingEdits: PendingSurveyEdit[];
+  /** True while a replay is running */
+  isFlushing: boolean;
+  /** Queue one edit and reflect it locally */
+  enqueuePendingEdit: (edit: PendingSurveyEdit) => void;
+  /** Replay the queue (called when connectivity returns) */
+  flushPendingEdits: () => Promise<{ synced: number; failed: number }>;
 }
 
 export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => ({
@@ -94,6 +160,81 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
   displayMode: 'hld', // Default: show HLD only (blue)
   focusFeatureId: null,
   isolateFeatureId: null,
+  pendingEdits: [],
+  isFlushing: false,
+
+  enqueuePendingEdit: (edit) => {
+    set((s) => ({ pendingEdits: [...s.pendingEdits, edit] }));
+    useOfflineStore.getState().incrementPending();
+    console.log(`[SurveyFeatures] Queued offline ${edit.kind} edit — ${get().pendingEdits.length} pending`);
+  },
+
+  flushPendingEdits: async () => {
+    const queue = get().pendingEdits;
+    if (queue.length === 0 || get().isFlushing) return { synced: 0, failed: 0 };
+    if (!useOfflineStore.getState().isOnline) return { synced: 0, failed: queue.length };
+    set({ isFlushing: true });
+    let synced = 0;
+    let failed = 0;
+    const remaining: PendingSurveyEdit[] = [];
+
+    // Replace the local placeholder with the server record so the map/list stop
+    // showing a temporary id, and mark it synced. Updates queued against a
+    // local id were folded into its create/upsert body when they were made.
+    const applyServerRecord = (localId: string, server: SurveyFeatureData) => {
+      set((s) => {
+        const next: Record<string, SurveyFeatureData[]> = { ...s.surveyFeatures };
+        for (const [layerId, list] of Object.entries(next)) {
+          const idx = list.findIndex((sf) => sf.id === localId);
+          if (idx >= 0) {
+            const updated = [...list];
+            updated[idx] = { ...server, sync_status: 'synced' };
+            next[layerId] = updated;
+          }
+        }
+        return { surveyFeatures: next };
+      });
+    };
+
+    for (const edit of queue) {
+      try {
+        if (edit.kind === 'create') {
+          const res = await surveyApi.createSurveyFeature(edit.body);
+          applyServerRecord(edit.localId, res);
+        } else if (edit.kind === 'upsert') {
+          const res = await surveyApi.upsertSurveyFeature(edit.body);
+          applyServerRecord(edit.localId, res);
+        } else {
+          const res = await surveyApi.updateSurveyFeature(edit.surveyFeatureId, edit.data);
+          const cleanData: Record<string, unknown> = {};
+          for (const [k, v] of Object.entries(edit.data ?? {})) {
+            if (v !== undefined) cleanData[k] = v;
+          }
+          set((s) => ({
+            surveyFeatures: {
+              ...s.surveyFeatures,
+              [edit.layerId]: (s.surveyFeatures[edit.layerId] ?? []).map((sf) =>
+                sf.id === edit.surveyFeatureId
+                  ? ({ ...res, ...cleanData, sync_status: 'synced' } as SurveyFeatureData)
+                  : sf,
+              ),
+            },
+          }));
+        }
+        synced++;
+        useOfflineStore.getState().decrementPending();
+      } catch (err) {
+        failed++;
+        remaining.push(edit);
+        console.warn('[SurveyFeatures] Replay failed, edit stays queued:', err instanceof Error ? err.message : err);
+      }
+    }
+
+    set({ pendingEdits: remaining, isFlushing: false });
+    if (synced > 0) useOfflineStore.getState().setLastSync(new Date().toISOString());
+    console.log(`[SurveyFeatures] Offline replay: ${synced} synced, ${failed} still queued`);
+    return { synced, failed };
+  },
 
   fetchSurveyFeatures: async (projectId: string) => {
     if (projectId.startsWith('imported-')) {
@@ -163,12 +304,10 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
       return null;
     }
 
-    try {
-      let result: SurveyFeatureData;
-
-      if (hldFeatureId) {
-        // ── Existing HLD feature → upsert ──
-        result = await surveyApi.upsertSurveyFeature({
+    // ── Build the request body once so an offline queue entry is byte-identical
+    // to what would have been sent on the wire.
+    const hldBody = hldFeatureId
+      ? {
           original_hld_feature: hldFeatureId,
           project: activeProject.id,
           layer_id: layerId,
@@ -180,15 +319,12 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
           change_reason: changeReason,
           ...(typedData || {}),
           ...(gpsMeta
-            ? {
-                gps_accuracy_m: gpsMeta.accuracyM ?? null,
-                gps_quality: gpsMeta.quality || '',
-              }
+            ? { gps_accuracy_m: gpsMeta.accuracyM ?? null, gps_quality: gpsMeta.quality || '' }
             : {}),
-        });
-      } else {
-        // ── Brand-new engineer-created feature (no HLD parent) → create ──
-        result = await surveyApi.createSurveyFeature({
+        }
+      : null;
+    const newBody = !hldFeatureId
+      ? {
           original_hld_feature: null,
           project: activeProject.id,
           layer_id: layerId,
@@ -197,18 +333,78 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
           original_attributes: originalAttributes ?? null,
           survey_geometry: surveyGeometry,
           survey_attributes: surveyAttributes ?? {},
-          survey_status: 'new',
+          survey_status: 'new' as const,
           version_number: 1,
-          sync_status: 'pending',
+          sync_status: 'pending' as const,
           change_reason: changeReason ?? '',
           ...(typedData || {}),
           ...(gpsMeta
-            ? {
-                gps_accuracy_m: gpsMeta.accuracyM ?? null,
-                gps_quality: gpsMeta.quality || '',
-              }
+            ? { gps_accuracy_m: gpsMeta.accuracyM ?? null, gps_quality: gpsMeta.quality || '' }
             : {}),
-        });
+        }
+      : null;
+
+    /** Keep the edit locally when the server is unreachable, and queue it. */
+    const keepOffline = (): SurveyFeatureData => {
+      // Reuse the pending record for this HLD feature / layer so repeated
+      // offline saves update one local feature (and one queue entry) instead
+      // of piling up duplicates.
+      const existingLocal = (get().surveyFeatures[layerId] ?? []).find(
+        (sf) => sf.sync_status === 'pending' && (hldFeatureId ? sf.original_hld_feature === hldFeatureId : true),
+      );
+      const id = existingLocal?.id ?? localFeatureId();
+      const local: SurveyFeatureData = {
+        id,
+        original_hld_feature: hldFeatureId,
+        hld_feature_id: hldFeatureId,
+        project: activeProject.id,
+        project_name: activeProject.name ?? '',
+        engineer: existingLocal?.engineer ?? '',
+        engineer_name: existingLocal?.engineer_name ?? '',
+        layer_id: layerId,
+        layer_name: layerName,
+        original_geometry: (originalGeometry ?? existingLocal?.original_geometry ?? null) as SurveyFeatureData['original_geometry'],
+        original_attributes: (originalAttributes ?? existingLocal?.original_attributes ?? null) as SurveyFeatureData['original_attributes'],
+        survey_geometry: surveyGeometry as SurveyFeatureData['survey_geometry'],
+        survey_attributes: (surveyAttributes ?? existingLocal?.survey_attributes ?? {}) as SurveyFeatureData['survey_attributes'],
+        survey_status: existingLocal?.survey_status ?? (hldFeatureId ? 'modified' : 'new'),
+        version_number: existingLocal?.version_number ?? 1,
+        sync_status: 'pending',
+        change_reason: changeReason ?? existingLocal?.change_reason ?? '',
+        created_at: existingLocal?.created_at ?? new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      set((s) => {
+        const list = s.surveyFeatures[layerId] ?? [];
+        const idx = list.findIndex((sf) => sf.id === id);
+        const nextList = idx >= 0 ? list.map((sf) => (sf.id === id ? local : sf)) : [...list, local];
+        return { surveyFeatures: { ...s.surveyFeatures, [layerId]: nextList } };
+      });
+
+      const edit: PendingSurveyEdit = hldBody
+        ? { kind: 'upsert', localId: id, layerId, body: hldBody as Parameters<typeof surveyApi.upsertSurveyFeature>[0] }
+        : { kind: 'create', localId: id, layerId, body: newBody as Parameters<typeof surveyApi.createSurveyFeature>[0] };
+      get().enqueuePendingEdit(edit);
+      console.log(`[SurveyFeatures] Offline — ${hldFeatureId ? 'upsert' : 'create'} kept locally as ${id}`);
+      return local;
+    };
+
+    if (!useOfflineStore.getState().isOnline) {
+      return keepOffline();
+    }
+
+    try {
+      let result: SurveyFeatureData;
+
+      if (hldBody) {
+        // ── Existing HLD feature → upsert ──
+        result = await surveyApi.upsertSurveyFeature(hldBody);
+      } else {
+        // ── Brand-new engineer-created feature (no HLD parent) → create ──
+        result = await surveyApi.createSurveyFeature(
+          newBody as Parameters<typeof surveyApi.createSurveyFeature>[0],
+        );
       }
 
       // Update local state
@@ -234,6 +430,11 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
       console.log(`[SurveyFeatures] ${hldFeatureId ? 'Upserted' : 'Created'} survey feature → ${result.id}`);
       return result;
     } catch (err: unknown) {
+      // No usable network → keep the edit locally and queue it instead of
+      // throwing the engineer's work away with a "Save failed" toast.
+      if (isOfflineError(err)) {
+        return keepOffline();
+      }
       const message = err instanceof Error ? err.message : 'Failed to upsert survey feature';
       console.error('[SurveyFeatures] upsertSurveyFeature:', message);
       set({ error: message });
@@ -242,6 +443,38 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
   },
 
   updateSurveyFeature: async (surveyFeatureId, layerId, data) => {
+    // An edit of a feature that only exists locally folds into that feature's
+    // queued create/upsert — never into a PATCH for an id the server has never
+    // seen. The queue stays one entry per feature.
+    if (surveyFeatureId.startsWith('local-sf-')) {
+      const cleanData: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(data ?? {})) if (v !== undefined) cleanData[k] = v;
+      set((s) => ({
+        surveyFeatures: {
+          ...s.surveyFeatures,
+          [layerId]: (s.surveyFeatures[layerId] ?? []).map((sf) =>
+            sf.id === surveyFeatureId
+              ? ({ ...sf, ...cleanData, updated_at: new Date().toISOString() } as SurveyFeatureData)
+              : sf,
+          ),
+        },
+        pendingEdits: get().pendingEdits.map((edit) =>
+          (edit.kind === 'create' || edit.kind === 'upsert') && edit.localId === surveyFeatureId
+            ? ({ ...edit, body: { ...edit.body, ...cleanData } } as PendingSurveyEdit)
+            : edit,
+        ),
+      }));
+      console.log(`[SurveyFeatures] Local-only edit folded into queued write ${surveyFeatureId}`);
+      return;
+    }
+
+    const isOffline = !useOfflineStore.getState().isOnline;
+    if (isOffline) {
+      applyLocalUpdate(set, get, surveyFeatureId, layerId, data);
+      get().enqueuePendingEdit({ kind: 'update', surveyFeatureId, layerId, data });
+      return;
+    }
+
     try {
       const result = await surveyApi.updateSurveyFeature(surveyFeatureId, data);
       set((s) => {
@@ -261,6 +494,13 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
         return { surveyFeatures: { ...s.surveyFeatures, [layerId]: updated } };
       });
     } catch (err: unknown) {
+      // No usable network: apply locally and queue. A real server rejection
+      // (4xx/5xx) still throws so callers can block submission/approval.
+      if (isOfflineError(err)) {
+        applyLocalUpdate(set, get, surveyFeatureId, layerId, data);
+        get().enqueuePendingEdit({ kind: 'update', surveyFeatureId, layerId, data });
+        return;
+      }
       const message = err instanceof Error ? err.message : 'Failed to update survey feature';
       console.error('[SurveyFeatures] updateSurveyFeature:', message);
       set({ error: message });

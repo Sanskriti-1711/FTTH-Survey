@@ -1,13 +1,15 @@
 // ── Line Selection Toolbar ──────────────────────────────────────────────────
 // Bottom toolbar that appears when a LINE feature is tapped on the map.
 //
-// Actions:
-//   Reroute — toggles Reroute Mode (displays draggable vertex handles)
-//   Del Section — removes a section of the line between two selected vertices
+// Actions (labels say what they do to the line, not what the code calls it):
+//   Edit shape — toggles vertex editing (draggable handles + long-press bend)
+//   Split here — cuts the line into two spans at the tapped point (new chamber)
+//   Remove span — removes the section between two selected vertices
+//   Extend line — continues the line from a vertex to a new point
+//   Attributes — opens the survey attribute form for this line
 //   Delete — logical delete of the feature (survey layer stays intact)
-//   Draw Segment — extends the line from a selected vertex to a new point
 //   Undo — reverts the most recent edit
-//   Save — persists the temporary geometry to the survey-features store
+//   Save — rightmost, full-width primary; persists the working copy
 
 import React, { useEffect, useRef } from 'react';
 import type { ComponentType } from 'react';
@@ -24,9 +26,12 @@ import { useThemeStore } from '../stores/theme';
 import { Spacing, Radius } from '../theme/colors';
 import type { EditingFeature } from './GeometryEditor';
 import Route from 'lucide-react-native/icons/route';
+import Scissors from 'lucide-react-native/icons/scissors';
+import Construction from 'lucide-react-native/icons/construction';
 import Axe from 'lucide-react-native/icons/axe';
 import Trash2 from 'lucide-react-native/icons/trash-2';
 import CornerUpLeft from 'lucide-react-native/icons/corner-up-left';
+import ClipboardList from 'lucide-react-native/icons/clipboard-list';
 import Undo2 from 'lucide-react-native/icons/undo-2';
 import Save from 'lucide-react-native/icons/save';
 import X from 'lucide-react-native/icons/x';
@@ -48,8 +53,32 @@ interface LineSelectionToolbarProps {
   onToggleMove?: () => void;
   /** Called when user taps the Save button */
   onSave?: () => void;
-  /** Called when user taps the Delete Section button */
+  /** Called when user taps the Remove span (delete-section) button */
   onDeleteSection?: () => void;
+  /** Called when user taps the Split here button */
+  onSplit?: () => void;
+  /** Called when user taps the Route around works button */
+  onRouteAround?: () => void;
+  /** Whether the route-around tool is armed (waiting for the works location) */
+  routeAroundMode?: boolean;
+  /** Radius of the no-go area around the tapped works location */
+  obstacleRadiusM?: number;
+  /** Change the obstacle radius — the detour is recomputed from the baseline */
+  onObstacleRadiusChange?: (radiusM: number) => void;
+  /** Impact of the last detour: length delta, chambers, other lines affected */
+  detourImpactLabel?: string | null;
+  /** Whether Split here mode is armed (waiting for the tap on the line) */
+  splitMode?: boolean;
+  /** Called when user taps the Attributes button (opens the survey form) */
+  onAttributes?: () => void;
+  /**
+   * Corridor layers Save will also re-lay because they ride the moved region.
+   * Shown before Save so bundle propagation is never a surprise; each layer
+   * can be toggled off.
+   */
+  bundleGroups?: { layerId: string; layerName: string; count: number; enabled: boolean }[];
+  /** Toggle one bundle layer on/off (skipped layers stay untouched) */
+  onToggleBundleLayer?: (layerId: string) => void;
   /** Whether delete-section mode is active */
   deleteSectionMode?: boolean;
   /** Current step: 0=none, 1=start selected, 2=both selected */
@@ -83,11 +112,15 @@ interface ActionDef {
 }
 
 const ACTIONS: ActionDef[] = [
-  { id: 'move', label: 'Reroute', icon: Route },
-  { id: 'del_section', label: 'Del Section', icon: Axe, danger: true },
+  { id: 'move', label: 'Edit shape', icon: Route },
+  { id: 'split', label: 'Split here', icon: Scissors },
+  { id: 'route_around', label: 'Route around', icon: Construction },
+  { id: 'del_section', label: 'Remove span', icon: Axe, danger: true },
+  { id: 'continue', label: 'Extend line', icon: CornerUpLeft, accent: true },
+  { id: 'attributes', label: 'Attributes', icon: ClipboardList },
   { id: 'del_feature', label: 'Delete', icon: Trash2, danger: true },
-  { id: 'continue', label: 'Draw Segment', icon: CornerUpLeft, accent: true },
   { id: 'undo', label: 'Undo', icon: Undo2 },
+  // Save stays LAST so the primary action is the rightmost button.
   { id: 'save', label: 'Save', icon: Save, accent: true },
 ];
 
@@ -102,6 +135,16 @@ export default function LineSelectionToolbar({
   onToggleMove,
   onSave,
   onDeleteSection,
+  onSplit,
+  splitMode = false,
+  onRouteAround,
+  routeAroundMode = false,
+  obstacleRadiusM = 10,
+  onObstacleRadiusChange,
+  detourImpactLabel,
+  onAttributes,
+  bundleGroups,
+  onToggleBundleLayer,
   deleteSectionMode = false,
   deleteSectionStep = 0,
   onDeleteConfirm,
@@ -159,9 +202,11 @@ export default function LineSelectionToolbar({
             </Text>
             <Text style={[styles.headerSubtitle, { color: colors.textTertiary }]} numberOfLines={1}>
               {selectedFeature?.layerName ?? 'Line Layer'} · LineString
-              {moveMode && ' · Reroute Mode'}
-              {deleteSectionMode && ` · Del Section ${deleteSectionStep === 0 ? '' : deleteSectionStep === 1 ? '(select end)' : '(confirm)'}`}
-              {continueMode && ` · Draw Segment ${continueLineStep === 1 ? '(select point)' : continueLineStep === 2 ? '(ready to save)' : ''}`}
+              {moveMode && ' · Editing shape'}
+              {splitMode && ' · Split here (tap the line)'}
+              {routeAroundMode && ` · Route around works (${obstacleRadiusM} m)`}
+              {deleteSectionMode && ` · Remove span ${deleteSectionStep === 0 ? '' : deleteSectionStep === 1 ? '(select end)' : '(confirm)'}`}
+              {continueMode && ` · Extend line ${continueLineStep === 1 ? '(select point)' : continueLineStep === 2 ? '(ready to save)' : ''}`}
               {continueMode && continueSnapLabel && ` · ${continueSnapLabel}`}
               {moveMode && hasUnsavedChanges && ' · Unsaved'}
             </Text>
@@ -192,6 +237,9 @@ export default function LineSelectionToolbar({
           const isDeleteSection = action.id === 'del_section';
           const isDeleteFeature = action.id === 'del_feature';
           const isContinue = action.id === 'continue';
+          const isSplit = action.id === 'split';
+          const isRouteAround = action.id === 'route_around';
+          const isAttributes = action.id === 'attributes';
           const showBadge = isUndo && undoCount > 0;
 
           // ── Determine button state ──
@@ -200,6 +248,8 @@ export default function LineSelectionToolbar({
           const isSaveActive = isSave && hasUnsavedChanges;
           const isDeleteActive = isDeleteSection && deleteSectionMode;
           const isContinueActive = isContinue && continueMode;
+          const isSplitActive = isSplit && splitMode;
+          const isRouteAroundActive = isRouteAround && routeAroundMode;
 
           // Style overrides for active states
           let bgColor = colors.background;
@@ -210,38 +260,44 @@ export default function LineSelectionToolbar({
 
           opacity = 1;
           textColor = colors.textSecondary;
-          if (isMoveActive || isDeleteActive || isContinueActive) {
+          if (isMoveActive || isDeleteActive || isContinueActive || isSplitActive || isRouteAroundActive) {
             bgColor = '#FF8C00' + '20';
             borderColor = '#FF8C00';
             textColor = '#FF8C00';
           } else if (isSaveActive) {
-            bgColor = colors.primary + '20';
+            // Primary action once the working copy differs from the baseline.
+            bgColor = colors.primary;
             borderColor = colors.primary;
-            textColor = colors.primary;
-          } else if (isSave && !hasUnsavedChanges && !moveMode) {
-            // Save is enabled but nothing to save — dim it (never while an
-            // edit session like Reroute is active: Save must stay tappable).
+            textColor = colors.onPrimary;
+          } else if (isSave && !hasUnsavedChanges) {
+            // Nothing has actually changed yet — dim Save so an empty
+            // save can never look armed (matches handleSaveLine's 0.5 m
+            // no-op guard).
             opacity = 0.5;
           }
 
           return (
-            <View key={action.id} style={styles.actionWrapper}>
+            <View key={action.id} style={[styles.actionWrapper, isSave && styles.saveWrapper]}>
               <TouchableOpacity
                 style={[
                   styles.actionBtn,
+                  isSave && styles.saveBtn,
                   {
                     backgroundColor: bgColor,
                     borderColor,
                     opacity,
                   },
                 ]}
-                disabled={!isEnabled || (isSave && !hasUnsavedChanges && !moveMode && !continueMode && !deleteSectionMode)}
+                disabled={!isEnabled || (isSave && !hasUnsavedChanges)}
                 activeOpacity={0.7}
                 onPress={() => {
                   if (isDeleteSection && deleteSectionStep === 2 && onDeleteConfirm) onDeleteConfirm();
                   else if (isMove && onToggleMove) onToggleMove();
                   else if (isSave && onSave) onSave();
                   else if (isDeleteSection && onDeleteSection) onDeleteSection();
+                  else if (isSplit && onSplit) onSplit();
+                  else if (isRouteAround && onRouteAround) onRouteAround();
+                  else if (isAttributes && onAttributes) onAttributes();
                   else if (isDeleteFeature && onDeleteFeature) onDeleteFeature();
                   else if (isUndo && onUndo) onUndo();
                   else if (isContinue && onContinue) onContinue();
@@ -252,7 +308,17 @@ export default function LineSelectionToolbar({
                   style={[styles.actionLabel, { color: textColor }]}
                   numberOfLines={1}
                 >
-                  {isMove && moveMode ? 'Reroute: ON' : isDeleteSection && deleteSectionMode ? (deleteSectionStep === 2 ? 'Confirm' : 'Del: ON') : isContinue && continueMode ? 'Drawing: ON' : action.label}
+                  {isMove && moveMode
+                    ? 'Editing: ON'
+                    : isSplit && splitMode
+                      ? 'Tap line'
+                      : isRouteAround && routeAroundMode
+                        ? 'Tap works'
+                      : isDeleteSection && deleteSectionMode
+                        ? (deleteSectionStep === 2 ? 'Confirm' : 'Span: ON')
+                        : isContinue && continueMode
+                          ? 'Drawing: ON'
+                          : action.label}
                 </Text>
               </TouchableOpacity>
 
@@ -265,6 +331,21 @@ export default function LineSelectionToolbar({
                 </View>
               )}
 
+              {isSplit && (
+                <Text style={[styles.soonLabel, { color: splitMode ? '#FF8C00' : colors.textTertiary }]} numberOfLines={1}>
+                  {splitMode ? 'Where?' : 'New chamber'}
+                </Text>
+              )}
+              {isRouteAround && (
+                <Text style={[styles.soonLabel, { color: routeAroundMode ? '#FF8C00' : colors.textTertiary }]} numberOfLines={1}>
+                  {routeAroundMode ? `${obstacleRadiusM} m zone` : 'Works / closure'}
+                </Text>
+              )}
+              {isAttributes && (
+                <Text style={[styles.soonLabel, { color: colors.textTertiary }]} numberOfLines={1}>
+                  Field data
+                </Text>
+              )}
               {isDeleteSection && (
                 <Text style={[styles.soonLabel, { color: deleteSectionMode ? '#FF8C00' : colors.textTertiary }]}>
                   {deleteSectionMode ? (deleteSectionStep === 1 ? 'Tap end' : deleteSectionStep === 2 ? 'Confirm' : 'Ready') : 'Tap to start'}
@@ -282,7 +363,7 @@ export default function LineSelectionToolbar({
               )}
               {isMove && (
                 <Text style={[styles.soonLabel, { color: moveMode ? '#FF8C00' : colors.textTertiary }]}>
-                  {moveMode ? 'Active' : 'Tap to start'}
+                  {moveMode ? 'Active' : 'Vertices + bends'}
                 </Text>
               )}
               {isSave && (
@@ -300,10 +381,97 @@ export default function LineSelectionToolbar({
         })}
       </ScrollView>
 
+      {/* ── Route-around works: radius + measured impact ────────────────── */}
+      {routeAroundMode && (
+        <View style={[styles.bundleRow, { borderTopColor: colors.outlineLight }]}>
+          <Text style={[styles.bundleTitle, { color: colors.textTertiary }]} numberOfLines={1}>
+            No-go zone:
+          </Text>
+          {[5, 10, 20, 30].map((r) => {
+            const active = r === obstacleRadiusM;
+            return (
+              <TouchableOpacity
+                key={r}
+                style={[
+                  styles.bundleChip,
+                  {
+                    backgroundColor: active ? '#FF8C00' + '20' : colors.background,
+                    borderColor: active ? '#FF8C00' : colors.outlineLight,
+                  },
+                ]}
+                onPress={() => onObstacleRadiusChange?.(r)}
+                activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel={`Set the works no-go radius to ${r} metres`}
+              >
+                <Text style={[styles.bundleChipText, { color: active ? '#FF8C00' : colors.textTertiary }]}>
+                  {r} m
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      )}
+
+      {routeAroundMode && detourImpactLabel && (
+        <Text style={[styles.impactText, { color: colors.textSecondary }]} numberOfLines={2}>
+          {detourImpactLabel}
+        </Text>
+      )}
+
+      {/* ── Bundle propagation preview (Reroute only) ──────────────────── */}
+      {bundleGroups && bundleGroups.length > 0 && (
+        <View style={[styles.bundleRow, { borderTopColor: colors.outlineLight }]}>
+          <Text style={[styles.bundleTitle, { color: colors.textTertiary }]} numberOfLines={1}>
+            Saving also re-lays:
+          </Text>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.bundleChips}
+          >
+            {bundleGroups.map((g) => {
+              return (
+                <TouchableOpacity
+                  key={g.layerId}
+                  style={[
+                    styles.bundleChip,
+                    {
+                      backgroundColor: g.enabled ? colors.primary + '18' : colors.background,
+                      borderColor: g.enabled ? colors.primary : colors.outlineLight,
+                    },
+                  ]}
+                  onPress={() => onToggleBundleLayer?.(g.layerId)}
+                  activeOpacity={0.7}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${g.count} ${g.layerName} ${g.enabled ? 'will move — tap to keep in place' : 'will stay in place — tap to move'}`}
+                >
+                  <Text
+                    style={[styles.bundleChipText, { color: g.enabled ? colors.primary : colors.textTertiary }]}
+                    numberOfLines={1}
+                  >
+                    {g.enabled ? '↦' : '✕'} {g.count} {g.layerName}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+            {bundleGroups.some((g) => g.enabled) ? null : (
+              <Text style={[styles.bundleChipText, { color: colors.textTertiary }]}>
+                all opted out
+              </Text>
+            )}
+          </ScrollView>
+        </View>
+      )}
+
       {/* ── Hint text ──────────────────────────────────────────────────── */}
       <Text style={[styles.hintText, { color: colors.textTertiary }]}>
         {moveMode
-          ? 'Drag vertex handles to adjust the line · Tap Save to persist · Tap Reroute again to cancel'
+          ? 'Drag a handle to move a vertex · Long-press the line to add a bend · Long-press a handle to remove it · Save to persist'
+          : routeAroundMode
+            ? 'Tap the map at the works — the line is re-routed clear of the zone; adjust the radius, then Save'
+          : splitMode
+            ? 'Tap the line where the new chamber goes — the span is cut into two features'
           : deleteSectionMode
             ? deleteSectionStep === 0 ? 'Tap the line near a vertex to select start point'
             : deleteSectionStep === 1 ? 'Tap the line near another vertex to select end point'
@@ -402,6 +570,18 @@ const styles = StyleSheet.create({
     height: 44,
     gap: 1,
   },
+  // Save is the primary action: wider, taller, laid out left-to-right, and
+  // always the last button in the row.
+  saveBtn: {
+    width: 96,
+    height: 46,
+    flexDirection: 'row',
+    gap: 5,
+    paddingHorizontal: 10,
+  },
+  saveWrapper: {
+    width: 102,
+  },
   actionIcon: {
     fontSize: 16,
   },
@@ -436,6 +616,42 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     marginTop: 2,
     fontStyle: 'italic',
+  },
+
+  // ── Bundle propagation preview ─────────────────────────────────────────
+  bundleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 8,
+    paddingTop: 4,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  bundleTitle: {
+    fontSize: 8,
+    fontWeight: '700',
+  },
+  bundleChips: {
+    flexDirection: 'row',
+    gap: 4,
+    alignItems: 'center',
+  },
+  bundleChip: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  bundleChipText: {
+    fontSize: 8,
+    fontWeight: '600',
+  },
+  impactText: {
+    fontSize: 9,
+    fontWeight: '600',
+    textAlign: 'center',
+    paddingHorizontal: 8,
+    paddingBottom: 2,
   },
 
   // ── Hint text at bottom ────────────────────────────────────────────────
