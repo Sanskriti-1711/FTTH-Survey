@@ -2176,11 +2176,23 @@ function tapCandidates(
   features: any[],
 ): { featureId: string; layerId: string; geometryType: string }[] {
   const out: { featureId: string; layerId: string; geometryType: string }[] = [];
+  // The drag-handle layer mirrors the visible layer, so a tap on a point
+  // returns the SAME feature twice (`ml-drag-imp-pdps` and `ml-lyr-imp-pdps`
+  // both carry `_layer_id = imp-pdps`). A duplicate is not an overlap, and it
+  // is what stopped the popup's cycle chip: the handler looks the selected
+  // feature up with `findIndex`, which always matched the first copy, so the
+  // next entry was the feature's own twin and "N of M here" could never
+  // advance past the feature it started on. The duplicates also inflated M.
+  // One entry per (feature, layer), in the top-most order they arrived in.
+  const seen = new Set<string>();
   for (const f of features ?? []) {
     if (f?.properties?._is_user_location) continue;
     const id = f?.properties?._id;
     const lid = f?.properties?._layer_id;
     if (id && lid) {
+      const key = `${lid}|${id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       out.push({
         featureId: String(id),
         layerId: String(lid),
