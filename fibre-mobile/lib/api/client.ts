@@ -1,6 +1,7 @@
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { getApiBaseUrl, loadServerUrl } from '../utils/constants';
+import { apiErrorMessage } from '../utils/api-error';
 import { useOfflineStore } from '../stores/offline';
 
 // ── Token Management ─────────────────────────────────────────────────────
@@ -156,11 +157,10 @@ export async function apiFetch<T = unknown>(
     try {
       data = await res.json();
     } catch { /* no body */ }
-    throw new ApiError(
-      `Request failed with status ${res.status}`,
-      res.status,
-      data
-    );
+    // The server's own reason, not just the status: a rejected login is
+    // "Invalid credentials", a rejected field names the field, and only a
+    // body with nothing usable falls back to "Request failed with status N".
+    throw new ApiError(apiErrorMessage(data, res.status), res.status, data);
   }
 
   // Handle 204 No Content
