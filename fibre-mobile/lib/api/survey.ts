@@ -158,7 +158,7 @@ export async function updateRiskAssessment(
 // ── Hazards ───────────────────────────────────────────────────────────────
 
 export async function listHazards(
-  params?: PaginationParams & { hazard_type?: string; is_active?: string; date_from?: string; date_to?: string }
+  params?: PaginationParams & { feature?: string; hazard_type?: string; is_active?: string; date_from?: string; date_to?: string }
 ): Promise<PaginatedResponse<HazardData>> {
   return apiFetch(`/api/survey/hazards/${buildQuery(params ?? {})}`);
 }

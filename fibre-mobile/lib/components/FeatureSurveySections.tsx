@@ -280,8 +280,8 @@ export default function FeatureSurveySections({ featureId, layerId, initialGeome
         await Promise.allSettled([
           store.fetchTrenchSurveys(featureId),
           store.fetchRisks(featureId),
-          store.fetchHazards(),
-          store.fetchEvidence(),
+          store.fetchHazards(featureId),
+          store.fetchEvidence(featureId),
           store.fetchStatuses(featureId),
           store.fetchChanges(featureId),
         ]);

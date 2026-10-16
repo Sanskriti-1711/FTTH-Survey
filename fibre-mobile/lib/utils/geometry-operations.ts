@@ -858,6 +858,97 @@ export function extendLineString(
   return null;
 }
 
+// ── Snap a tap to the nearest corner (vertex) of any line ─────────────────
+// Extend-line / draw-trench taps must be able to land EXACTLY on another
+// line's corner so two trenches join into one connected network — snapping
+// to point features (premises/pdp) or to the selected line alone can never
+// join trench-to-trench. Returns the corner plus which line owns it so the
+// save can record the connection (connected_line_* attributes).
+
+export interface MapLineLayer {
+  id: string;
+  name?: string;
+  features: Array<{
+    geometry?: { type?: string; coordinates?: unknown } | null;
+    properties?: Record<string, unknown> | null;
+  }>;
+}
+
+export interface LineCornerSnap {
+  featureId: string;
+  layerId: string;
+  layerName: string;
+  coord: [number, number];
+  vertexIdx: number;
+  vertexCount: number;
+  isEndpoint: boolean;
+  distanceM: number;
+}
+
+export function findNearestLineCorner(
+  layers: MapLineLayer[],
+  lng: number,
+  lat: number,
+  radiusM = 15,
+): LineCornerSnap | null {
+  let best: LineCornerSnap | null = null;
+  for (const layer of layers) {
+    if (layer.id.startsWith('temp-preview-')) continue;
+    for (const feat of layer.features) {
+      const geom = feat.geometry;
+      if (!geom || (geom.type !== 'LineString' && geom.type !== 'MultiLineString')) continue;
+      const coords =
+        geom.type === 'LineString'
+          ? (geom.coordinates as [number, number][])
+          : ((geom.coordinates as [number, number][][])[0] ?? []);
+      if (coords.length < 2) continue;
+      const props = feat.properties ?? {};
+      const fid = String((props as Record<string, unknown>)._id ?? (props as Record<string, unknown>).id ?? '');
+      if (!fid) continue;
+      for (let i = 0; i < coords.length; i++) {
+        const d = haversineMeters(lng, lat, coords[i][0], coords[i][1]);
+        if (d < radiusM && (!best || d < best.distanceM)) {
+          best = {
+            featureId: fid,
+            layerId: layer.id,
+            layerName: layer.name ?? layer.id,
+            coord: [coords[i][0], coords[i][1]],
+            vertexIdx: i,
+            vertexCount: coords.length,
+            isEndpoint: i === 0 || i === coords.length - 1,
+            distanceM: d,
+          };
+        }
+      }
+    }
+  }
+  return best;
+}
+
+// ── Grow a line by one destination point ───────────────────────────────────
+// Extend-line saves the WHOLE grown line, never just the new segment:
+// appending/prepending keeps every surveyed vertex. Returns the grown
+// coordinates and which end grew, or null when the base is not a line.
+
+export function extendLineToPoint(
+  baseCoords: [number, number][],
+  dest: [number, number],
+): { coords: [number, number][]; end: 'start' | 'end' } | null {
+  if (baseCoords.length < 2) return null;
+  const first = baseCoords[0];
+  const last = baseCoords[baseCoords.length - 1];
+  const dFirst = haversineMeters(dest[0], dest[1], first[0], first[1]);
+  const dLast = haversineMeters(dest[0], dest[1], last[0], last[1]);
+  if (dLast <= dFirst) {
+    const grown = extendLineString(baseCoords, [last, dest], 'append');
+    if (!grown) return null;
+    return { coords: grown, end: 'end' };
+  }
+  const grown = extendLineString(baseCoords, [dest, first], 'prepend');
+  if (!grown) return null;
+  return { coords: grown, end: 'start' };
+}
+
 // ── Approximate length of a LineString in metres (Haversine) ──────────────
 
 export function approximateLength(coords: [number, number][]): number {

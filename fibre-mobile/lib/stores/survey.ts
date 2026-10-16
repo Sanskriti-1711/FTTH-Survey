@@ -73,10 +73,10 @@ interface SurveyState {
   saveRisk: (data: Omit<RiskAssessmentData, 'id' | 'engineer' | 'engineer_name' | 'created_at' | 'updated_at'>) => Promise<RiskAssessmentData>;
   updateRisk: (riskId: string, data: Partial<RiskAssessmentData>) => Promise<void>;
 
-  fetchHazards: () => Promise<void>;
+  fetchHazards: (featureId?: string) => Promise<void>;
   saveHazard: (data: Omit<HazardData, 'id' | 'engineer' | 'engineer_name' | 'created_at'>) => Promise<void>;
 
-  fetchEvidence: () => Promise<void>;
+  fetchEvidence: (featureId?: string) => Promise<void>;
   saveEvidence: (data: Omit<FieldEvidenceData, 'id' | 'engineer' | 'engineer_name' | 'created_at'>) => Promise<void>;
 
   fetchChanges: (featureId?: string) => Promise<void>;
@@ -291,10 +291,10 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
   },
 
   // ── Hazards ────────────────────────────────────────────────────────────
-  fetchHazards: async () => {
+  fetchHazards: async (featureId) => {
     set({ isLoading: true, error: null });
     try {
-      const data = await surveyApi.listHazards();
+      const data = await surveyApi.listHazards(featureId ? { feature: featureId } : undefined);
       set({ hazards: data.results, isLoading: false });
     } catch (err: unknown) {
       set({ error: (err instanceof Error ? err.message : 'Failed'), isLoading: false });
@@ -307,10 +307,10 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
   },
 
   // ── Evidence ───────────────────────────────────────────────────────────
-  fetchEvidence: async () => {
+  fetchEvidence: async (featureId) => {
     set({ isLoading: true, error: null });
     try {
-      const data = await surveyApi.listFieldEvidence();
+      const data = await surveyApi.listFieldEvidence(featureId ? { feature: featureId } : undefined);
       set({ evidence: data.results, isLoading: false });
     } catch (err: unknown) {
       set({ error: (err instanceof Error ? err.message : 'Failed'), isLoading: false });

@@ -21,7 +21,7 @@ import { getLayerSchema } from '../lib/stores/layer-schemas';
 import { gradeGpsAccuracy } from '../lib/utils/gps-quality';
 import { summarizeCommit } from '../lib/utils/commit';
 import { normalizeLayerId } from '../lib/utils/layer-ids';
-import { insertVertexAtPoint, deleteVertex, splitLineAtPoint, createLineString } from '../lib/utils/geometry-operations';
+import { insertVertexAtPoint, deleteVertex, splitLineAtPoint, createLineString, findNearestLineCorner, extendLineToPoint, haversineMeters } from '../lib/utils/geometry-operations';
 import { planObstacleDetour } from '../lib/utils/obstacle-reroute';
 // Geometry operation utilities removed — all edits now route through survey-features store
 import GeometryEditor from '../lib/components/GeometryEditor';
@@ -781,7 +781,18 @@ export default function MapScreen() {
     lng: number;
     lat: number;
     properties: Record<string, unknown>;
+    /** 'object' = premise/pdp/mfg point, 'line' = another line's corner */
+    kind: 'object' | 'line';
+    /** Corner index on the snapped line (kind === 'line' only) */
+    vertexIdx?: number;
+    /** Whether the snapped corner is a line endpoint (kind === 'line' only) */
+    isEndpoint?: boolean;
   } | null>(null);
+  // Draw-segment outcome decided at the second tap: 'extend' grows the
+  // selected line to the destination, 'spur' saves [start, dest] as its own
+  // new trench feature so a segment drawn away from the line can never
+  // overwrite (destroy) the selected line's geometry on Save.
+  const [continueIsSpur, setContinueIsSpur] = useState(false);
   // Dedupe guard: the native map fires BOTH the Map onPress AND the
   // GeoJSONSource onPress for a single tap, so handleContinueLineTap can
   // fire twice with the same lngLat. Without this guard every tap would
@@ -838,6 +849,8 @@ export default function MapScreen() {
       previousAttributes: Record<string, unknown>;
       previousStatus: SurveyFeatureData['survey_status'];
       description: string;
+      /** Created features have nothing to restore — undo deletes them */
+      deleteOnUndo?: boolean;
     };
   };
   const undoStackRef = useRef<UndoEntry[]>([]);
@@ -872,6 +885,23 @@ export default function MapScreen() {
     if (entry.surveyUndo) {
       const { surveyFeatureId, layerId, previousGeometry, previousAttributes, previousStatus, description } = entry.surveyUndo;
       console.log(`[Undo] Restoring survey feature ${surveyFeatureId.slice(-8)}: ${description}`);
+
+      // ── Created features (spur trench, draw segment): undo removes them ──
+      if (entry.surveyUndo.deleteOnUndo) {
+        const store = useSurveyFeaturesStore.getState();
+        const features = store.surveyFeatures[layerId] ?? [];
+        useSurveyFeaturesStore.setState({
+          surveyFeatures: {
+            ...store.surveyFeatures,
+            [layerId]: features.filter((sf) => sf.id !== surveyFeatureId),
+          },
+        });
+        void deleteSurveyFeature(surveyFeatureId, layerId).catch((e) =>
+          console.warn('[Undo] Server delete failed, local removal stands:', e instanceof Error ? e.message : e)
+        );
+        console.log(`[Undo] Removed created survey feature ${surveyFeatureId.slice(-8)}`);
+        return;
+      }
 
       // ── Locally-created features (prefix 'local-sf-'): directly remove from store ──
       if (surveyFeatureId.startsWith('local-sf-')) {
@@ -1014,7 +1044,7 @@ export default function MapScreen() {
         });
       }
     }
-  }, [updateSurveyFeature]);
+  }, [updateSurveyFeature, deleteSurveyFeature]);
 
   // Refs are kept in sync INSIDE the respective useMemo/useState hooks below
   // to avoid TDZ errors from referencing later-declared const variables in dependency arrays.
@@ -2300,6 +2330,7 @@ export default function MapScreen() {
     setContinueLinePoints(0);
     setContinueSnapTarget(null);
     setContinueStartPt(null);
+    setContinueIsSpur(false);
     lastContinueTapRef.current = null;
     setDeleteSectionRange(null);
   }, []);
@@ -2327,6 +2358,7 @@ export default function MapScreen() {
       setContinueLinePoints(0);
       setContinueSnapTarget(null);
       setContinueStartPt(null);
+    setContinueIsSpur(false);
       lastContinueTapRef.current = null;
       setDeleteSectionRange(null);
       console.log('[MoveMode] Exited — temp changes discarded');
@@ -2350,6 +2382,7 @@ export default function MapScreen() {
         setContinueLinePoints(0);
         setContinueSnapTarget(null);
         setContinueStartPt(null);
+    setContinueIsSpur(false);
         lastContinueTapRef.current = null;
         setLineMoveMode(true);
         autoOverlayOnEdit();
@@ -2461,6 +2494,7 @@ export default function MapScreen() {
       setContinueLinePoints(0);
       setContinueSnapTarget(null);
       setContinueStartPt(null);
+    setContinueIsSpur(false);
       lastContinueTapRef.current = null;
       setLineMoveMode(true);
       autoOverlayOnEdit();
@@ -2655,22 +2689,101 @@ export default function MapScreen() {
       ? (existingSurvey.survey_attributes ?? origAttrs ?? {})
       : (origAttrs ?? {});
     if (continueSnapTarget) {
-      const cleanProps = Object.fromEntries(
-        Object.entries(continueSnapTarget.properties ?? {}).filter(([k]) => !k.startsWith('_'))
-      );
-      surveyAttrs = {
-        ...surveyAttrs,
-        connected_object_id: continueSnapTarget.id,
-        // Store the RAW base layer id (strip survey-/imp- prefixes) so LLD
-        // automation gets a clean layer reference: e.g. 'objects' not 'survey-objects'.
-        connected_object_layer: continueSnapTarget.layerId
-          .replace(/^survey-/, '')
-          .replace(/^imp-/, ''),
-        connected_object_name: continueSnapTarget.name,
-        connected_object_lng: continueSnapTarget.lng,
-        connected_object_lat: continueSnapTarget.lat,
-        ...cleanProps, // merge the object's own attributes (premise_id, address, etc.)
-      };
+      const rawLayer = continueSnapTarget.layerId
+        .replace(/^survey-/, '')
+        .replace(/^imp-/, '');
+      if (continueSnapTarget.kind === 'line') {
+        // Trench-to-trench joint: which line, which corner, endpoint or not.
+        // LLD automation traces a continuous route through these joints.
+        surveyAttrs = {
+          ...surveyAttrs,
+          connected_line_id: continueSnapTarget.id,
+          connected_line_layer: rawLayer,
+          connected_line_name: continueSnapTarget.name,
+          connected_line_vertex: continueSnapTarget.vertexIdx ?? null,
+          connected_line_endpoint: continueSnapTarget.isEndpoint ?? false,
+          connected_line_lng: continueSnapTarget.lng,
+          connected_line_lat: continueSnapTarget.lat,
+        };
+      } else {
+        const cleanProps = Object.fromEntries(
+          Object.entries(continueSnapTarget.properties ?? {}).filter(([k]) => !k.startsWith('_'))
+        );
+        surveyAttrs = {
+          ...surveyAttrs,
+          connected_object_id: continueSnapTarget.id,
+          // Store the RAW base layer id (strip survey-/imp- prefixes) so LLD
+          // automation gets a clean layer reference: e.g. 'objects' not 'survey-objects'.
+          connected_object_layer: rawLayer,
+          connected_object_name: continueSnapTarget.name,
+          connected_object_lng: continueSnapTarget.lng,
+          connected_object_lat: continueSnapTarget.lat,
+          ...cleanProps, // merge the object's own attributes (premise_id, address, etc.)
+        };
+      }
+    }
+
+    // ── Spur save: the segment becomes its OWN trench feature ──
+    // A spur must never overwrite the selected line — it is created with no
+    // HLD parent (like Add Point / Draw Trench output) and carries the
+    // connection attributes above so the joint is traceable.
+    if (lineToolMode === 'continue-line' && continueIsSpur) {
+      const segGeometry = { type: 'LineString', coordinates: tempLineCoords };
+      try {
+        const sf = await upsertSurveyFeature(
+          null, layerId, layerName,
+          segGeometry,
+          surveyAttrs,
+          null, null,
+          continueSnapTarget
+            ? `Drew spur trench to ${continueSnapTarget.name} #${continueSnapTarget.id.slice(-6)}`
+            : 'Drew spur trench segment',
+        );
+        if (sf) {
+          pushUndo({
+            featureId, layerId,
+            oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+            timestamp: Date.now(),
+            surveyUndo: {
+              surveyFeatureId: sf.id,
+              layerId,
+              previousGeometry: segGeometry as Record<string, unknown>,
+              previousAttributes: {},
+              previousStatus: 'new',
+              description: `Undo: remove spur trench for ${featureId.slice(-8)}`,
+              deleteOnUndo: true,
+            },
+          });
+          showToast(
+            useOfflineStore.getState().isOnline
+              ? 'Saved — spur trench created as its own feature'
+              : 'Saved on device — spur trench will sync when back online',
+            'success',
+          );
+        } else if (activeProject?.id.startsWith('imported-')) {
+          showToast('Imported project — edit kept on device only', 'info');
+        } else {
+          showToast('Save failed — check the server connection and retry', 'error');
+          return;
+        }
+      } catch (err) {
+        console.error('[Continue] Spur save failed:', err);
+        showToast('Save failed — check the server connection and retry', 'error');
+        return;
+      }
+      setTempLineCoords(null);
+      setTempLineOriginal(null);
+      setLineMoveMode(false);
+      setLineToolMode(null);
+      setContinueLineAnchor(null);
+      setContinueLinePoints(0);
+      setContinueSnapTarget(null);
+      setContinueStartPt(null);
+      setContinueIsSpur(false);
+      lastContinueTapRef.current = null;
+      setDeleteSectionRange(null);
+      console.log(`[Continue] Spur trench saved for ${featureId.slice(-8)}${continueSnapTarget ? ` (joined to ${continueSnapTarget.name})` : ''}`);
+      return;
     }
 
     if (existingSurvey) {
@@ -2751,8 +2864,19 @@ export default function MapScreen() {
     }    // Bundle propagation belongs only to Reroute. Draw Segment is an
     // independent two-point addition and must never rewrite neighbouring
     // corridor features as if the selected line had been diverted.
+    // Propagation runs OUTSIDE the save try/catch and must never take a
+    // successful save down with it: a relay throw used to leave the toolbar
+    // open on saved geometry, and the retry then hit the no-op guard
+    // ("No change detected") — the reroute looked unsavable when it was
+    // already saved. The detour itself is persisted above; a failed relay
+    // only warns.
     if (lineToolMode !== 'continue-line') {
-      propagateBundleReroute(featureId, layerId, tempLineOriginal, tempLineCoords, bundleSkipLayers);
+      try {
+        propagateBundleReroute(featureId, layerId, tempLineOriginal, tempLineCoords, bundleSkipLayers);
+      } catch (bundleErr) {
+        console.warn('[MoveMode] Bundle relay failed after save — detour itself is saved:', bundleErr instanceof Error ? bundleErr.message : bundleErr);
+        showToast('Saved — but neighbouring lines did not follow. Re-save to retry the relay.', 'warning');
+      }
     }
     setBundleSkipLayers([]);
 
@@ -2766,10 +2890,11 @@ export default function MapScreen() {
     setContinueLinePoints(0);
     setContinueSnapTarget(null);
     setContinueStartPt(null);
+    setContinueIsSpur(false);
     lastContinueTapRef.current = null;
     setDeleteSectionRange(null);
     console.log(`[MoveMode] Saved line geometry for ${featureId.slice(-8)} — SurveyFeature ${existingSurvey ? 'updated' : 'created'}${continueSnapTarget ? ` (snapped to ${continueSnapTarget.name})` : ''}`);
-  },    [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, continueSnapTarget, surveyFeatures, propagateBundleReroute, lineToolMode, continueLinePoints, showToast, bundleSkipLayers]);
+  },    [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, continueSnapTarget, surveyFeatures, propagateBundleReroute, lineToolMode, continueLinePoints, continueIsSpur, showToast, bundleSkipLayers]);
 
   // ── Delete Section handlers ────────────────────────────────────────────
 
@@ -2811,6 +2936,7 @@ export default function MapScreen() {
     setContinueLinePoints(0);
     setContinueSnapTarget(null);
     setContinueStartPt(null);
+    setContinueIsSpur(false);
     lastContinueTapRef.current = null;
     autoOverlayOnEdit();
   }, [selectedLineFeature, lineToolMode, importFeatureIdMap, autoOverlayOnEdit]);
@@ -2828,6 +2954,7 @@ export default function MapScreen() {
       setContinueLinePoints(0);
       setContinueSnapTarget(null);
       setContinueStartPt(null);
+      setContinueIsSpur(false);
       lastContinueTapRef.current = null;
       setTempLineCoords(null);
       setTempLineOriginal(null);
@@ -2863,11 +2990,12 @@ export default function MapScreen() {
     setContinueLinePoints(0);
     setContinueSnapTarget(null);
     setContinueStartPt(null);
+    setContinueIsSpur(false);
     lastContinueTapRef.current = null;
     autoOverlayOnEdit();
   }, [selectedLineFeature, lineToolMode, importFeatureIdMap, autoOverlayOnEdit]);
 
-  const handleDeleteSectionConfirm = useCallback(() => {
+  const handleDeleteSectionConfirm = useCallback(async () => {
     if (!deleteSectionRange || !tempLineCoords || !tempLineOriginal || !selectedLineFeature) return;
     const [a, b] = deleteSectionRange; if (a === b) return;
     const start = Math.min(a, b), end = Math.max(a, b);
@@ -2901,58 +3029,45 @@ export default function MapScreen() {
       upsertSurveyFeature(featureId, layerId, layerName, firstGeom, origAttrs ?? {}, origGeom, origAttrs, reason).then((sf) => { if (sf) { pushUndo({ featureId, layerId, oldLng: 0, oldLat: 0, newLng: 0, newLat: 0, timestamp: Date.now(), surveyUndo: { surveyFeatureId: sf.id, layerId, previousGeometry: { type: 'LineString', coordinates: tempLineOriginal } as Record<string, unknown>, previousAttributes: origAttrs as Record<string, unknown> ?? {}, previousStatus: 'new', description: `Undo: remove survey feature for ${featureId.slice(-8)}` } }); } });
     }
 
-    // ── Additional segments: create independent Survey Features locally ──
-    // Bypass the backend API — synthetic hldFeatureId causes 500 errors.
+    // ── Additional segments: their OWN backend features, like spur trenches ──
+    // They used to be local-only mocks with a synthetic hldFeatureId (which
+    // 500s on the API), so a separation silently vanished on reload — the
+    // planner never saw the second half. Created parentless; offline they
+    // are kept locally + queued by the store itself.
     for (let i = 1; i < segments.length; i++) {
       const segGeom = { type: 'LineString', coordinates: segments[i] } as Record<string, unknown>;
-      const segHldId = `${featureId}-seg-${i + 1}-${Date.now()}`;
-      const mockSf: SurveyFeatureData = {
-        id: `local-sf-${Date.now()}-${i}`,
-        original_hld_feature: segHldId,
-        hld_feature_id: segHldId,
-        project: activeProject?.id ?? '',
-        project_name: activeProject?.name ?? '',
-        engineer: '',
-        engineer_name: '',
-        layer_id: layerId,
-        layer_name: layerName,
-        original_geometry: origGeom,
-        original_attributes: origAttrs ?? null,
-        survey_geometry: segGeom,
-        survey_attributes: origAttrs ?? {},
-        survey_status: 'new' as const,
-        version_number: 1,
-        sync_status: 'pending' as const,
-        change_reason: `${reason} (segment ${i + 1})`,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
-      const store = useSurveyFeaturesStore.getState();
-      useSurveyFeaturesStore.setState({
-        surveyFeatures: {
-          ...store.surveyFeatures,
-          [layerId]: [...(store.surveyFeatures[layerId] ?? []), mockSf],
-        },
-      });
-      console.log(`[DeleteSection] Created local segment ${i + 1} (${segHldId.slice(-12)}) for ${featureId.slice(-8)}`);
-
-      // ── Push undo entry so this locally-created segment can be undone ──
-      pushUndo({
-        featureId,
-        layerId,
-        oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
-        timestamp: Date.now(),
-        surveyUndo: {
-          surveyFeatureId: mockSf.id,
-          layerId,
-          previousGeometry: segGeom,
-          previousAttributes: origAttrs as Record<string, unknown> ?? {},
-          previousStatus: 'removed',
-          description: `Undo: remove segment ${i + 1} for ${featureId.slice(-8)}`,
-        },
-      });
+      const segReason = `${reason} (segment ${i + 1})`;
+      try {
+        const segSf = await upsertSurveyFeature(
+          null, layerId, layerName, segGeom,
+          (origAttrs ?? {}) as Record<string, unknown>,
+          null, null, segReason,
+        );
+        if (segSf) {
+          console.log(`[DeleteSection] Created backend segment ${i + 1} (${segSf.id.slice(-8)}) for ${featureId.slice(-8)}`);
+          pushUndo({
+            featureId,
+            layerId,
+            oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+            timestamp: Date.now(),
+            surveyUndo: {
+              surveyFeatureId: segSf.id,
+              layerId,
+              previousGeometry: segGeom,
+              previousAttributes: {},
+              previousStatus: 'new',
+              description: `Undo: remove segment ${i + 1} for ${featureId.slice(-8)}`,
+              deleteOnUndo: true,
+            },
+          });
+        } else {
+          console.warn(`[DeleteSection] Segment ${i + 1} not persisted (imported project or server refusal) — kept in map only for this session`);
+        }
+      } catch (err) {
+        console.warn(`[DeleteSection] Segment ${i + 1} save failed:`, err instanceof Error ? err.message : err);
+      }
     }
-    setLineMoveMode(false); setLineToolMode(null); setDeleteSectionRange(null); setContinueLineAnchor(null); setContinueLinePoints(0); setContinueSnapTarget(null); setContinueStartPt(null); lastContinueTapRef.current = null; setTempLineCoords(null); setTempLineOriginal(null);
+    setLineMoveMode(false); setLineToolMode(null); setDeleteSectionRange(null); setContinueLineAnchor(null); setContinueLinePoints(0); setContinueSnapTarget(null); setContinueStartPt(null); setContinueIsSpur(false); lastContinueTapRef.current = null; setTempLineCoords(null); setTempLineOriginal(null);
   }, [deleteSectionRange, tempLineCoords, tempLineOriginal, selectedLineFeature, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, activeProject]);
 
   // ── Delete Section: tap handler ────────────────────────────────────────
@@ -3052,6 +3167,7 @@ export default function MapScreen() {
     setContinueLinePoints(0);
     setContinueSnapTarget(null);
     setContinueStartPt(null);
+    setContinueIsSpur(false);
     lastContinueTapRef.current = null;
     setLineMoveMode(true);
     setLineToolMode('split-here');
@@ -3181,6 +3297,7 @@ export default function MapScreen() {
       setContinueLinePoints(0);
       setContinueSnapTarget(null);
       setContinueStartPt(null);
+    setContinueIsSpur(false);
       lastContinueTapRef.current = null;
       setTempLineCoords(null);
       setTempLineOriginal(null);
@@ -3266,6 +3383,7 @@ export default function MapScreen() {
     setContinueLinePoints(0);
     setContinueSnapTarget(null);
     setContinueStartPt(null);
+    setContinueIsSpur(false);
     lastContinueTapRef.current = null;
     setObstacleCentre(null);
     setDetourImpactLabel(null);
@@ -3396,6 +3514,7 @@ export default function MapScreen() {
     setContinueLinePoints(0);
     setContinueSnapTarget(null);
     setContinueStartPt(null);
+    setContinueIsSpur(false);
     lastContinueTapRef.current = null;
     setTempLineCoords(null);
     setTempLineOriginal(null);
@@ -3526,6 +3645,29 @@ export default function MapScreen() {
               lng: snap.lng,
               lat: snap.lat,
               properties: { ...snap.properties },
+              kind: 'object' as const,
+            },
+          };
+        }
+        // 1b) Snap to the nearest corner of ANY line — this is what joins
+        // trench to trench. Point-only snapping could never land exactly on
+        // another line's vertex, so two trenches drawn corner-to-corner
+        // always missed by decimetres and the network never connected.
+        const corner = findNearestLineCorner(mapLayerData, pt[0], pt[1]);
+        if (corner) {
+          return {
+            lng: corner.coord[0],
+            lat: corner.coord[1],
+            snapTarget: {
+              id: corner.featureId,
+              layerId: corner.layerId,
+              name: `${corner.layerName} corner`,
+              lng: corner.coord[0],
+              lat: corner.coord[1],
+              properties: {},
+              kind: 'line' as const,
+              vertexIdx: corner.vertexIdx,
+              isEndpoint: corner.isEndpoint,
             },
           };
         }
@@ -3549,22 +3691,50 @@ export default function MapScreen() {
         return;
       }
 
-      // ── Step 2: place the destination and build the one segment ──
+      // ── Step 2: place the destination — extend the line or spur off it ──
+      // Saving ONLY the new 2-point segment as the line's geometry used to
+      // destroy the selected line (a 20-vertex trench became 2 vertices).
+      // Now the full line is always kept: a destination near either end
+      // GROWS the line to it, while a destination drawn away from the line
+      // becomes a SPUR — its own new trench feature — on Save.
       if (continueLinePoints === 0 && continueStartPt) {
         const s = resolveTap(lngLat);
-        const newCoords: [number, number][] = [
-          continueStartPt,
-          [s.lng, s.lat],
-        ];
+        const dest: [number, number] = [s.lng, s.lat];
         // Guard against a zero-length segment.
-        if (newCoords[0][0] === newCoords[1][0] && newCoords[0][1] === newCoords[1][1]) {
+        if (continueStartPt[0] === dest[0] && continueStartPt[1] === dest[1]) {
           console.log('[Continue] Start and destination are the same point — ignoring');
           return;
         }
-        setContinueSnapTarget(s.snapTarget);
-        setTempLineCoords(newCoords);
-        setContinueLinePoints(1);
-        console.log(`[Continue] Segment drawn ${s.snapTarget ? `→ snapped to ${s.snapTarget.name} #${s.snapTarget.id.slice(-6)}` : ''} — ${newCoords.length} vertices`);
+        const base = (tempLineCoords ?? []) as [number, number][];
+        const first = base[0];
+        const last = base[base.length - 1];
+        const nearEnd =
+          base.length >= 2 &&
+          Math.min(
+            haversineMeters(dest[0], dest[1], first[0], first[1]),
+            haversineMeters(dest[0], dest[1], last[0], last[1]),
+          ) <= 15;
+        if (nearEnd) {
+          const grown = extendLineToPoint(base, dest);
+          if (!grown) {
+            console.log('[Continue] Cannot extend — selected line has no usable geometry');
+            return;
+          }
+          setContinueSnapTarget(s.snapTarget);
+          setContinueIsSpur(false);
+          setTempLineCoords(grown.coords);
+          setContinueLinePoints(1);
+          console.log(`[Continue] Line extended at ${grown.end} ${s.snapTarget ? `→ snapped to ${s.snapTarget.name} #${s.snapTarget.id.slice(-6)}` : ''} — ${grown.coords.length} vertices`);
+        } else {
+          // Spur: a trench of its own. tempLineCoords holds just the new
+          // segment; Save creates a feature for it instead of touching the
+          // selected line.
+          setContinueSnapTarget(s.snapTarget);
+          setContinueIsSpur(true);
+          setTempLineCoords([continueStartPt, dest]);
+          setContinueLinePoints(1);
+          console.log(`[Continue] Spur drawn ${s.snapTarget ? `→ snapped to ${s.snapTarget.name} #${s.snapTarget.id.slice(-6)}` : ''} — saves as its own trench`);
+        }
         return;
       }
 
