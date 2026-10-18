@@ -42,6 +42,8 @@ interface NewPointFormProps {
   onDismiss: () => void;
   /** Called when the form is saved with the updated properties */
   onSave: (featureId: string, layerId: string, properties: Record<string, unknown>) => void;
+  /** Called when a required field blocked the save — receives the field labels */
+  onMissingRequired?: (labels: string) => void;
 }
 
 // ── Field Renderer ────────────────────────────────────────────────────────
@@ -50,10 +52,13 @@ function EditableField({
   field,
   value,
   onChange,
+  missing,
 }: {
   field: FieldSchemaField;
   value: unknown;
   onChange: (value: unknown) => void;
+  /** Required and still empty — Save was pressed and was refused. */
+  missing?: boolean;
 }) {
   const colors = useThemeStore((s) => s.colors);
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -83,13 +88,16 @@ function EditableField({
         {field.unit && (
           <Text style={[styles.fieldUnit, { color: colors.textTertiary }]}> ({field.unit})</Text>
         )}
+        {missing && (
+          <Text style={[styles.fieldUnit, { color: '#EF4444' }]}>Required</Text>
+        )}
       </View>
 
       {field.type === 'select' ? (
         <TouchableOpacity
           style={[styles.selectField, {
             backgroundColor: colors.surface,
-            borderColor: dropdownOpen ? colors.primary : colors.outline,
+            borderColor: missing ? '#EF4444' : dropdownOpen ? colors.primary : colors.outline,
           }]}
           onPress={() => setDropdownOpen(!dropdownOpen)}
           activeOpacity={0.7}
@@ -206,8 +214,10 @@ export default function NewPointForm({
   formData,
   onDismiss,
   onSave,
+  onMissingRequired,
 }: NewPointFormProps) {
   const colors = useThemeStore((s) => s.colors);
+  const [missingRequired, setMissingRequired] = useState<string[]>([]);
   const slideAnim = useRef(new Animated.Value(0)).current;
 
   // Local state for form values
@@ -231,6 +241,7 @@ export default function NewPointForm({
         }
       }
       setValues(initial);
+      setMissingRequired([]);
 
       // Animate entrance
       Animated.timing(slideAnim, {
@@ -250,6 +261,20 @@ export default function NewPointForm({
 
   const handleSave = useCallback(() => {
     if (!formData) return;
+    // A required field left empty blocks the save: the engineer is told which
+    // one, instead of the point being stored as partially surveyed.
+    const missing = (schema?.editableFields ?? [])
+      .filter((field) => field.required)
+      .filter((field) => {
+        const val = values[field.key];
+        return val === undefined || val === null || val === '';
+      });
+    if (missing.length > 0) {
+      setMissingRequired(missing.map((f) => f.key));
+      onMissingRequired?.(missing.map((f) => f.label).join(', '));
+      return;
+    }
+    setMissingRequired([]);
     // Filter out empty strings for cleaner data
     const cleanValues: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(values)) {
@@ -261,7 +286,7 @@ export default function NewPointForm({
     cleanValues.surveyed_at = new Date().toISOString();
     cleanValues.survey_status = 'visited';
     onSave(formData.featureId, formData.layerId, cleanValues);
-  }, [formData, values, onSave]);
+  }, [formData, values, schema, onSave, onMissingRequired]);
 
   const handleCancel = useCallback(() => {
     onDismiss();
@@ -369,6 +394,7 @@ export default function NewPointForm({
               field={field}
               value={values[field.key] ?? ''}
               onChange={(val) => handleFieldChange(field.key, val)}
+              missing={missingRequired.includes(field.key)}
             />
           ))}
         </View>

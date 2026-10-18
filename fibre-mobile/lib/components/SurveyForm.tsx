@@ -147,13 +147,17 @@ function EditableField({
   field,
   value,
   onChange,
+  missing,
 }: {
   field: FieldSchemaField;
   value: unknown;
   onChange: (value: unknown) => void;
+  /** Required and still empty — Save was pressed and was refused. */
+  missing?: boolean;
 }) {
   const colors = useThemeStore((s) => s.colors);
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const requiredColor = '#EF4444';
 
   const displayValue = field.type === 'boolean'
     ? (value === true ? 'Yes' : value === false ? 'No' : '—')
@@ -175,10 +179,13 @@ function EditableField({
       <View style={fieldStyles.fieldLabelRow}>
         <Text style={[fieldStyles.fieldLabel, { color: colors.textSecondary }]}>
           {field.label}
-          {field.required && <Text style={{ color: '#EF4444' }}> *</Text>}
+          {field.required && <Text style={{ color: requiredColor }}> *</Text>}
         </Text>
         {field.unit && (
           <Text style={[fieldStyles.fieldUnit, { color: colors.textTertiary }]}> ({field.unit})</Text>
+        )}
+        {missing && (
+          <Text style={[fieldStyles.fieldUnit, { color: requiredColor }]}>Required</Text>
         )}
       </View>
 
@@ -186,7 +193,7 @@ function EditableField({
         <TouchableOpacity
           style={[fieldStyles.selectField, {
             backgroundColor: colors.surface,
-            borderColor: dropdownOpen ? colors.primary : colors.outline,
+            borderColor: missing ? requiredColor : dropdownOpen ? colors.primary : colors.outline,
           }]}
           onPress={() => setDropdownOpen(!dropdownOpen)}
           activeOpacity={0.7}
@@ -359,6 +366,10 @@ export default function SurveyForm({ formData, onDismiss, onSave, onDelete }: Su
   // Delete confirm state — first tap arms, second tap deletes (prevents accidents)
   const [confirmDelete, setConfirmDelete] = useState(false);
 
+  // Required schema fields left empty by the last Save attempt, so the form can
+  // name them instead of writing a partial survey to the server.
+  const [missingRequired, setMissingRequired] = useState<string[]>([]);
+
   // Active section state — which collapsible section is open
   const [activeSection, setActiveSection] = useState<string | null>('fields');
 
@@ -452,6 +463,7 @@ export default function SurveyForm({ formData, onDismiss, onSave, onDelete }: Su
       }
       setValues(initial);
       setConfirmDelete(false);
+      setMissingRequired([]);
       setActiveSection('fields');
 
       // Pre-fill trench type if available
@@ -475,6 +487,25 @@ export default function SurveyForm({ formData, onDismiss, onSave, onDelete }: Su
 
   const handleSaveFields = useCallback(() => {
     if (!formData) return;
+    // A field the schema marks required is a real gate, not a red asterisk: a
+    // Save that leaves it empty is refused and the field is named.
+    const missing = (schema?.editableFields ?? [])
+      .filter((field) => field.required)
+      .filter((field) => {
+        const val = values[field.key];
+        return val === undefined || val === null || val === '';
+      })
+      .map((field) => field.key);
+    if (missing.length > 0) {
+      setMissingRequired(missing);
+      const labels = (schema?.editableFields ?? [])
+        .filter((f) => missing.includes(f.key))
+        .map((f) => f.label)
+        .join(', ');
+      showToast(`Required: ${labels}`);
+      return;
+    }
+    setMissingRequired([]);
     const cleanValues: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(values)) {
       if (val !== '' && val !== undefined) cleanValues[key] = val;
@@ -482,7 +513,7 @@ export default function SurveyForm({ formData, onDismiss, onSave, onDelete }: Su
     cleanValues.surveyed_at = new Date().toISOString();
     cleanValues.survey_status = surveyStatus;
     onSave(formData.featureId, formData.layerId, cleanValues);
-  }, [formData, values, surveyStatus, onSave]);
+  }, [formData, values, surveyStatus, schema, onSave]);
 
   // Section save handlers
   const handleSaveTrench = async () => {
@@ -641,8 +672,17 @@ export default function SurveyForm({ formData, onDismiss, onSave, onDelete }: Su
                     field={field}
                     value={values[field.key] ?? ''}
                     onChange={(val) => handleFieldChange(field.key, val)}
+                    missing={missingRequired.includes(field.key)}
                   />
                 ))}
+                {missingRequired.length > 0 && (
+                  <Text style={[styles.requiredNotice, { color: '#EF4444' }]}>
+                    {`Still required: ${schema.editableFields
+                      .filter((f) => missingRequired.includes(f.key))
+                      .map((f) => f.label)
+                      .join(', ')}`}
+                  </Text>
+                )}
                 <TouchableOpacity
                   style={[styles.saveBtn, { backgroundColor: colors.primary }]}
                   onPress={handleSaveFields}
@@ -1313,6 +1353,12 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
     padding: Spacing.md,
     textAlign: 'center',
+  },
+  requiredNotice: {
+    fontSize: 12,
+    fontWeight: '600',
+    paddingHorizontal: Spacing.md,
+    paddingTop: Spacing.sm,
   },
   // Shared section styles
   sectionLabel: {

@@ -262,12 +262,12 @@ export default function LoginScreen() {
                   API Server URL
                 </Text>
                 <Text style={[styles.serverPanelHint, { color: colors.textSecondary }]}>
-                  If login fails with a network error, your backend IP may have changed. Update it here — no rebuild needed.
+                  The app uses the production server below by default. Only change this to point at a local or LAN backend for testing — no rebuild needed.
                 </Text>
 
                 <Input
                   label="Server address"
-                  placeholder="http://192.168.1.100:8000"
+                  placeholder="https://fibre-backend-wml3.onrender.com"
                   value={serverUrl}
                   onChangeText={(t) => {
                     setServerUrl(t);

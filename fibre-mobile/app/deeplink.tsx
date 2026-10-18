@@ -15,7 +15,7 @@ import { useAuthStore } from '../lib/stores/auth';
 
 // ── Web Deep-Link Screen ─────────────────────────────────────────────────
 // The platform opens the web build as:
-//   http://localhost:8081/?token=<jwt>&project=<projectId>
+//   <web-host>/?token=<jwt>&project=<projectId>   (e.g. the :8081 web build)
 // This screen (web only) saves the token, activates the project and routes
 // straight to the project map so the engineer sees the same MapLibre views
 // (🔵 HLD / 🟠 Survey / 🔀 Overlay) as on the mobile app.

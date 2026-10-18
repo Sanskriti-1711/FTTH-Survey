@@ -117,6 +117,11 @@ interface SurveyFeaturesState {
     changeReason?: string,
     typedData?: TypedSurveyPayload,
     gpsMeta?: { accuracyM?: number | null; quality?: string },
+    /** Record the write as a removal instead of a new/modified survey copy.
+     *  Used by the Delete tool's logical delete: the row is kept (not deleted)
+     *  so the planner and the LLD review queue can see the feature was removed
+     *  in the field. */
+    surveyStatus?: 'new' | 'removed',
   ) => Promise<SurveyFeatureData | null>;
 
   /** Update an existing survey feature's geometry or attributes */
@@ -298,6 +303,7 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
     changeReason,
     typedData,
     gpsMeta,
+    surveyStatus,
   ) => {
     const activeProject = useProjectStore.getState().activeProject;
     if (!activeProject || activeProject.id.startsWith('imported-')) {
@@ -317,6 +323,7 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
           original_geometry: originalGeometry,
           original_attributes: originalAttributes,
           change_reason: changeReason,
+          ...(surveyStatus ? { survey_status: surveyStatus } : {}),
           ...(typedData || {}),
           ...(gpsMeta
             ? { gps_accuracy_m: gpsMeta.accuracyM ?? null, gps_quality: gpsMeta.quality || '' }
@@ -333,7 +340,7 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
           original_attributes: originalAttributes ?? null,
           survey_geometry: surveyGeometry,
           survey_attributes: surveyAttributes ?? {},
-          survey_status: 'new' as const,
+          survey_status: (surveyStatus ?? 'new') as 'new' | 'removed',
           version_number: 1,
           sync_status: 'pending' as const,
           change_reason: changeReason ?? '',
@@ -367,7 +374,7 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
         original_attributes: (originalAttributes ?? existingLocal?.original_attributes ?? null) as SurveyFeatureData['original_attributes'],
         survey_geometry: surveyGeometry as SurveyFeatureData['survey_geometry'],
         survey_attributes: (surveyAttributes ?? existingLocal?.survey_attributes ?? {}) as SurveyFeatureData['survey_attributes'],
-        survey_status: existingLocal?.survey_status ?? (hldFeatureId ? 'modified' : 'new'),
+        survey_status: surveyStatus ?? existingLocal?.survey_status ?? (hldFeatureId ? 'modified' : 'new'),
         version_number: existingLocal?.version_number ?? 1,
         sync_status: 'pending',
         change_reason: changeReason ?? existingLocal?.change_reason ?? '',

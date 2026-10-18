@@ -2160,9 +2160,17 @@ export default function MapScreen() {
   // If the feature was engineer-created (no HLD original), we delete the SurveyFeature entirely.
   const handleDeleteFeature = useCallback(
     (featureId: string, layerId: string) => {
-      // Check if a SurveyFeature exists for this feature
-      const existingSurvey = getSurveyFeatureForHld(featureId);        if (existingSurvey) {
-          // ── Has an HLD original → hard-delete the survey edit (HLD stays on map in blue) ──
+      // A delete can be aimed at the HLD feature or straight at the survey copy
+      // (the survey view shows the SurveyFeature id), so resolve both.
+      const baseLid = layerId.replace(/^survey-/, '');
+      const existingSurvey =
+        getSurveyFeatureForHld(featureId) ??
+        (surveyFeatures[baseLid] ?? []).find((s) => s.id === featureId);
+
+      if (existingSurvey && existingSurvey.original_hld_feature) {
+          // ── HLD-backed → keep the record and mark it removed (logical delete).
+          // The planner/LLD queue drops dependents off this marker, so the row
+          // must survive; deleting it made "Logical delete" a silent no-op.
           pushUndo({
             featureId,
             layerId,
@@ -2173,71 +2181,73 @@ export default function MapScreen() {
             timestamp: Date.now(),
             surveyUndo: {
               surveyFeatureId: existingSurvey.id,
-              layerId,
+              layerId: baseLid,
               previousGeometry: existingSurvey.survey_geometry,
               previousAttributes: existingSurvey.survey_attributes,
               previousStatus: existingSurvey.survey_status,
               description: `Undo: restore survey feature ${featureId.slice(-8)}`,
             },
           });
-          // Optimistic local removal so the map re-renders immediately.
+          // Optimistic local status flip so the map drops it at once; the row
+          // itself stays, with its status, for the planner to review.
           const store = useSurveyFeaturesStore.getState();
-          const currentLayer = store.surveyFeatures[layerId] ?? [];
+          const currentLayer = store.surveyFeatures[baseLid] ?? [];
           useSurveyFeaturesStore.setState({
             surveyFeatures: {
               ...store.surveyFeatures,
-              [layerId]: currentLayer.filter((sf) => sf.id !== existingSurvey.id),
+              [baseLid]: currentLayer.map((sf) =>
+                sf.id === existingSurvey.id ? { ...sf, survey_status: 'removed' as const } : sf
+              ),
             },
           });
-          // Hard delete from the DB — the backend ignores survey_status PATCHes,
-          // so DELETE is the only reliable way to actually remove the feature.
-          deleteSurveyFeature(existingSurvey.id, layerId);
-          console.log(`[Delete] SurveyFeature ${existingSurvey.id.slice(-8)} deleted (map + DB) — HLD untouched`);
-      } else {
-        // ── No existing SurveyFeature. This is a pure HLD point being deleted.
-        // Create a new SurveyFeature with status 'removed' (Logical Delete).
-        // Use null hldFeatureId → routes through createSurveyFeature (no FK validation).
-        // First: check if featureId is a SurveyFeature ID directly (survey view)
-        const baseLid = layerId.replace(/^survey-/, '');
-        const allSurveyForLayer = surveyFeatures[baseLid] ?? [];
-        const directSf = allSurveyForLayer.find((s) => s.id === featureId);
-        if (directSf) {
-          pushUndo({
-            featureId, layerId: baseLid,
-            oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
-            timestamp: Date.now(),
-            surveyUndo: {
-              surveyFeatureId: directSf.id, layerId: baseLid,
-              previousGeometry: directSf.survey_geometry,
-              previousAttributes: directSf.survey_attributes,
-              previousStatus: directSf.survey_status,
-              description: `Undo: restore survey feature ${directSf.id.slice(-8)}`,
-            },
-          });
-          // Optimistic local removal so the map re-renders immediately.
-          const store = useSurveyFeaturesStore.getState();
-          const current = store.surveyFeatures[baseLid] ?? [];
-          useSurveyFeaturesStore.setState({
-            surveyFeatures: {
-              ...store.surveyFeatures,
-              [baseLid]: current.filter((sf) => sf.id !== directSf.id),
-            },
-          });
-          // Hard delete from the DB — the backend ignores survey_status PATCHes.
-          deleteSurveyFeature(directSf.id, baseLid);
-          console.log(`[Delete] Survey feature ${directSf.id.slice(-8)} deleted (map + DB)`);
+          updateSurveyFeature(existingSurvey.id, baseLid, { survey_status: 'removed' });
+          console.log(`[Delete] SurveyFeature ${existingSurvey.id.slice(-8)} marked removed — HLD untouched`);
           return;
-        }
-        // Not a direct survey feature — this is a pure HLD feature.
-        // Create a new SurveyFeature with status 'removed'.
+      }
+
+      if (existingSurvey) {
+        // ── Engineer-created (no HLD original): nothing to keep, so remove the
+        // row outright — a removed marker with no design feature is noise.
+        pushUndo({
+          featureId, layerId: baseLid,
+          oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+          timestamp: Date.now(),
+          surveyUndo: {
+            surveyFeatureId: existingSurvey.id, layerId: baseLid,
+            previousGeometry: existingSurvey.survey_geometry,
+            previousAttributes: existingSurvey.survey_attributes,
+            previousStatus: existingSurvey.survey_status,
+            description: `Undo: restore survey feature ${existingSurvey.id.slice(-8)}`,
+          },
+        });
+        const store = useSurveyFeaturesStore.getState();
+        const current = store.surveyFeatures[baseLid] ?? [];
+        useSurveyFeaturesStore.setState({
+          surveyFeatures: {
+            ...store.surveyFeatures,
+            [baseLid]: current.filter((sf) => sf.id !== existingSurvey.id),
+          },
+        });
+        deleteSurveyFeature(existingSurvey.id, baseLid);
+        console.log(`[Delete] Engineer-created survey feature ${existingSurvey.id.slice(-8)} deleted (map + DB)`);
+        return;
+      }
+
+      {
+        // ── No SurveyFeature yet: this is a pure HLD feature. Record the
+        // removal as a survey change (Logical Delete) and keep it.
         const { geometry: origGeom, attributes: origAttrs } = findHldFeatureOriginal(featureId, layerId);
         if (!origGeom) {
           console.warn(`[Delete] Cannot find HLD geometry for ${featureId} in ${layerId} — cannot create removed entry`);
           return;
         }
         const layerName = activeLayerNames[layerId] ?? layerId.toUpperCase();
+        // The removal is tied to the HLD feature it replaces
+        // (original_hld_feature = featureId): the LLD review groups changes by
+        // that link, so a removal with no parent reads as a brand-new field
+        // feature instead of a removal of this one.
         upsertSurveyFeature(
-          null,  // null = new engineer-created feature (avoids FK validation on imported IDs)
+          featureId,
           layerId,
           layerName,
           origGeom as Record<string, unknown>,
@@ -2245,27 +2255,26 @@ export default function MapScreen() {
           origGeom,
           origAttrs,
           `Feature removed from survey`,
-        ).then((createdSf) => {
-          if (createdSf) {
+          undefined,
+          undefined,
+          'removed',
+        ).then((removedSf) => {
+          if (removedSf) {
             pushUndo({
               featureId,
               layerId,
               oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
               timestamp: Date.now(),
               surveyUndo: {
-                surveyFeatureId: createdSf.id,
+                surveyFeatureId: removedSf.id,
                 layerId,
-                previousGeometry: createdSf.survey_geometry,
-                previousAttributes: createdSf.survey_attributes,
-                previousStatus: createdSf.survey_status,
+                previousGeometry: removedSf.survey_geometry,
+                previousAttributes: removedSf.survey_attributes,
+                previousStatus: removedSf.survey_status,
                 description: `Undo: restore removed feature ${featureId.slice(-8)}`,
               },
             });
-            // The backend cannot persist survey_status='removed', so the record
-            // is hard-deleted right after creation — net DB effect: none, and no
-            // stray orange feature is left behind.
-            deleteSurveyFeature(createdSf.id, layerId);
-            console.log(`[Delete] HLD ${featureId.slice(-8)} removed (no survey edit existed — record cleaned up)`);
+            console.log(`[Delete] HLD ${featureId.slice(-8)} marked removed (survey_status=removed, kept for review)`);
           }
         }).catch((err) => {
           console.error(`[Delete] Failed to create removed survey feature:`, err);
@@ -3587,6 +3596,17 @@ export default function MapScreen() {
       setDrawTrenchSnapLabel(null);
       setDrawTrenchActive(false);
       autoOverlayOnEdit();
+      // A trench that was just drawn is unclassified: open the same field sheet
+      // the point popup opens so its trench classification (depth, width,
+      // surface, crossings, permit) is captured while the engineer is standing
+      // on it, instead of only if they remember to tap the line again.
+      handlePointSurveyForm({
+        id: sf.id,
+        layerId: drawTrenchLayer,
+        geometryType: 'LineString',
+        name: `Trench ${sf.id.slice(-8)}`,
+        layerName,
+      });
       console.log(`[DrawTrench] Saved ${sf.id} — ${coords.length} vertices on ${drawTrenchLayer}`);
     } catch (err) {
       console.error('[DrawTrench] Save failed:', err);
@@ -3594,7 +3614,7 @@ export default function MapScreen() {
     } finally {
       setDrawTrenchBusy(false);
     }
-  }, [drawTrenchBusy, drawTrenchPoints, drawTrenchLayer, drawTrenchLengthM, activeLayerNames, upsertSurveyFeature, pushUndo, showToast, autoOverlayOnEdit]);
+  }, [drawTrenchBusy, drawTrenchPoints, drawTrenchLayer, drawTrenchLengthM, activeLayerNames, upsertSurveyFeature, pushUndo, showToast, autoOverlayOnEdit, handlePointSurveyForm]);
 
   // ── Draw Segment: independent two-point tool ───────────────────────────
   // Unlike Reroute, this tool never edits the selected line's existing path.
