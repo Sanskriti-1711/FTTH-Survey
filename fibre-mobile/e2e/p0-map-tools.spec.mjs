@@ -399,7 +399,8 @@ describe('P0 map tools on the web build', { concurrency: 1 }, () => {
     if (requiresCreds()) return t.skip(requiresCreds());
     await reset();
     await page.getByLabel('Open the tools menu').click();
-    await page.getByText('Draw Trench', { exact: true }).click();
+    // The "Draw Trench" text is a label pill, not a control; the FAB is the button.
+    await page.getByLabel('Draw a new trench line on the map').click();
 
     await page.getByText('Tap the map to place the first vertex').waitFor({ state: 'visible', timeout: UI_TIMEOUT });
     assert.equal(await page.getByRole('button', { name: 'Save trench' }).isDisabled(), true);
@@ -410,7 +411,7 @@ describe('P0 map tools on the web build', { concurrency: 1 }, () => {
     await reset();
 
     // Read-only: the button is only read, never tapped, so nothing is submitted.
-    await page.getByText(/^\d+ changes?$/).first().waitFor({ state: 'visible', timeout: UI_TIMEOUT });
+    await page.getByText(/^\d+ changes?\b/).first().waitFor({ state: 'visible', timeout: UI_TIMEOUT });
     assert.ok(await page.getByRole('button', { name: 'Submit survey' }).isEnabled());
   });
 });

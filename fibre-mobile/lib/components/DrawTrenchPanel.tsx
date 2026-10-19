@@ -160,6 +160,12 @@ export default function DrawTrenchPanel({
           onPress={onSave}
           disabled={!canSave}
           activeOpacity={0.75}
+          accessibilityRole="button"
+          accessibilityLabel="Save trench"
+          accessibilityState={{ disabled: !canSave }}
+          role="button"
+          aria-label="Save trench"
+          aria-disabled={!canSave}
         >
           <Save size={16} stroke={canSave ? colors.onPrimary : colors.textTertiary} />
           <Text style={[styles.actionText, { color: canSave ? colors.onPrimary : colors.textTertiary, fontWeight: '700' }]}>
