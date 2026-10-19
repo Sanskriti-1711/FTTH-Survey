@@ -37,15 +37,38 @@ project id, and a cold Render instance can spend ~20 s fetching 13 layers.
 | SA-050 | line toolbar exposes Edit shape / Split / Route around / Remove span / Extend / Attributes / Delete / Undo / Save |
 | SA-090 | polygon toolbar exposes Move / Undo / Cancel / Delete / Save |
 | SA-095 | a fresh load has nothing to undo |
+| SA-081 | Draw Trench panel shows its guidance and a disabled Save |
 | SA-104 | the changes panel lists the fixture's saved changes |
+| SA-105 | the commit bar shows the change count and an enabled Submit button (read only) |
+
+## Mutating cases (snapshot, test, restore)
+
+SA-040, SA-041 and SA-098 write survey rows. Each runs inside `mutatingCase()`:
+
+1. `db-snapshot.sh` exports the `business.*` survey rows for `E2E_SURVEY_PROJECT_ID`.
+2. `db-fingerprint.sh` hashes the `gis.*` layers of the source project.
+3. The case runs on a fresh load.
+4. `db-reset.sh` restores the survey rows, always, even when the case fails.
+5. The fingerprint is compared again. A change fails the case.
+
+These cases only run when you opt in:
+
+```bash
+export E2E_ALLOW_DB_RESET=1
+# plus PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE from the repo .env, exported in this shell
+E2E_EMAIL=... E2E_PASSWORD=... npm run test:e2e
+```
+
+The scripts use `psql`, so it must be on the PATH. Without the opt-in the cases
+skip. Do not point the opt-in at a project you need to keep.
 
 ## Deliberately manual
 
-The remaining P0 cases write to the backend (draw, split, merge, delete, save,
-required-field gate, submit) or need a disposable project. Running them here
-would corrupt the shared fixture, so they are listed as `skip` entries at the
-bottom of the spec with the reason. To automate them, point `E2E_PROJECT` at a
-throwaway copy and add a reset step between cases.
+The remaining P0 cases need a map gesture at a coordinate (drag, tap on a line,
+add point), a fixture with specific state (zero changes, a feature with no prior
+edit, two saved edits), or they change project status (SA-107) or need an
+offline network (SA-018). They are listed as `skip` entries at the bottom of the
+spec with the reason.
 
 ## Selector notes (learned the hard way)
 

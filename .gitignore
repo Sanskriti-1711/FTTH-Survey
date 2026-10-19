@@ -91,3 +91,6 @@ fibre-mobile/.ci-build/
 
 # ── Local APK / device artifacts ───────────────────────────
 builds/
+
+# ── Local e2e snapshots (contain real project rows) ─────────
+tmp/e2e-snapshot/

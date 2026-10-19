@@ -13,12 +13,17 @@
 //   E2E_PROJECT   (default UI-Brownfield-Verify) — a project that already has
 //                 imported layers and at least one survey change.
 //
-// The mutating P0 cases (draw/split/merge/delete/save, required-field gates,
-// submit) are listed at the bottom as skips: they need a disposable project
-// and a backend reset between runs, otherwise they poison the fixture.
+// Mutating cases that the label-driven UI can reach run inside mutatingCase():
+// snapshot the survey rows, run the case, restore the rows, then prove the gis
+// layers were untouched. They only run with E2E_ALLOW_DB_RESET=1 and the PG*
+// variables from the repo .env exported in the same shell. The rest are
+// listed at the bottom as skips with the reason.
 
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { after, before, describe, it } from 'node:test';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
 const BASE_URL = process.env.E2E_BASE_URL ?? 'https://fibre-survey-web.onrender.com';
@@ -145,6 +150,44 @@ after(async () => {
 });
 
 const requiresCreds = () => (EMAIL && PASSWORD ? false : 'set E2E_EMAIL and E2E_PASSWORD');
+
+const mutatingSkip = () =>
+  process.env.E2E_ALLOW_DB_RESET !== '1'
+    ? 'set E2E_ALLOW_DB_RESET=1 to write and restore the survey rows'
+    : requiresCreds();
+
+const execFileAsync = promisify(execFile);
+const E2E_DIR = fileURLToPath(new URL('.', import.meta.url));
+
+/** Runs one of the db-*.sh helpers next to this spec and returns its stdout. */
+async function runDbScript(name) {
+  const { stdout } = await execFileAsync('bash', [name], {
+    cwd: E2E_DIR,
+    env: process.env,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  return stdout;
+}
+
+/**
+ * Snapshot the survey rows, run the case on a fresh load, always restore the
+ * rows, then check that the gis.* layers for the source project are unchanged.
+ */
+async function mutatingCase(fn) {
+  await runDbScript('db-snapshot.sh');
+  const gisBefore = await runDbScript('db-fingerprint.sh');
+  try {
+    await reset();
+    await fn();
+  } finally {
+    await runDbScript('db-reset.sh');
+  }
+  assert.equal(
+    await runDbScript('db-fingerprint.sh'),
+    gisBefore,
+    'gis.* rows changed: a case wrote outside the survey tables',
+  );
+}
 
 describe('P0 map tools on the web build', { concurrency: 1 }, () => {
   it('SA-017 map opens with every imported layer rendered', async (t) => {
@@ -351,6 +394,82 @@ describe('P0 map tools on the web build', { concurrency: 1 }, () => {
     assert.equal(await page.getByText('No Survey Changes Yet').count(), 0, 'fixture project must already have changes');
     assert.ok((await page.getByText(/#[0-9a-f]{6}/).count()) > 0, 'change rows are rendered');
   });
+
+  it('SA-081 draw trench panel opens with guidance and a disabled save', async (t) => {
+    if (requiresCreds()) return t.skip(requiresCreds());
+    await reset();
+    await page.getByLabel('Open the tools menu').click();
+    await page.getByText('Draw Trench', { exact: true }).click();
+
+    await page.getByText('Tap the map to place the first vertex').waitFor({ state: 'visible', timeout: UI_TIMEOUT });
+    assert.equal(await page.getByRole('button', { name: 'Save trench' }).isDisabled(), true);
+  });
+
+  it('SA-105 commit bar reports the change count and the submit label', async (t) => {
+    if (requiresCreds()) return t.skip(requiresCreds());
+    await reset();
+
+    // Read-only: the button is only read, never tapped, so nothing is submitted.
+    await page.getByText(/^\d+ changes?$/).first().waitFor({ state: 'visible', timeout: UI_TIMEOUT });
+    assert.ok(await page.getByRole('button', { name: 'Submit survey' }).isEnabled());
+  });
+});
+
+// Writes survey rows, then restores them. See mutatingCase().
+describe('P0 mutating map cases (restored from snapshot)', { concurrency: 1 }, () => {
+  it('SA-040 saved survey fields persist after reload', async (t) => {
+    const skip = mutatingSkip();
+    if (skip) return t.skip(skip);
+    await mutatingCase(async () => {
+      await openFeatureFromList('chambers');
+      await page.getByText('Edit', { exact: true }).last().click();
+      await page.getByText('Save Survey Details', { exact: true }).waitFor({ state: 'visible', timeout: UI_TIMEOUT });
+
+      const value = `e2e-${Date.now()}`;
+      await page.getByRole('textbox').first().fill(value);
+      await page.getByText('Save Survey Details', { exact: true }).click();
+      // The sheet stays open after a save.
+      await page.getByText('Save Survey Details', { exact: true }).waitFor({ state: 'visible', timeout: UI_TIMEOUT });
+
+      await reset();
+      await openFeatureFromList('chambers');
+      await page.getByText('Edit', { exact: true }).last().click();
+      await page.getByDisplayValue(value).first().waitFor({ state: 'visible', timeout: UI_TIMEOUT });
+    });
+  });
+
+  it('SA-041 required-field gate refuses the save and names the fields', async (t) => {
+    const skip = mutatingSkip();
+    if (skip) return t.skip(skip);
+    await mutatingCase(async () => {
+      await openFeatureFromList(process.env.E2E_REQUIRED_LAYER ?? 'chambers');
+      await page.getByText('Edit', { exact: true }).last().click();
+      await page.getByText('Save Survey Details', { exact: true }).waitFor({ state: 'visible', timeout: UI_TIMEOUT });
+
+      await page.getByRole('textbox').first().fill('');
+      await page.getByText('Save Survey Details', { exact: true }).click();
+      await page.getByText(/^Still required:/).waitFor({ state: 'visible', timeout: UI_TIMEOUT });
+    });
+  });
+
+  it('SA-098 delete from the survey sheet asks for confirmation and records removal', async (t) => {
+    const skip = mutatingSkip();
+    if (skip) return t.skip(skip);
+    await mutatingCase(async () => {
+      await openFeatureFromList('chambers');
+      await page.getByText('Edit', { exact: true }).last().click();
+      await page.getByText('Save Survey Details', { exact: true }).waitFor({ state: 'visible', timeout: UI_TIMEOUT });
+
+      await page.getByText('Delete', { exact: true }).last().click();
+      const confirm = page.getByText('Tap again to confirm', { exact: true });
+      await confirm.waitFor({ state: 'visible', timeout: UI_TIMEOUT });
+      await confirm.click();
+
+      // An HLD-backed point keeps its survey row with status removed.
+      await page.getByLabel(/Review changes/).click();
+      await page.getByText(/removed/i).first().waitFor({ state: 'visible', timeout: UI_TIMEOUT });
+    });
+  });
 });
 
 // ── P0 cases kept manual on purpose ─────────────────────────────────────────
@@ -361,8 +480,6 @@ describe('P0 map tools that need a disposable project', { concurrency: 1 }, () =
     'SA-018': 'cold-connection failure path depends on network conditions',
     'SA-028': 'hide-layer persistence needs a per-run layer toggle and reload',
     'SA-039': 'survey section persistence is covered read-only by SA-034',
-    'SA-040': 'saving schema fields mutates the fixture project',
-    'SA-041': 'required-field gate only fires on Save (mutating)',
     'SA-051': 'vertex drag mutates geometry',
     'SA-052': 'snap hysteresis needs a real drag',
     'SA-059': 'bundle propagation needs a dependent trench edit',
@@ -371,14 +488,11 @@ describe('P0 map tools that need a disposable project', { concurrency: 1 }, () =
     'SA-069': 'detour preview needs a corridor fixture',
     'SA-071': 'delete-section mutates geometry',
     'SA-076': 'line delete mutates the fixture',
-    'SA-081': 'draw trench creates a feature',
     'SA-082': 'armed draw needs map taps',
     'SA-087': 'add point creates a feature',
     'SA-091': 'polygon vertex edit mutates geometry',
     'SA-096': 'undo of two saved edits mutates state',
-    'SA-098': 'delete from the survey sheet mutates the fixture',
-    'SA-100': 'delete-without-prior-edit creates a removed marker',
-    'SA-105': 'sync/submit pushes changes to the backend',
+    'SA-100': 'needs an HLD feature with no prior survey edit (fixture chambers already has one)',
     'SA-106': 'needs a zero-change project',
     'SA-107': 'submits the survey copy',
     'SA-137': 'regression check needs an edit to be made first',
