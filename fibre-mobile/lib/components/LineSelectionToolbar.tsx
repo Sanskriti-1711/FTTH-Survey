@@ -9,7 +9,7 @@
 //   Attributes — opens the survey attribute form for this line
 //   Delete — logical delete of the feature (survey layer stays intact)
 //   Undo — reverts the most recent edit
-//   Save — rightmost, full-width primary; persists the working copy
+//   Save — pinned at the right edge (outside the scroll row); persists the working copy
 
 import React, { useEffect, useRef } from 'react';
 import type { ComponentType } from 'react';
@@ -120,7 +120,7 @@ const ACTIONS: ActionDef[] = [
   { id: 'attributes', label: 'Attributes', icon: ClipboardList },
   { id: 'del_feature', label: 'Delete', icon: Trash2, danger: true },
   { id: 'undo', label: 'Undo', icon: Undo2 },
-  // Save stays LAST so the primary action is the rightmost button.
+  // Save is pinned outside the scroll row, always the rightmost button.
   { id: 'save', label: 'Save', icon: Save, accent: true },
 ];
 
@@ -173,6 +173,155 @@ export default function LineSelectionToolbar({
 
   if (!isVisible) return null;
 
+  const renderAction = (action: ActionDef) => {
+    const isUndo = action.id === 'undo';
+    const isMove = action.id === 'move';
+    const isSave = action.id === 'save';
+    const isDeleteSection = action.id === 'del_section';
+    const isDeleteFeature = action.id === 'del_feature';
+    const isContinue = action.id === 'continue';
+    const isSplit = action.id === 'split';
+    const isRouteAround = action.id === 'route_around';
+    const isAttributes = action.id === 'attributes';
+    const showBadge = isUndo && undoCount > 0;
+
+    // ── Determine button state ──
+    const isEnabled = true;
+    const isMoveActive = isMove && moveMode;
+    const isSaveActive = isSave && hasUnsavedChanges;
+    const isDeleteActive = isDeleteSection && deleteSectionMode;
+    const isContinueActive = isContinue && continueMode;
+    const isSplitActive = isSplit && splitMode;
+    const isRouteAroundActive = isRouteAround && routeAroundMode;
+
+    // Style overrides for active states
+    let bgColor = colors.background;
+    let borderColor = colors.outlineLight;
+    let textColor = colors.textTertiary;
+    let opacity = 1;
+    let iconColor = undefined;
+
+    textColor = colors.textSecondary;
+    if (isMoveActive || isDeleteActive || isContinueActive || isSplitActive || isRouteAroundActive) {
+      bgColor = '#FF8C00' + '20';
+      borderColor = '#FF8C00';
+      textColor = '#FF8C00';
+    } else if (isSaveActive) {
+      // Primary action once the working copy differs from the baseline.
+      bgColor = colors.primary;
+      borderColor = colors.primary;
+      textColor = colors.onPrimary;
+    } else if (isSave && !hasUnsavedChanges) {
+      // Nothing has actually changed yet — dim Save so an empty
+      // save can never look armed (matches handleSaveLine's 0.5 m
+      // no-op guard).
+      opacity = 0.5;
+    }
+
+    return (
+      <View key={action.id} style={[styles.actionWrapper, isSave && styles.saveWrapper]}>
+        <TouchableOpacity
+          style={[
+            styles.actionBtn,
+            isSave && styles.saveBtn,
+            {
+              backgroundColor: bgColor,
+              borderColor,
+              opacity,
+            },
+          ]}
+          disabled={!isEnabled || (isSave && !hasUnsavedChanges)}
+          activeOpacity={0.7}
+          onPress={() => {
+            if (isDeleteSection && deleteSectionStep === 2 && onDeleteConfirm) onDeleteConfirm();
+            else if (isMove && onToggleMove) onToggleMove();
+            else if (isSave && onSave) onSave();
+            else if (isDeleteSection && onDeleteSection) onDeleteSection();
+            else if (isSplit && onSplit) onSplit();
+            else if (isRouteAround && onRouteAround) onRouteAround();
+            else if (isAttributes && onAttributes) onAttributes();
+            else if (isDeleteFeature && onDeleteFeature) onDeleteFeature();
+            else if (isUndo && onUndo) onUndo();
+            else if (isContinue && onContinue) onContinue();
+          }}
+        >
+          <action.icon size={18} stroke={textColor} />
+          <Text
+            style={[styles.actionLabel, { color: textColor }]}
+            numberOfLines={1}
+          >
+            {isMove && moveMode
+              ? 'Editing: ON'
+              : isSplit && splitMode
+                ? 'Tap line'
+                : isRouteAround && routeAroundMode
+                  ? 'Tap works'
+                : isDeleteSection && deleteSectionMode
+                  ? (deleteSectionStep === 2 ? 'Confirm' : 'Span: ON')
+                  : isContinue && continueMode
+                    ? 'Drawing: ON'
+                    : action.label}
+          </Text>
+        </TouchableOpacity>
+
+        {/* Badge for Undo count */}
+        {showBadge && (
+          <View style={[styles.badge, { backgroundColor: colors.primary }]}>
+            <Text style={styles.badgeText}>
+              {undoCount > 99 ? '99+' : undoCount}
+            </Text>
+          </View>
+        )}
+
+        {isSplit && (
+          <Text style={[styles.soonLabel, { color: splitMode ? '#FF8C00' : colors.textTertiary }]} numberOfLines={1}>
+            {splitMode ? 'Where?' : 'New chamber'}
+          </Text>
+        )}
+        {isRouteAround && (
+          <Text style={[styles.soonLabel, { color: routeAroundMode ? '#FF8C00' : colors.textTertiary }]} numberOfLines={1}>
+            {routeAroundMode ? `${obstacleRadiusM} m zone` : 'Works / closure'}
+          </Text>
+        )}
+        {isAttributes && (
+          <Text style={[styles.soonLabel, { color: colors.textTertiary }]} numberOfLines={1}>
+            Field data
+          </Text>
+        )}
+        {isDeleteSection && (
+          <Text style={[styles.soonLabel, { color: deleteSectionMode ? '#FF8C00' : colors.textTertiary }]}>
+            {deleteSectionMode ? (deleteSectionStep === 1 ? 'Tap end' : deleteSectionStep === 2 ? 'Confirm' : 'Ready') : 'Tap to start'}
+          </Text>
+        )}
+        {isContinue && (
+          <Text style={[styles.soonLabel, { color: continueMode ? (continueSnapLabel ? colors.success : '#FF8C00') : colors.textTertiary }]} numberOfLines={1}>
+            {continueMode ? (continueLineStep === 0 ? 'Tap start' : continueLineStep === 1 ? 'Tap destination' : continueSnapLabel ? 'Snapped' : 'Tap to extend') : 'Tap to start'}
+          </Text>
+        )}
+        {isDeleteFeature && (
+          <Text style={[styles.soonLabel, { color: colors.textTertiary }]}>
+            Logical delete
+          </Text>
+        )}
+        {isMove && (
+          <Text style={[styles.soonLabel, { color: moveMode ? '#FF8C00' : colors.textTertiary }]}>
+            {moveMode ? 'Active' : 'Vertices + bends'}
+          </Text>
+        )}
+        {isSave && (
+          <Text style={[styles.soonLabel, { color: hasUnsavedChanges ? colors.primary : colors.textTertiary }]}>
+            {hasUnsavedChanges ? 'Unsaved' : 'No changes'}
+          </Text>
+        )}
+        {isUndo && (
+          <Text style={[styles.soonLabel, { color: undoCount > 0 ? colors.primary : colors.textTertiary }]}>
+            {undoCount > 0 ? `${undoCount} to undo` : 'Nothing to undo'}
+          </Text>
+        )}
+      </View>
+    );
+  };
+
   return (
     <Animated.View
       style={[
@@ -224,162 +373,20 @@ export default function LineSelectionToolbar({
         </TouchableOpacity>
       </View>
 
-      {/* ── Action buttons ────────────────────────────────────────────── */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.actionsContainer}
-      >
-        {ACTIONS.map((action) => {
-          const isUndo = action.id === 'undo';
-          const isMove = action.id === 'move';
-          const isSave = action.id === 'save';
-          const isDeleteSection = action.id === 'del_section';
-          const isDeleteFeature = action.id === 'del_feature';
-          const isContinue = action.id === 'continue';
-          const isSplit = action.id === 'split';
-          const isRouteAround = action.id === 'route_around';
-          const isAttributes = action.id === 'attributes';
-          const showBadge = isUndo && undoCount > 0;
-
-          // ── Determine button state ──
-          const isEnabled = true;
-          const isMoveActive = isMove && moveMode;
-          const isSaveActive = isSave && hasUnsavedChanges;
-          const isDeleteActive = isDeleteSection && deleteSectionMode;
-          const isContinueActive = isContinue && continueMode;
-          const isSplitActive = isSplit && splitMode;
-          const isRouteAroundActive = isRouteAround && routeAroundMode;
-
-          // Style overrides for active states
-          let bgColor = colors.background;
-          let borderColor = colors.outlineLight;
-          let textColor = colors.textTertiary;
-          let opacity = 0.45; // disabled placeholder look
-          let iconColor = undefined;
-
-          opacity = 1;
-          textColor = colors.textSecondary;
-          if (isMoveActive || isDeleteActive || isContinueActive || isSplitActive || isRouteAroundActive) {
-            bgColor = '#FF8C00' + '20';
-            borderColor = '#FF8C00';
-            textColor = '#FF8C00';
-          } else if (isSaveActive) {
-            // Primary action once the working copy differs from the baseline.
-            bgColor = colors.primary;
-            borderColor = colors.primary;
-            textColor = colors.onPrimary;
-          } else if (isSave && !hasUnsavedChanges) {
-            // Nothing has actually changed yet — dim Save so an empty
-            // save can never look armed (matches handleSaveLine's 0.5 m
-            // no-op guard).
-            opacity = 0.5;
-          }
-
-          return (
-            <View key={action.id} style={[styles.actionWrapper, isSave && styles.saveWrapper]}>
-              <TouchableOpacity
-                style={[
-                  styles.actionBtn,
-                  isSave && styles.saveBtn,
-                  {
-                    backgroundColor: bgColor,
-                    borderColor,
-                    opacity,
-                  },
-                ]}
-                disabled={!isEnabled || (isSave && !hasUnsavedChanges)}
-                activeOpacity={0.7}
-                onPress={() => {
-                  if (isDeleteSection && deleteSectionStep === 2 && onDeleteConfirm) onDeleteConfirm();
-                  else if (isMove && onToggleMove) onToggleMove();
-                  else if (isSave && onSave) onSave();
-                  else if (isDeleteSection && onDeleteSection) onDeleteSection();
-                  else if (isSplit && onSplit) onSplit();
-                  else if (isRouteAround && onRouteAround) onRouteAround();
-                  else if (isAttributes && onAttributes) onAttributes();
-                  else if (isDeleteFeature && onDeleteFeature) onDeleteFeature();
-                  else if (isUndo && onUndo) onUndo();
-                  else if (isContinue && onContinue) onContinue();
-                }}
-              >
-                <action.icon size={18} stroke={textColor} />
-                <Text
-                  style={[styles.actionLabel, { color: textColor }]}
-                  numberOfLines={1}
-                >
-                  {isMove && moveMode
-                    ? 'Editing: ON'
-                    : isSplit && splitMode
-                      ? 'Tap line'
-                      : isRouteAround && routeAroundMode
-                        ? 'Tap works'
-                      : isDeleteSection && deleteSectionMode
-                        ? (deleteSectionStep === 2 ? 'Confirm' : 'Span: ON')
-                        : isContinue && continueMode
-                          ? 'Drawing: ON'
-                          : action.label}
-                </Text>
-              </TouchableOpacity>
-
-              {/* Badge for Undo count */}
-              {showBadge && (
-                <View style={[styles.badge, { backgroundColor: colors.primary }]}>
-                  <Text style={styles.badgeText}>
-                    {undoCount > 99 ? '99+' : undoCount}
-                  </Text>
-                </View>
-              )}
-
-              {isSplit && (
-                <Text style={[styles.soonLabel, { color: splitMode ? '#FF8C00' : colors.textTertiary }]} numberOfLines={1}>
-                  {splitMode ? 'Where?' : 'New chamber'}
-                </Text>
-              )}
-              {isRouteAround && (
-                <Text style={[styles.soonLabel, { color: routeAroundMode ? '#FF8C00' : colors.textTertiary }]} numberOfLines={1}>
-                  {routeAroundMode ? `${obstacleRadiusM} m zone` : 'Works / closure'}
-                </Text>
-              )}
-              {isAttributes && (
-                <Text style={[styles.soonLabel, { color: colors.textTertiary }]} numberOfLines={1}>
-                  Field data
-                </Text>
-              )}
-              {isDeleteSection && (
-                <Text style={[styles.soonLabel, { color: deleteSectionMode ? '#FF8C00' : colors.textTertiary }]}>
-                  {deleteSectionMode ? (deleteSectionStep === 1 ? 'Tap end' : deleteSectionStep === 2 ? 'Confirm' : 'Ready') : 'Tap to start'}
-                </Text>
-              )}
-              {isContinue && (
-                <Text style={[styles.soonLabel, { color: continueMode ? (continueSnapLabel ? colors.success : '#FF8C00') : colors.textTertiary }]} numberOfLines={1}>
-                  {continueMode ? (continueLineStep === 0 ? 'Tap start' : continueLineStep === 1 ? 'Tap destination' : continueSnapLabel ? 'Snapped' : 'Tap to extend') : 'Tap to start'}
-                </Text>
-              )}
-              {isDeleteFeature && (
-                <Text style={[styles.soonLabel, { color: colors.textTertiary }]}>
-                  Logical delete
-                </Text>
-              )}
-              {isMove && (
-                <Text style={[styles.soonLabel, { color: moveMode ? '#FF8C00' : colors.textTertiary }]}>
-                  {moveMode ? 'Active' : 'Vertices + bends'}
-                </Text>
-              )}
-              {isSave && (
-                <Text style={[styles.soonLabel, { color: hasUnsavedChanges ? colors.primary : colors.textTertiary }]}>
-                  {hasUnsavedChanges ? 'Unsaved' : 'No changes'}
-                </Text>
-              )}
-              {isUndo && (
-                <Text style={[styles.soonLabel, { color: undoCount > 0 ? colors.primary : colors.textTertiary }]}>
-                  {undoCount > 0 ? `${undoCount} to undo` : 'Nothing to undo'}
-                </Text>
-              )}
-            </View>
-          );
-        })}
-      </ScrollView>
+      {/* ── Action buttons: scrollable row + pinned Save ─────────────── */}
+      <View style={styles.actionsRow}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.actionsScroll}
+          contentContainerStyle={styles.actionsContainer}
+        >
+          {ACTIONS.filter((a) => a.id !== 'save').map(renderAction)}
+        </ScrollView>
+        <View style={styles.pinnedSave}>
+          {ACTIONS.filter((a) => a.id === 'save').map(renderAction)}
+        </View>
+      </View>
 
       {/* ── Route-around works: radius + measured impact ────────────────── */}
       {routeAroundMode && (
@@ -547,13 +554,25 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
 
-  // ── Actions scroll row ─────────────────────────────────────────────────
+  // ── Actions row: scrollable buttons + pinned Save ──────────────────────
+  actionsRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  actionsScroll: {
+    flex: 1,
+  },
   actionsContainer: {
     flexDirection: 'row',
     gap: 6,
-    paddingHorizontal: 8,
+    paddingLeft: 8,
     paddingVertical: 6,
     alignItems: 'flex-start',
+  },
+  pinnedSave: {
+    paddingLeft: 4,
+    paddingRight: 8,
+    paddingVertical: 6,
   },
   actionWrapper: {
     alignItems: 'center',

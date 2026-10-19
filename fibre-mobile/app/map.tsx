@@ -22,7 +22,7 @@ import { gradeGpsAccuracy } from '../lib/utils/gps-quality';
 import { summarizeCommit } from '../lib/utils/commit';
 import { normalizeLayerId } from '../lib/utils/layer-ids';
 import { insertVertexAtPoint, deleteVertex, splitLineAtPoint, createLineString, findNearestLineCorner, extendLineToPoint, haversineMeters } from '../lib/utils/geometry-operations';
-import { planObstacleDetour } from '../lib/utils/obstacle-reroute';
+import { planObstacleDetour, metersPerDegLng } from '../lib/utils/obstacle-reroute';
 // Geometry operation utilities removed — all edits now route through survey-features store
 import GeometryEditor from '../lib/components/GeometryEditor';
 import type { GeometryMode, EditingFeature } from '../lib/components/GeometryEditor';
@@ -798,6 +798,18 @@ export default function MapScreen() {
   // fire twice with the same lngLat. Without this guard every tap would
   // append TWO points in multi-segment mode.
   const lastContinueTapRef = useRef<{ lng: number; lat: number; t: number } | null>(null);
+  // Split here (staged): span 2 waits here until Save writes it.
+  const pendingSplitRef = useRef<{
+    hldFeatureId: string; layerId: string; layerName: string;
+    origGeom: Record<string, unknown> | null; origAttrs: Record<string, unknown> | null;
+    coordsB: [number, number][]; reason: string;
+  } | null>(null);
+
+  // Holds the latest writeSplitSpan2 so handleSaveLine (declared earlier) can call it.
+  const writeSplitSpan2Ref = useRef<((
+    p: NonNullable<typeof pendingSplitRef.current>,
+    coordsA: [number, number][],
+  ) => void) | null>(null);
 
   // ── Add Point state ────────────────────────────────────────────────
   const [addPointTargetLayer, setAddPointTargetLayer] = useState<string>('');
@@ -1435,7 +1447,7 @@ export default function MapScreen() {
           importFeatureIdMap, effectiveLayerColors);
 
     // ── Survey layers (orange) — only when survey features exist ──
-    if (displayMode === 'hld') return hldLayers;
+
 
     const surveyLayers: any[] = [];
     for (const [layerId, sfList] of Object.entries(surveyFeatures)) {
@@ -1469,6 +1481,50 @@ export default function MapScreen() {
       });
     }
 
+    // ── Staged edits (orange): split span 2 held until Save, and the works
+    // zone while routing around it. Shown in every view, including HLD.
+    const stagedLayers: any[] = [];
+    const pendingSplitPreview = pendingSplitRef.current;
+    if (pendingSplitPreview && pendingSplitPreview.coordsB.length >= 2) {
+      stagedLayers.push({
+        id: 'temp-split-span2',
+        name: 'Split: span 2',
+        features: [{
+          type: 'Feature' as const,
+          geometry: { type: 'LineString' as const, coordinates: pendingSplitPreview.coordsB },
+          properties: { id: 'temp-split-span2', _id: 'temp-split-span2', _layer_id: 'temp-split-span2', _is_preview: true },
+        }],
+        visible: true,
+        color: SURVEY_COLOR,
+        geometryType: 'LineString' as const,
+      });
+    }
+    if (lineToolMode === 'route-around' && obstacleCentre) {
+      const dLat = obstacleRadiusM / 111000;
+      const dLng = obstacleRadiusM / metersPerDegLng(obstacleCentre.lat);
+      const ring: [number, number][] = [];
+      for (let i = 0; i <= 48; i++) {
+        const a = (i / 48) * 2 * Math.PI;
+        ring.push([obstacleCentre.lng + dLng * Math.cos(a), obstacleCentre.lat + dLat * Math.sin(a)]);
+      }
+      stagedLayers.push({
+        id: 'temp-works-zone',
+        name: 'Works zone',
+        features: [{
+          type: 'Feature' as const,
+          geometry: { type: 'Polygon' as const, coordinates: [ring] },
+          properties: { id: 'temp-works-zone', _id: 'temp-works-zone', _layer_id: 'temp-works-zone', _is_preview: true },
+        }],
+        visible: true,
+        color: SURVEY_COLOR,
+        geometryType: 'Polygon' as const,
+      });
+    }
+
+    // HLD view shows the HLD layers plus every survey edit in orange, so
+    // reroutes, spans, work-arounds and splits are visible without Overlay.
+    if (displayMode === 'hld') return [...hldLayers, ...surveyLayers, ...stagedLayers];
+
     // ── Temp Move Preview layer (orange) — shown during line move mode ──
     // Provides an orange preview of the line being edited, independent of
     // the blue HLD layer. Vertex markers render on this preview layer's
@@ -1477,7 +1533,7 @@ export default function MapScreen() {
     // In Draw Segment (continue-line) mode the preview only appears once
     // the two-point segment has actually been drawn — never the whole line.
     const showLinePreview =
-      lineMoveMode || (lineToolMode === 'continue-line' && continueLinePoints >= 1);
+      lineMoveMode || (lineToolMode === 'continue-line' && continueLinePoints >= 1) || lineToolMode === 'route-around';
     if (showLinePreview && tempLineCoords && selectedLineFeature) {
       const previewFeature = {
         type: 'Feature' as const,
@@ -1557,8 +1613,8 @@ export default function MapScreen() {
       });
     }
 
-    return [...hldLayers, ...previewLayers, ...surveyLayers];
-  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, lineToolMode, continueLinePoints, tempLineCoords, selectedLineFeature, selectedPolygonFeature, polygonEditCoords, isolateFeatureId, drawTrenchActive, drawTrenchPoints]);
+    return [...hldLayers, ...previewLayers, ...surveyLayers, ...stagedLayers];
+  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, lineToolMode, continueLinePoints, tempLineCoords, selectedLineFeature, selectedPolygonFeature, polygonEditCoords, isolateFeatureId, drawTrenchActive, drawTrenchPoints, obstacleCentre, obstacleRadiusM]);
 
   // Build visible layers from the active project's layers
   const visibleLayers = useMemo(() => {
@@ -2638,7 +2694,13 @@ export default function MapScreen() {
   const handleSaveLine = useCallback(async () => {
     if (!selectedLineFeature || !tempLineCoords || !tempLineOriginal) return;
     // Draw Segment: block saving before both points are placed.
-    if (lineToolMode === 'continue-line' && continueLinePoints === 0) {
+    // Extensions keep continueLinePoints at 0 (re-armed for the next step), so a
+    // grown working copy (longer than the baseline) is still a valid save.
+    if (
+      lineToolMode === 'continue-line' &&
+      continueLinePoints === 0 &&
+      tempLineCoords.length === tempLineOriginal.length
+    ) {
       console.log('[Continue] Draw the segment first — tap start, then destination');
       return;
     }
@@ -2870,7 +2932,17 @@ export default function MapScreen() {
         showToast('Save failed — check the server connection and retry', 'error');
         return;
       }
-    }    // Bundle propagation belongs only to Reroute. Draw Segment is an
+    }
+
+    // Staged split: span 1 has just saved, so create span 2 now.
+    const pendingSplit = pendingSplitRef.current;
+    const wasSplit = pendingSplit !== null && pendingSplit.hldFeatureId === featureId;
+    pendingSplitRef.current = null;
+    if (wasSplit && pendingSplit) {
+      writeSplitSpan2Ref.current?.(pendingSplit, tempLineCoords);
+    }
+
+    // Bundle propagation belongs only to Reroute. Draw Segment is an
     // independent two-point addition and must never rewrite neighbouring
     // corridor features as if the selected line had been diverted.
     // Propagation runs OUTSIDE the save try/catch and must never take a
@@ -2879,7 +2951,7 @@ export default function MapScreen() {
     // ("No change detected") — the reroute looked unsavable when it was
     // already saved. The detour itself is persisted above; a failed relay
     // only warns.
-    if (lineToolMode !== 'continue-line') {
+    if (lineToolMode !== 'continue-line' && !wasSplit) {
       try {
         propagateBundleReroute(featureId, layerId, tempLineOriginal, tempLineCoords, bundleSkipLayers);
       } catch (bundleErr) {
@@ -3200,56 +3272,36 @@ export default function MapScreen() {
         showToast('Could not split here — tap further from the line ends', 'warning');
         return;
       }
+      // ── Staged: nothing is written on tap. Span 1 becomes the working copy
+      // (saved by Save like any line edit); span 2 is held here and created
+      // by handleSaveLine, so a split can still be cancelled before Save.
       const { id: hldFeatureId, layerId: targetLayerId, layerName } = selectedLineFeature;
       const { geometry: origGeom, attributes: origAttrs } = findHldFeatureOriginal(hldFeatureId, targetLayerId);
-      const existing = getSurveyFeatureForHld(hldFeatureId);
-      const reason = `Split at vertex ${res.splitIndex + 1} — new chamber (${tempLineCoords.length} → ${res.coordsA.length} + ${res.coordsB.length} vertices)`;
+      pendingSplitRef.current = {
+        hldFeatureId, layerId: targetLayerId, layerName,
+        origGeom, origAttrs,
+        coordsB: res.coordsB,
+        reason: `Split at vertex ${res.splitIndex + 1} — new chamber (${tempLineCoords.length} → ${res.coordsA.length} + ${res.coordsB.length} vertices)`,
+      };
+      setTempLineCoords(res.coordsA);
+      setLineToolMode(null);
+      setLineMoveMode(true);
+      showToast(`Split staged — span 1: ${res.coordsA.length} vertices, span 2: ${res.coordsB.length}. Press Save to keep it.`, 'info');
+      return;
+    },
+    [lineToolMode, selectedLineFeature, tempLineCoords, findHldFeatureOriginal, showToast],
+  );
 
-      // ── Span 1: keeps the HLD link (update existing survey row, else create)
-      const firstGeom = { type: 'LineString', coordinates: res.coordsA } as Record<string, unknown>;
-      if (existing) {
-        pushUndo({
-          featureId: hldFeatureId, layerId: targetLayerId,
-          oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
-          timestamp: Date.now(),
-          surveyUndo: {
-            surveyFeatureId: existing.id,
-            layerId: targetLayerId,
-            previousGeometry: existing.survey_geometry,
-            previousAttributes: existing.survey_attributes,
-            previousStatus: existing.survey_status,
-            description: `Undo split for ${hldFeatureId.slice(-8)}`,
-          },
-        });
-        updateSurveyFeature(existing.id, targetLayerId, {
-          survey_geometry: firstGeom,
-          survey_status: 'modified',
-          change_reason: reason,
-        });
-      } else {
-        upsertSurveyFeature(hldFeatureId, targetLayerId, layerName, firstGeom, origAttrs ?? {}, origGeom, origAttrs, reason)
-          .then((sf) => {
-            if (!sf) return;
-            pushUndo({
-              featureId: hldFeatureId, layerId: targetLayerId,
-              oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
-              timestamp: Date.now(),
-              surveyUndo: {
-                surveyFeatureId: sf.id,
-                layerId: targetLayerId,
-                previousGeometry: { type: 'LineString', coordinates: tempLineOriginal } as Record<string, unknown>,
-                previousAttributes: (origAttrs as Record<string, unknown>) ?? {},
-                previousStatus: 'new',
-                description: `Undo: remove survey feature for ${hldFeatureId.slice(-8)}`,
-              },
-            });
-          });
-      }
+  // ── Span 2 is created by Save (handleSaveLine) from pendingSplitRef. Span 1
+  // is the working copy and is saved by the normal line save path. ──
+  const writeSplitSpan2 = useCallback(
+    (pending: NonNullable<typeof pendingSplitRef.current>, coordsA: [number, number][]) => {
+      const { hldFeatureId, layerId: targetLayerId, layerName, origGeom, origAttrs, reason } = pending;
 
       // ── Span 2: independent survey feature, local-only (synthetic HLD FK
       // would 500 on the backend — same reason Remove span creates locally).
       const segHldId = `${hldFeatureId}-split-2-${Date.now()}`;
-      const secondGeom = { type: 'LineString', coordinates: res.coordsB } as Record<string, unknown>;
+      const secondGeom = { type: 'LineString', coordinates: pending.coordsB } as Record<string, unknown>;
       const mockSf: SurveyFeatureData = {
         id: `local-sf-split-${Date.now()}`,
         original_hld_feature: segHldId,
@@ -3291,29 +3343,15 @@ export default function MapScreen() {
           description: `Undo: remove split span 2 for ${hldFeatureId.slice(-8)}`,
         },
       });
-      showToast(
-        useOfflineStore.getState().isOnline
-          ? `Split done — span 1: ${res.coordsA.length} vertices, span 2: ${res.coordsB.length} vertices`
-          : `Split kept on device — span 1: ${res.coordsA.length} vertices, span 2: ${res.coordsB.length} vertices`,
-        'success',
-      );
-      console.log(`[Split] ${hldFeatureId.slice(-8)} → ${res.coordsA.length} + ${res.coordsB.length} vertices (local span ${mockSf.id})`);
-
-      setLineMoveMode(false);
-      setLineToolMode(null);
-      setDeleteSectionRange(null);
-      setContinueLineAnchor(null);
-      setContinueLinePoints(0);
-      setContinueSnapTarget(null);
-      setContinueStartPt(null);
-    setContinueIsSpur(false);
-      lastContinueTapRef.current = null;
-      setTempLineCoords(null);
-      setTempLineOriginal(null);
-      autoOverlayOnEdit();
+      console.log(`[Split] ${hldFeatureId.slice(-8)} → ${coordsA.length} + ${pending.coordsB.length} vertices (local span ${mockSf.id})`);
+      showToast(`Split saved — span 1: ${coordsA.length} vertices, span 2: ${pending.coordsB.length} vertices`, 'success');
     },
-    [lineToolMode, selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, activeProject, showToast, autoOverlayOnEdit],
+    [activeProject, pushUndo, showToast],
   );
+
+  useEffect(() => {
+    writeSplitSpan2Ref.current = writeSplitSpan2;
+  }, [writeSplitSpan2]);
 
   // ── Attributes for the selected LINE ────────────────────────────────────
   // Same SurveyForm the point popup opens — one form, two entry points — so
@@ -3743,7 +3781,10 @@ export default function MapScreen() {
           setContinueSnapTarget(s.snapTarget);
           setContinueIsSpur(false);
           setTempLineCoords(grown.coords);
-          setContinueLinePoints(1);
+          // Multi-step: re-arm from the NEW end so the next tap extends again.
+          // The grown line stays in the working copy until Save.
+          setContinueStartPt(grown.end === 'end' ? grown.coords[grown.coords.length - 1] : grown.coords[0]);
+          setContinueLinePoints(0);
           console.log(`[Continue] Line extended at ${grown.end} ${s.snapTarget ? `→ snapped to ${s.snapTarget.name} #${s.snapTarget.id.slice(-6)}` : ''} — ${grown.coords.length} vertices`);
         } else {
           // Spur: a trench of its own. tempLineCoords holds just the new
