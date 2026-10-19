@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { View, ActivityIndicator, Text, StyleSheet } from 'react-native';
-import { Stack } from 'expo-router';
+import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useThemeStore } from '../lib/stores/theme';
 import { useAuthStore } from '../lib/stores/auth';
@@ -10,11 +10,26 @@ import { useNetworkStatus } from '../lib/hooks/useNetworkStatus';
 
 export default function RootLayout() {
   const resolved = useThemeStore((s) => s.resolved);
-  const { isRestoring, restoreSession } = useAuthStore();
+  const { isRestoring, restoreSession, token } = useAuthStore();
   const restored = useRef(false);
+  const router = useRouter();
+  const segments = useSegments();
 
   // ── Real-time network connectivity detection ───────────────────────────
   useNetworkStatus();
+
+  // ── Auth guard ─────────────────────────────────────────────────────────
+  // Portal screens (home, profile, map, feature, camera, import) need a session.
+  // Without one, a direct URL such as /home must go to login first, not render
+  // the portal. The login screen, the deeplink (it carries its own token) and
+  // the root index (it routes itself) stay reachable.
+  const first = segments[0] as string | undefined;
+  const isPublicRoute = first === undefined || first === '(auth)' || first === 'deeplink';
+  const needsLogin = !isRestoring && !token && !isPublicRoute;
+
+  useEffect(() => {
+    if (needsLogin) router.replace('/(auth)/login');
+  }, [needsLogin, router]);
 
   useEffect(() => {
     if (restored.current) return;
@@ -32,7 +47,7 @@ export default function RootLayout() {
       });
   }, []);
 
-  if (isRestoring) {
+  if (isRestoring || needsLogin) {
     return (
       <View style={[styles.loading, { backgroundColor: '#0D5CFF' }]}>
         <ActivityIndicator size="large" color="#FFFFFF" />
