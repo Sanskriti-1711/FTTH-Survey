@@ -67,6 +67,7 @@ const LAYER_COLORS: Record<string, string> = {
   pdps: '#10B981',             // Emerald
   trenches: '#F59E0B',         // Amber
   mfg: '#22D3EE',              // Sky
+  mfg_service_areas: '#0EA5E9', // Sky 500 — the cabinet's catchment
   ducts: '#06B6D4',            // Cyan
   cables: '#EF4444',           // Red
   feeder_cable: '#EC4899',     // Pink
@@ -85,6 +86,7 @@ const LAYER_NAMES: Record<string, string> = {
   pdps: 'PDP',
   trenches: 'TRENCH',
   mfg: 'MFG',
+  mfg_service_areas: 'MFG SERVICE AREA',
   ducts: 'DUCT',
   cables: 'CABLE',
   feeder_cable: 'FEEDER CABLE',
@@ -111,6 +113,7 @@ const IMPORT_COLORS: Record<string, string> = {
   pdps: '#F97316',                   // Orange
   trenches: '#14B8A6',               // Teal
   mfg: '#0284C7',                    // Sky Blue
+  mfg_service_areas: '#0369A1',      // Sky 700 — darker than the cabinet point
   ducts: '#0891B2',                  // Cyan
   cables: '#E11D48',                 // Rose
   feeder_cable: '#DB2777',           // Pink

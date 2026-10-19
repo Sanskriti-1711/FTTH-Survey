@@ -597,6 +597,7 @@ export const DEFAULT_LAYER_GROUPS: Record<string, string> = {
   // Infrastructure
   pdps: 'Infrastructure',
   mfg: 'Infrastructure',
+  mfg_service_areas: 'Infrastructure',
   chambers: 'Infrastructure',
   coupleurs: 'Infrastructure',
   trench_nodes: 'Infrastructure',

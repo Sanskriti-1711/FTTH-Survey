@@ -3,6 +3,7 @@ import type { Project, AssignmentJob, Feature, GeoJSONFeature, Layer } from '../
 import * as projectsApi from '../api/projects';
 import type { ReviewAction } from '../api/projects';
 import * as assignmentsApi from '../api/assignments';
+import { isFieldSurveyLayer } from '../utils/layer-ids';
 import { useAuthStore } from './auth';
 
 // ── Project Store ─────────────────────────────────────────────────────────
@@ -124,8 +125,12 @@ export const useProjectStore = create<ProjectState>((set, get) => {
     }
     set({ isLoading: true, error: null, layerLoadFailed: 0 });
     try {
-      // Step 1: Get all layers for this project
-      const { layers } = await projectsApi.getProjectLayers(projectId);
+      // Step 1: Get all layers for this project. The design artefacts the
+      // field survey never serves (see isFieldSurveyLayer) are dropped here,
+      // before they are fetched, so they cannot reach the map, the layer
+      // panel or the feature picker.
+      const { layers: projectLayerList } = await projectsApi.getProjectLayers(projectId);
+      const layers = projectLayerList.filter((layer) => isFieldSurveyLayer(layer.layer_id));
       const totalLayers = layers.length;
 
       // Step 2: Fetch features for ALL layers in parallel, tracking progress.
@@ -159,7 +164,7 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       const results = await Promise.all(layerPromises);
       const geojsons: Record<string, GeoJSONFeature[]> = {};
       for (const { key, features } of results) {
-        if (features.length > 0) geojsons[key] = features;
+        if (features.length > 0 && isFieldSurveyLayer(key)) geojsons[key] = features;
       }
 
       console.log(
@@ -291,8 +296,15 @@ export const useProjectStore = create<ProjectState>((set, get) => {
     }
   },
 
+  // Every write to projectGeojsons passes the field layer rule: the undo
+  // snapshots in map.tsx merge a whole layer map back in, so filtering only at
+  // fetch time would let a hidden layer return on the first undo.
   setProjectGeojsons: (geojsons) =>
-    set({ projectGeojsons: geojsons }),
+    set({
+      projectGeojsons: Object.fromEntries(
+        Object.entries(geojsons).filter(([layerId]) => isFieldSurveyLayer(layerId)),
+      ),
+    }),
 
   /**
    * Sync a geometry or property edit to the backend.
