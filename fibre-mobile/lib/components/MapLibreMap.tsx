@@ -270,10 +270,21 @@ interface MapLibreMapProps {
   mapStyle?: string | Record<string, unknown>;
   /** Timeout in ms before showing timeout error (default 30s) */
   loadingTimeoutMs?: number;
-  /** When this value changes, the map flies to the given center at given zoom */
-  flyToCenter?: { lng: number; lat: number; zoom: number } | null;
+  /** When this value changes, the map flies to the given center at given zoom.
+   *  `ts` forces a repeat fly to the same target (used by "frame region"). */
+  flyToCenter?: { lng: number; lat: number; zoom: number; ts?: number } | null;
   /** When ts changes, the map flies to the user's GPS location (crosshair FAB). */
   flyToUserTarget?: { lng: number; lat: number; zoom: number; ts: number } | null;
+  /** When ts changes, the camera fits [west, south, east, north] with chrome-aware padding. */
+  fitBounds?: {
+    bounds: [number, number, number, number];
+    padding?: { top: number; right: number; bottom: number; left: number };
+    ts: number;
+  } | null;
+  /** When ts changes, zoom by `delta` from the current zoom (rail +/-). */
+  zoomRequest?: { delta: number; ts: number } | null;
+  /** Camera settled — lets the parent decide whether a re-frame is worth it. */
+  onViewportChange?: (viewport: { zoom: number; center: { lng: number; lat: number } }) => void;
   /** When true, dragged vertices snap to nearby line/point features (existing
    *  trenches/ducts/cables) so a reroute aligns with the existing infrastructure. */
   snapEnabled?: boolean;
@@ -593,12 +604,17 @@ function NativeMapView({
   loadingTimeoutMs = LOADING_TIMEOUT_MS,
   flyToCenter,
   flyToUserTarget,
+  fitBounds,
+  zoomRequest,
+  onViewportChange,
   snapEnabled,
   snapRadiusM,
   emptyState,
 }: MapLibreMapProps) {
   const cameraRef = useRef<any>(null);
   const mapRef = useRef<any>(null);
+  const onViewportChangeRef = useRef(onViewportChange);
+  onViewportChangeRef.current = onViewportChange;
   const [status, setStatus] = useState<MapStatus>('loading');
   const [errorInfo, setErrorInfo] = useState<MapErrorInfo>({ type: 'unknown', message: '' });
   const [loadProgress, setLoadProgress] = useState<number | undefined>(undefined);
@@ -1505,11 +1521,34 @@ function NativeMapView({
   // ── Fly-to imported center ────────────────────────────────────────────
   useEffect(() => {
     if (!cameraRef.current || !flyToCenter || status !== 'ready') return;
+    // A parent that frames by bounds has already chosen the camera.
+    if (fitBounds) return;
     try {
       cameraRef.current?.flyTo({ center: [flyToCenter.lng, flyToCenter.lat], duration: 1200 });
       cameraRef.current?.zoomTo(flyToCenter.zoom, { duration: 1200 });
     } catch {}
-  }, [flyToCenter?.lng, flyToCenter?.lat, flyToCenter?.zoom, status]);
+  }, [flyToCenter?.lng, flyToCenter?.lat, flyToCenter?.zoom, flyToCenter?.ts, status]);
+
+  // ── Fit a region of interest (native) ─────────────────────────────────
+  useEffect(() => {
+    if (!cameraRef.current || !fitBounds || status !== 'ready') return;
+    try {
+      cameraRef.current.fitBounds(fitBounds.bounds, {
+        padding: fitBounds.padding ?? { top: 40, right: 24, bottom: 80, left: 24 },
+        duration: 900,
+      });
+    } catch {}
+  }, [fitBounds?.ts, fitBounds?.bounds, status]);
+
+  // ── Rail zoom (native) ────────────────────────────────────────────────
+  useEffect(() => {
+    if (!cameraRef.current || !zoomRequest || status !== 'ready') return;
+    const current = typeof zoomRef.current === 'number' ? zoomRef.current : 15;
+    const next = Math.max(2, Math.min(21, current + zoomRequest.delta));
+    try {
+      cameraRef.current.zoomTo(next, { duration: 280 });
+    } catch {}
+  }, [zoomRequest?.ts, status]);
 
   // ── Fly-to user GPS location (crosshair FAB) ──────────────────────────
   useEffect(() => {
@@ -1520,38 +1559,11 @@ function NativeMapView({
     } catch {}
   }, [flyToUserTarget?.ts, status]);
 
-  // ── Fly-to selected feature ────────────────────────────────────────────
-  useEffect(() => {
-    if (!cameraRef.current || !selectedFeatureId || status !== 'ready') return;
-
-    for (const layerData of layers) {
-      for (const feature of layerData.features) {
-        const fid = (feature.properties?.id as string) ?? (feature.properties?._id as string);
-        if (fid === selectedFeatureId) {
-          const coords = feature.geometry.coordinates;
-          if (feature.geometry.type === 'Point') {
-            try {
-              cameraRef.current?.flyTo({ center: [coords[0] as number, coords[1] as number], duration: 800 });
-              cameraRef.current?.zoomTo(17, { duration: 800 });
-            } catch {}
-          } else {
-            // LineString: coords = [[lng,lat],...] → first = [lng,lat]
-            // Polygon:    coords = [[[lng,lat],...]] → first = [[lng,lat],...] → need first[0]
-            const raw = (coords as unknown[][])[0];
-            const lng = typeof raw === 'number' ? raw : (raw as number[])?.[0];
-            const lat = typeof raw === 'number' ? (coords as unknown[][])[1] : (raw as number[])?.[1];
-            if (typeof lng === 'number' && typeof lat === 'number') {
-              try {
-                cameraRef.current?.flyTo({ center: [lng, lat], duration: 800 });
-                cameraRef.current?.zoomTo(17, { duration: 800 });
-              } catch {}
-            }
-          }
-          return;
-        }
-      }
-    }
-  }, [selectedFeatureId, layers, status]);
+  // ── Selected feature ──────────────────────────────────────────────────
+  // The map screen owns selection framing now: it fits the feature's real
+  // bounds through `fitBounds` and skips the motion when the feature is
+  // already readable. A second, unconditional fly-to-zoom-17 here would
+  // fight that decision on every tap.
 
   // ── Retry handler ──────────────────────────────────────────────────────
   const handleRetry = useCallback(() => {
@@ -1736,7 +1748,15 @@ function NativeMapView({
           }
           markMapAlive();
         }}
-        onRegionDidChange={() => { markMapAlive(); setCameraVersion((v) => v + 1); }}
+        onRegionDidChange={() => {
+          markMapAlive();
+          setCameraVersion((v) => v + 1);
+          const zoom = zoomRef.current;
+          const center = centerRef.current;
+          if (typeof zoom === 'number' && Array.isArray(center) && center.length === 2) {
+            onViewportChangeRef.current?.({ zoom, center: { lng: center[0], lat: center[1] } });
+          }
+        }}
         onDidFinishLoadingMap={() => markMapReady('onDidFinishLoadingMap')}
         onDidFinishLoadingStyle={() => markMapReady('onDidFinishLoadingStyle')}
         onDidFinishRenderingMap={() => markMapReady('onDidFinishRenderingMap')}
@@ -2119,6 +2139,15 @@ function loadMapLibreCSS(): Promise<void> {
     link.onload = () => resolve();
     link.onerror = () => resolve();
     document.head.appendChild(link);
+    // The map's bottom edge sits under the app's action dock, which would
+    // hide the OSM attribution (a licence requirement) entirely. Lift both
+    // control corners above the dock instead of dropping attribution.
+    const lift = document.createElement('style');
+    lift.id = 'ml-chrome-offset';
+    lift.textContent =
+      '.maplibregl-ctrl-bottom-right,.maplibregl-ctrl-bottom-left{bottom:84px}' +
+      '.maplibregl-ctrl-attrib.maplibregl-compact{max-width:calc(100vw - 96px)}';
+    document.head.appendChild(lift);
   });
 }
 
@@ -2545,10 +2574,17 @@ function WebMapView({
   loadingTimeoutMs = LOADING_TIMEOUT_MS,
   flyToCenter,
   flyToUserTarget,
+  fitBounds,
+  zoomRequest,
+  onViewportChange,
   emptyState,
 }: MapLibreMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
+  // Callbacks live in a ref: the map instance is created once, so a stale
+  // closure would freeze the first render's viewport handler forever.
+  const onViewportChangeRef = useRef(onViewportChange);
+  onViewportChangeRef.current = onViewportChange;
   const [status, setStatus] = useState<MapStatus>('loading');
   const [errorInfo, setErrorInfo] = useState<MapErrorInfo>({ type: 'unknown', message: '' });
   const [loadProgress, setLoadProgress] = useState<number | undefined>(undefined);
@@ -2609,7 +2645,17 @@ function WebMapView({
           attributionControl: true,
         });
 
-        map.addControl(new ml.NavigationControl(), 'top-right');
+        // No maplibre NavigationControl: its 29 px buttons are half the field
+        // minimum. The map screen renders its own 48 px rail instead.
+        map.on('moveend', () => {
+          try {
+            const c = map.getCenter();
+            onViewportChangeRef.current?.({
+              zoom: map.getZoom(),
+              center: { lng: c.lng, lat: c.lat },
+            });
+          } catch {}
+        });
         mapRef.current = map;
         setLoadProgress(0.7);
 
@@ -2828,30 +2874,31 @@ function WebMapView({
       );
 
       if (nonUserFeatures.length === 0) {
-        // ── Padded retry for small point targets ──
-        // A PDP/premise circle is a couple of pixels of ink on top of a trench.
-        // If nothing at all was hit, look for a point feature of ours within
-        // ~12 px before treating the tap as empty ground.
+        // ── Padded retry for thin targets ──
+        // A PDP/premise circle is a couple of pixels of ink on top of a trench,
+        // and a 3 px line is just as hard to hit with a finger. If nothing at
+        // all was hit, look for one of our features within ~12 px before
+        // treating the tap as empty ground. Cut tools (Remove span) depend on
+        // this: without it a mid-segment tap almost never landed on the line.
         const px = e.point?.x ?? 0;
         const py = e.point?.y ?? 0;
         let padded: any[] = [];
         try {
           padded = map.queryRenderedFeatures([[px - 12, py - 12], [px + 12, py + 12]]) ?? [];
         } catch { padded = []; }
-        const paddedPoints = padded.filter(
+        const paddedTargets = padded.filter(
           (f: any) =>
             !f?.properties?._is_user_location &&
-            isPointFeature(f) &&
             (f.properties?._id || f.properties?._layer_id),
         );
-        if (paddedPoints.length > 0) {
-          const chosen = pickTappedFeature(paddedPoints);
+        if (paddedTargets.length > 0) {
+          const chosen = pickTappedFeature(paddedTargets);
           const props = (chosen?.properties ?? {}) as Record<string, unknown>;
           const fid = props._id as string | undefined;
           const lid = props._layer_id as string | undefined;
           if (fid && lid) {
             if (onFeatureCandidates) {
-              const stack = tapCandidates(padded);
+              const stack = tapCandidates(paddedTargets);
               if (stack.length > 1) onFeatureCandidates(stack, tapLngLat, screenPt);
             }
             onFeatureClick(fid, lid, tapLngLat, screenPt);
@@ -3719,10 +3766,41 @@ function WebMapView({
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !flyToCenter || status !== 'ready') return;
+    // A parent that frames by bounds has already chosen the camera.
+    if (fitBounds) return;
     try {
       map.flyTo({ center: [flyToCenter.lng, flyToCenter.lat], zoom: flyToCenter.zoom, duration: 1200 });
     } catch {}
-  }, [flyToCenter?.lng, flyToCenter?.lat, flyToCenter?.zoom, status]);
+  }, [flyToCenter?.lng, flyToCenter?.lat, flyToCenter?.zoom, flyToCenter?.ts, status]);
+
+  // ── Fit a region of interest (web) ────────────────────────────────────
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !fitBounds || status !== 'ready') return;
+    const [west, south, east, north] = fitBounds.bounds;
+    try {
+      map.fitBounds(
+        [
+          [west, south],
+          [east, north],
+        ],
+        {
+          padding: fitBounds.padding ?? { top: 40, right: 24, bottom: 80, left: 24 },
+          duration: 900,
+          maxZoom: 19,
+        },
+      );
+    } catch {}
+  }, [fitBounds?.ts, fitBounds?.bounds, status]);
+
+  // ── Rail zoom (web) ───────────────────────────────────────────────────
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !zoomRequest || status !== 'ready') return;
+    try {
+      map.zoomTo(Math.max(2, Math.min(21, map.getZoom() + zoomRequest.delta)), { duration: 280 });
+    } catch {}
+  }, [zoomRequest?.ts, status]);
 
   // ── Fly-to user GPS location (crosshair FAB) ──────────────────────────
   useEffect(() => {
@@ -3733,26 +3811,9 @@ function WebMapView({
     } catch {}
   }, [flyToUserTarget?.ts, status]);
 
-  // ── Fly-to selected feature ────────────────────────────────────────────
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !selectedFeatureId) return;
-
-    for (const layerData of layers) {
-      for (const feature of layerData.features) {
-        const fid = (feature.properties?.id as string) ?? (feature.properties?._id as string);
-        if (fid === selectedFeatureId) {
-          const coords = feature.geometry.coordinates;
-          const center: [number, number] =
-            feature.geometry.type === 'Point'
-              ? [(coords as number[])[0], (coords as number[])[1]]
-              : [((coords as unknown[][])[0] as number[])?.[0] ?? 0, ((coords as unknown[][])[0] as number[])?.[1] ?? 0];
-          try { map.flyTo({ center, zoom: 17, duration: 800 }); } catch {}
-          return;
-        }
-      }
-    }
-  }, [selectedFeatureId, layers, status]);
+  // ── Selected feature ──────────────────────────────────────────────────
+  // Framing lives in the map screen (see `fitBounds`); this component must
+  // not move the camera on its own when a feature is selected.
 
   const containerStyle: any = { width: '100%', minHeight: 300 };
   if (height !== undefined) containerStyle.height = height;

@@ -63,10 +63,16 @@ async function waitForMap() {
   // absent while the overlay is being (re)created, so wait for the legend to
   // list real groups afterwards — "None visible" means the fetch is still on.
   await page.getByText('Loading Project Data').waitFor({ state: 'hidden', timeout: MAP_READY_TIMEOUT });
+  // Layer groups live in the Layers sheet now, so "data is on the map" is
+  // proven by opening it, seeing a group, and closing it again.
+  await page.getByText('Layers', { exact: true }).first().waitFor({ state: 'visible', timeout: MAP_READY_TIMEOUT });
+  await page.getByLabel('Show layers').first().click();
   await page
     .getByText(/^(trenches|premises|cables|service areas)$/i)
     .first()
     .waitFor({ state: 'visible', timeout: MAP_READY_TIMEOUT });
+  await page.getByLabel('Close layers').last().click();
+  await page.getByText('Layers', { exact: true }).first().waitFor({ state: 'visible', timeout: UI_TIMEOUT });
 }
 
 /** Fresh load + re-open the project (the /map route does not carry the id). */
@@ -79,18 +85,13 @@ async function reset() {
 
 /** The Layers legend starts expanded but lags the map on cold loads. */
 async function expandLayersIfNeeded() {
-  const header = page.getByText('Layers', { exact: true }).first();
-  await header.waitFor({ state: 'visible', timeout: UI_TIMEOUT });
   const anyGroup = page.getByText(/^(trenches|premises|cables|service areas)$/i).first();
-  // Give the expanded content a moment to paint before deciding it is closed —
-  // isVisible() returns false immediately while the animation is still running.
-  const expanded = await anyGroup
-    .waitFor({ state: 'visible', timeout: 5_000 })
+  const open = await anyGroup
+    .waitFor({ state: 'visible', timeout: 2_000 })
     .then(() => true)
     .catch(() => false);
-  if (!expanded) {
-    const box = await header.boundingBox();
-    if (box) await page.mouse.click(box.x + 6, box.y + box.height / 2);
+  if (!open) {
+    await page.getByLabel('Show layers').first().click();
   }
   await anyGroup.waitFor({ state: 'visible', timeout: UI_TIMEOUT });
 }
@@ -380,8 +381,7 @@ describe('P0 map tools on the web build', { concurrency: 1 }, () => {
   it('SA-095 fresh load has nothing to undo', async (t) => {
     if (requiresCreds()) return t.skip(requiresCreds());
     await reset();
-    await page.getByLabel('Open the tools menu').click();
-
+    // Undo is a permanent dock slot now — no menu to open first.
     await page.getByLabel('Undo, nothing to undo').waitFor({ state: 'visible', timeout: UI_TIMEOUT });
   });
 
@@ -398,8 +398,7 @@ describe('P0 map tools on the web build', { concurrency: 1 }, () => {
   it('SA-081 draw trench panel opens with guidance and a disabled save', async (t) => {
     if (requiresCreds()) return t.skip(requiresCreds());
     await reset();
-    await page.getByLabel('Open the tools menu').click();
-    // The "Draw Trench" text is a label pill, not a control; the FAB is the button.
+    // Draw trench is a permanent dock slot now — no tools menu to open first.
     await page.getByLabel('Draw a new trench line on the map').click();
 
     await page.getByText('Tap the map to place the first vertex').waitFor({ state: 'visible', timeout: UI_TIMEOUT });

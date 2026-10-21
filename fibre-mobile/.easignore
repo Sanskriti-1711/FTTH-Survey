@@ -1,0 +1,15 @@
+# EAS falls back to .gitignore in the project root, and this folder has none
+# (only the parent FTTH_SURVEY_APP/.gitignore lists node_modules/). Without
+# this file the upload walks node_modules and fails on stale Gradle output:
+#   scandir '.../node_modules/expo-constants/android/build/intermediates/merged_res'
+# Everything listed here is either installed on the build worker or generated.
+
+node_modules/
+android/
+ios/
+dist/
+.expo/
+web-build/
+*.log
+*.apk
+*.aab

@@ -65,6 +65,8 @@ interface CommitBarProps {
   /** Hide the state line (e.g. on a project card with no counts loaded yet). */
   showSummary?: boolean;
   variant?: 'bar' | 'card';
+  /** One row for the map screen: state + Submit, 64 px instead of 118 px. */
+  compact?: boolean;
   /** Lets a caller stack something above the bar without overlapping it. */
   onLayout?: (event: LayoutChangeEvent) => void;
 }
@@ -90,6 +92,7 @@ export default function CommitBar({
   expectChanges = true,
   showSummary = true,
   variant = 'bar',
+  compact = false,
   onLayout,
 }: CommitBarProps) {
   const colors = useThemeStore((s) => s.colors);
@@ -152,6 +155,78 @@ export default function CommitBar({
         ? colors.outlineLight
         : colors.primary;
   const submitFg = isSubmitted || disabled ? colors.textSecondary : armed ? '#1F2937' : colors.onPrimary;
+
+  // ── Compact bar (map screen) ──────────────────────────────────────────
+  // Same two taps, same counts, same warning — one row. The map screen needs
+  // every pixel it can give back to the map, and Submit must still be the
+  // biggest thing at the bottom of it.
+  //
+  // Same facts, shorter words: "waiting to sync" wraps the one-line frame on
+  // a 390 px screen and pushes the bar taller than it needs to be.
+  const compactStateText = stateText
+    .replace('waiting to sync', 'to sync')
+    .replace('waiting to upload', 'to upload');
+
+  if (compact) {
+    return (
+      <View
+        onLayout={onLayout}
+        style={[styles.compactBar, { backgroundColor: colors.surface, borderTopColor: colors.outlineLight }]}
+      >
+        <TouchableOpacity
+          style={styles.compactStatus}
+          onPress={onReviewChanges}
+          disabled={!onReviewChanges}
+          activeOpacity={onReviewChanges ? 0.6 : 1}
+          accessibilityRole={onReviewChanges ? 'button' : 'text'}
+          accessibilityLabel={
+            onReviewChanges ? `${compactStateText}. Review changes` : compactStateText
+          }
+        >
+          <View style={[styles.compactDot, { backgroundColor: stateColor }]} />
+          <Text
+            style={[
+              styles.compactText,
+              { color: armed && warning ? TONE_COLORS[warning.tone] : stateColor },
+            ]}
+            numberOfLines={1}
+          >
+            {armed ? (warning?.text ?? 'Tap Submit again to send') : compactStateText}
+          </Text>
+          {onReviewChanges && !armed ? (
+            <ChevronRight size={16} stroke={colors.textSecondary} />
+          ) : null}
+        </TouchableOpacity>
+
+        {isSubmitted ? (
+          <View style={styles.compactSubmitted}>
+            <CheckCircle size={18} stroke={StatusColors.completed.text} />
+            <Text style={[styles.compactText, { color: colors.textPrimary }]} numberOfLines={1}>
+              Submitted
+            </Text>
+          </View>
+        ) : (
+          <TouchableOpacity
+            style={[styles.compactSubmit, { backgroundColor: submitBg }]}
+            onPress={handlePress}
+            disabled={disabled || busy}
+            activeOpacity={0.85}
+            accessibilityRole="button"
+            accessibilityLabel={submitText}
+            accessibilityState={{ disabled: disabled || busy, busy }}
+          >
+            {busy ? (
+              <ActivityIndicator color={submitFg} size="small" />
+            ) : (
+              <Text style={[styles.compactSubmitText, { color: submitFg }]} numberOfLines={1}>
+                {submitText}
+              </Text>
+            )}
+          </TouchableOpacity>
+        )}
+      </View>
+    );
+  }
 
   return (
     <View
@@ -309,4 +384,40 @@ const styles = StyleSheet.create({
     height: Touch.minHeight,
   },
   submittedText: { fontSize: 15, fontWeight: '600', flexShrink: 1 },
+
+  // ── Compact (map screen) ─────────────────────────────────────────────
+  compactBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+    paddingHorizontal: Spacing.lg,
+    paddingTop: Spacing.sm,
+    paddingBottom: Spacing.md,
+    borderTopWidth: 1,
+  },
+  compactStatus: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    minHeight: Touch.minTarget,
+  },
+  compactDot: { width: 8, height: 8, borderRadius: Radius.full },
+  compactText: { fontSize: 13, fontWeight: '600', flexShrink: 1, lineHeight: 17 },
+  compactSubmit: {
+    minWidth: 136,
+    height: Touch.minTarget,
+    paddingHorizontal: 14,
+    borderRadius: Radius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  compactSubmitText: { fontSize: 15, fontWeight: '700', letterSpacing: 0.2 },
+  compactSubmitted: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    minHeight: Touch.minTarget,
+  },
 });

@@ -12,19 +12,13 @@ import { router } from 'expo-router';
 import { useThemeStore } from '../../lib/stores/theme';
 import { useAuthStore } from '../../lib/stores/auth';
 import { useProjectStore } from '../../lib/stores/project';
-import { Card, StatCard } from '../../components/ui/Card';
+import { StatCard } from '../../components/ui/Card';
 import { StatusBadge } from '../../components/ui/StatusBadge';
 import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
 import CommitBar from '../../lib/components/CommitBar';
 import { Spacing, Radius, StatusColors, Touch, Type, type StatusKey } from '../../lib/theme/colors';
-import {
-  Camera,
-  Upload,
-  Bell,
-  ChevronRight,
-  FileArchive,
-} from 'lucide-react-native';
+import { Camera, Upload, Bell, ChevronRight } from 'lucide-react-native';
 import type { Project } from '../../lib/utils/types';
 import type { ReviewAction } from '../../lib/api/projects';
 
@@ -36,10 +30,18 @@ export default function HomeScreen() {
   const isAdmin = user?.role === 'SUBADMIN';
   const { projects, fetchProjects, acceptSurveyCopy, submitSurveyCopy, reviewSurveyProject } = useProjectStore();
   const [refreshing, setRefreshing] = useState(false);
+  // The first fetch decides between "no projects" and "not loaded yet". A
+  // 390 px phone showed "No Projects Yet" over a project list that arrived a
+  // moment later, which reads as data loss.
+  const [loadingProjects, setLoadingProjects] = useState(true);
   const [statusFilter, setStatusFilter] = useState<Project['status'] | 'all'>('all');
 
   const loadData = useCallback(async () => {
-    await fetchProjects();
+    try {
+      await fetchProjects();
+    } finally {
+      setLoadingProjects(false);
+    }
   }, [fetchProjects]);
 
   useEffect(() => {
@@ -150,80 +152,15 @@ export default function HomeScreen() {
           </View>
         </View>
 
-        {/* Quick Stats */}
+        {/* Quick stats — three numbers, one row, no cards competing with the
+            project list for attention. */}
         <View style={styles.statsRow}>
-          <StatCard
-            title="Active Jobs"
-            value={activeAssignments}
-            color={colors.primary}
-          />
+          <StatCard title="Active" value={activeAssignments} color={colors.primary} />
           <View style={styles.statsGap} />
-          <StatCard
-            title="Completed"
-            value={completedToday}
-            color={colors.success}
-          />
+          <StatCard title="Done" value={completedToday} color={colors.success} />
           <View style={styles.statsGap} />
-          <StatCard
-            title="Pending"
-            value={pendingSubmissions}
-            color={colors.warning}
-          />
+          <StatCard title="Pending" value={pendingSubmissions} color={colors.warning} />
         </View>
-
-        {/* Quick Actions */}
-        <View style={styles.actionsRow}>
-          <TouchableOpacity
-            style={[styles.actionBtn, { backgroundColor: colors.secondary }]}
-            onPress={() => router.push('/camera')}
-            activeOpacity={0.8}
-            accessibilityRole="button"
-            accessibilityLabel="Take a photo"
-          >
-            {/* Never white on the identity orange — it is 2.33:1. */}
-            <Camera size={24} color={colors.onSecondary} />
-            <Text style={[styles.actionText, { color: colors.onSecondary }]}>Photo</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Import Survey Package */}
-        <Card
-          title="Quick Import"
-          variant="outlined"
-          headerRight={
-            <TouchableOpacity
-              style={[styles.importLink, { backgroundColor: colors.primary + '10' }]}
-              onPress={() => router.push('/project/import')}
-              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-              accessibilityRole="button"
-              accessibilityLabel="Import a survey package"
-            >
-              <Upload size={14} stroke={colors.primary} />
-              <Text style={[styles.importLinkText, { color: colors.primary }]}>Import</Text>
-            </TouchableOpacity>
-          }
-        >
-          <View style={styles.importRow}>
-            <FileArchive size={20} stroke={colors.textSecondary} />
-            <View style={styles.importInfo}>
-              <Text style={[styles.importLabel, { color: colors.textPrimary }]}>
-                Upload Survey Package
-              </Text>
-              <Text style={[styles.importDesc, { color: colors.textSecondary }]}>
-                Import ZIP or GeoPackage to start surveying
-              </Text>
-            </View>
-            <ChevronRight size={18} stroke={colors.textTertiary} />
-          </View>
-          <Button
-            title="Select File to Import"
-            variant="secondary"
-            size="sm"
-            icon={<Upload size={14} stroke={colors.primary} />}
-            onPress={() => router.push('/project/import')}
-            style={{ marginTop: Spacing.sm }}
-          />
-        </Card>
 
         {/* My Projects */}
         <View style={styles.sectionHeader}>
@@ -287,7 +224,13 @@ export default function HomeScreen() {
         </ScrollView>
         )}
 
-        {projects.length === 0 ? (
+        {loadingProjects && projects.length === 0 ? (
+          <View style={[styles.loadingCard, { backgroundColor: colors.surface }]}>
+            <Text style={[styles.loadingText, { color: colors.textSecondary }]}>
+              Loading your projects…
+            </Text>
+          </View>
+        ) : projects.length === 0 ? (
           <EmptyState
             title="No Projects Yet"
             description="Import a survey package to get started"
@@ -324,6 +267,42 @@ export default function HomeScreen() {
             />
           ))
         )}
+
+
+        {/* Quick actions — two tiles instead of a full-width orange block that
+            pushed the project list off the first screen. */}
+        <Text style={[styles.sectionTitle, styles.actionsTitle, { color: colors.textPrimary }]}>
+          Quick actions
+        </Text>
+        <View style={styles.quickRow}>
+          <TouchableOpacity
+            style={[styles.quickTile, { backgroundColor: colors.secondary }]}
+            onPress={() => router.push('/camera')}
+            activeOpacity={0.85}
+            accessibilityRole="button"
+            accessibilityLabel="Take a photo"
+          >
+            {/* Never white on the identity orange — it is 2.33:1. */}
+            <Camera size={24} color={colors.onSecondary} />
+            <Text style={[styles.quickLabel, { color: colors.onSecondary }]}>Photo</Text>
+            <Text style={[styles.quickHint, { color: colors.onSecondary }]}>Capture site evidence</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              styles.quickTile,
+              { backgroundColor: colors.surface, borderColor: colors.outlineLight },
+            ]}
+            onPress={() => router.push('/project/import')}
+            activeOpacity={0.85}
+            accessibilityRole="button"
+            accessibilityLabel="Import a survey package"
+          >
+            <Upload size={24} stroke={colors.primary} />
+            <Text style={[styles.quickLabel, { color: colors.textPrimary }]}>Import</Text>
+            <Text style={[styles.quickHint, { color: colors.textTertiary }]}>ZIP or GeoPackage</Text>
+          </TouchableOpacity>
+        </View>
 
       </ScrollView>
     </SafeAreaView>
@@ -549,6 +528,22 @@ const styles = StyleSheet.create({
   },
   sectionTitle: { fontSize: 17, fontWeight: '600' },
   seeAll: { fontSize: 14, fontWeight: '500' },
+  actionsTitle: { marginTop: Spacing.xl, marginBottom: Spacing.sm },
+  quickRow: { flexDirection: 'row', gap: Spacing.md },
+  quickTile: {
+    flex: 1,
+    minHeight: 104,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: 'transparent',
+    padding: Spacing.lg,
+    justifyContent: 'flex-start',
+    gap: 2,
+  },
+  quickLabel: { ...Type.title, marginTop: 6 },
+  quickHint: { ...Type.meta },
+  loadingCard: { borderRadius: Radius.lg, padding: Spacing.lg },
+  loadingText: { ...Type.body },
   filterRow: {
     flexDirection: 'row',
     gap: 8,

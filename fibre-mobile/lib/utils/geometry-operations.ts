@@ -374,6 +374,80 @@ export function insertVertexAtPoint(
   return { updated, insertIdx: bestSegIdx + 1 };
 }
 
+// ── Cut a vertex into a LineString exactly where it was tapped ────────────
+// Remove span needs a vertex UNDER THE FINGER, not the nearest existing one:
+// a 4-vertex trench running 300 m lets you bite out the middle only if the
+// tool can create the two cut points first. insertVertexAtPoint already
+// projects the tap onto the nearest segment, so a tap on a long straight run
+// gets its own vertex. When the projection lands on top of an existing vertex
+// (< 1 m) the tap means "use that one" and nothing is inserted.
+//
+// Returns the (possibly grown) coordinate array plus the index of the cut
+// vertex, so callers can set/keep a selection range while the array shifts.
+
+export function cutVertexIndexAtPoint(
+  coords: [number, number][],
+  lng: number,
+  lat: number,
+): { coordinates: [number, number][]; index: number; inserted: boolean } | null {
+  if (coords.length < 2) return null;
+
+  const projected = insertVertexAtPoint(coords, lng, lat);
+  if (projected) {
+    return { coordinates: projected.updated, index: projected.insertIdx, inserted: true };
+  }
+
+  // Too close to an existing vertex to be a new cut point — reuse it.
+  let bestIdx = 0;
+  let bestDist = Infinity;
+  coords.forEach(([vlng, vlat], i) => {
+    const d = haversineMeters(lng, lat, vlng, vlat);
+    if (d < bestDist) { bestDist = d; bestIdx = i; }
+  });
+
+  return {
+    coordinates: coords.map(([x, y]) => [x, y] as [number, number]),
+    index: bestIdx,
+    inserted: false,
+  };
+}
+
+// ── Vertices strictly between two cut indices ─────────────────────────────
+// The gap Remove span deletes B–D, so B and D stay as the new line ends and
+// only the vertices inside the range disappear. Counts the interior only, so
+// a cut straight across a two-point straight run reports 0 (it still removes
+// the metres between the cut points).
+
+export function countVerticesBetween(start: number, end: number): number {
+  return Math.max(0, Math.abs(end - start) - 1);
+}
+
+// ── Plan a Remove span cut ────────────────────────────────────────────────
+// The picks stay (they become the new line ends) and everything strictly
+// between them disappears, leaving one or two independent LineStrings:
+//
+//   A——B——C——D——E     pick B and D     A——B    D——E
+//
+// Picks are order-independent. A pick at an end just trims the line, so a
+// range covering BOTH ends leaves nothing and is reported with 0 segments
+// (callers must refuse it instead of writing an empty geometry).
+
+export function planSpanRemoval(
+  coords: [number, number][],
+  pickA: number,
+  pickB: number,
+): { start: number; end: number; segments: [number, number][][]; removedM: number } {
+  const start = Math.min(pickA, pickB);
+  const end = Math.max(pickA, pickB);
+  const segments: [number, number][][] = [];
+  const before = coords.slice(0, start + 1);
+  const after = coords.slice(end);
+  if (before.length >= 2) segments.push(before as [number, number][]);
+  if (after.length >= 2) segments.push(after as [number, number][]);
+  const removedM = end > start ? approximateLength(coords.slice(start, end + 1)) : 0;
+  return { start, end, segments, removedM };
+}
+
 // ── Delete a vertex from a LineString ─────────────────────────────────────
 // Removes the vertex at the given index. A line must have at least 2 vertices,
 // so returns null if deletion would leave fewer than 2 vertices.

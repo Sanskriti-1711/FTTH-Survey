@@ -81,10 +81,23 @@ interface LineSelectionToolbarProps {
   onToggleBundleLayer?: (layerId: string) => void;
   /** Whether delete-section mode is active */
   deleteSectionMode?: boolean;
-  /** Current step: 0=none, 1=start selected, 2=both selected */
+  /** Current step: 0=none, 1=first cut placed, 2=both cuts placed */
   deleteSectionStep?: number;
-  /** Called when user confirms (both vertices selected + re-taps button) */
+  /** Called by the panel's primary "Remove span" button once both cuts are set */
   onDeleteConfirm?: () => void;
+  /** Called by the panel's "Last tap" button to step back one cut point */
+  onDeleteReset?: () => void;
+  /**
+   * What the pending removal adds up to: metres in the gap, vertices that go
+   * with it, and how many lines survive. Rendered before the commit so the
+   * engineer never confirms an unseen cut.
+   */
+  deleteSectionSummary?: {
+    lengthLabel: string;
+    vertices: number;
+    leaves: number;
+    canRemove: boolean;
+  } | null;
   /** Called when user taps the Delete (logical delete) button */
   onDeleteFeature?: () => void;
   /** Whether there are unsaved geometry changes in Move Mode */
@@ -148,6 +161,8 @@ export default function LineSelectionToolbar({
   deleteSectionMode = false,
   deleteSectionStep = 0,
   onDeleteConfirm,
+  onDeleteReset,
+  deleteSectionSummary = null,
   onDeleteFeature,
   hasUnsavedChanges = false,
   continueMode = false,
@@ -233,8 +248,11 @@ export default function LineSelectionToolbar({
           disabled={!isEnabled || (isSave && !hasUnsavedChanges)}
           activeOpacity={0.7}
           onPress={() => {
-            if (isDeleteSection && deleteSectionStep === 2 && onDeleteConfirm) onDeleteConfirm();
-            else if (isMove && onToggleMove) onToggleMove();
+            // The action button only ARMS/DISARMS the cut tool. Confirming lives
+            // in the panel below, where it can name the metres it removes —
+            // a button that changed meaning depending on step count was the
+            // main reason this tool felt unclear.
+            if (isMove && onToggleMove) onToggleMove();
             else if (isSave && onSave) onSave();
             else if (isDeleteSection && onDeleteSection) onDeleteSection();
             else if (isSplit && onSplit) onSplit();
@@ -257,7 +275,7 @@ export default function LineSelectionToolbar({
                 : isRouteAround && routeAroundMode
                   ? 'Tap works'
                 : isDeleteSection && deleteSectionMode
-                  ? (deleteSectionStep === 2 ? 'Confirm' : 'Span: ON')
+                  ? (deleteSectionStep === 2 ? 'Pick: 2/2' : deleteSectionStep === 1 ? 'Pick: 1/2' : 'Cut: ON')
                   : isContinue && continueMode
                     ? 'Drawing: ON'
                     : action.label}
@@ -289,8 +307,10 @@ export default function LineSelectionToolbar({
           </Text>
         )}
         {isDeleteSection && (
-          <Text style={[styles.soonLabel, { color: deleteSectionMode ? '#FF8C00' : colors.textTertiary }]}>
-            {deleteSectionMode ? (deleteSectionStep === 1 ? 'Tap end' : deleteSectionStep === 2 ? 'Confirm' : 'Ready') : 'Tap to start'}
+          <Text style={[styles.soonLabel, { color: deleteSectionMode ? '#FF8C00' : colors.textTertiary }]} numberOfLines={1}>
+            {deleteSectionMode
+              ? (deleteSectionStep === 0 ? 'Tap start' : deleteSectionStep === 1 ? 'Tap end' : 'Ready')
+              : 'Cut + gap'}
           </Text>
         )}
         {isContinue && (
@@ -354,7 +374,7 @@ export default function LineSelectionToolbar({
               {moveMode && ' · Editing shape'}
               {splitMode && ' · Split here (tap the line)'}
               {routeAroundMode && ` · Route around works (${obstacleRadiusM} m)`}
-              {deleteSectionMode && ` · Remove span ${deleteSectionStep === 0 ? '' : deleteSectionStep === 1 ? '(select end)' : '(confirm)'}`}
+              {deleteSectionMode && ` · Remove span · ${deleteSectionStep === 0 ? 'tap start' : deleteSectionStep === 1 ? 'tap end' : 'ready'}`}
               {continueMode && ` · Extend line ${continueLineStep === 1 ? '(select point)' : continueLineStep === 2 ? '(ready to save)' : ''}`}
               {continueMode && continueSnapLabel && ` · ${continueSnapLabel}`}
               {moveMode && hasUnsavedChanges && ' · Unsaved'}
@@ -387,6 +407,112 @@ export default function LineSelectionToolbar({
           {ACTIONS.filter((a) => a.id === 'save').map(renderAction)}
         </View>
       </View>
+
+      {/* ── Remove span: step tracker + commit ──────────────────────────── */}
+      {deleteSectionMode && (
+        <View style={[styles.spanPanel, { borderTopColor: colors.outlineLight }]}>
+          <View style={styles.stepRow}>
+            {['Cut start', 'Cut end', 'Remove'].map((label, i) => {
+              const n = i + 1;
+              const done = deleteSectionStep >= n;
+              const active = deleteSectionStep === n - 1;
+              return (
+                <React.Fragment key={label}>
+                  {i > 0 && (
+                    <View style={[styles.stepRule, { backgroundColor: done ? '#FF8C00' : colors.outlineLight }]} />
+                  )}
+                  <View
+                    style={[
+                      styles.stepChip,
+                      {
+                        backgroundColor: active ? '#FF8C00' + '20' : colors.background,
+                        borderColor: active || done ? '#FF8C00' : colors.outlineLight,
+                      },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.stepChipText,
+                        { color: active || done ? '#FF8C00' : colors.textTertiary },
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {done ? '✓ ' : `${n} `}
+                      {label}
+                    </Text>
+                  </View>
+                </React.Fragment>
+              );
+            })}
+          </View>
+
+          <Text style={[styles.spanSummary, { color: colors.textSecondary }]} numberOfLines={2}>
+            {deleteSectionStep === 0
+              ? 'Tap the line where the gap starts — a vertex is cut in exactly where you tap.'
+              : deleteSectionStep === 1
+                ? 'Now tap where the gap ends. Everything red is removed.'
+                : deleteSectionSummary
+                  ? deleteSectionSummary.canRemove
+                    ? `Removes ${deleteSectionSummary.lengthLabel}${deleteSectionSummary.vertices > 0 ? ` · ${deleteSectionSummary.vertices} vertices` : ''} · leaves ${deleteSectionSummary.leaves === 2 ? 'two lines' : 'one line'}`
+                    : 'That covers the whole line — use Delete instead'
+                  : ''}
+          </Text>
+
+          <View style={styles.spanBtnRow}>
+            <TouchableOpacity
+              style={[
+                styles.spanBtn,
+                {
+                  backgroundColor: colors.background,
+                  borderColor: colors.outlineLight,
+                  opacity: deleteSectionStep === 0 ? 0.45 : 1,
+                },
+              ]}
+              disabled={deleteSectionStep === 0}
+              onPress={onDeleteReset}
+              activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel="Remove the last cut point"
+            >
+              <Undo2 size={12} stroke={deleteSectionStep === 0 ? colors.textTertiary : colors.textSecondary} />
+              <Text
+                style={[
+                  styles.spanBtnText,
+                  { color: deleteSectionStep === 0 ? colors.textTertiary : colors.textSecondary },
+                ]}
+              >
+                Last tap
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.spanBtn,
+                styles.spanBtnPrimary,
+                {
+                  backgroundColor: deleteSectionSummary?.canRemove ? '#DC2626' : colors.outlineLight,
+                  borderColor: deleteSectionSummary?.canRemove ? '#DC2626' : colors.outlineLight,
+                  opacity: deleteSectionSummary?.canRemove ? 1 : 0.6,
+                },
+              ]}
+              disabled={!deleteSectionSummary?.canRemove}
+              onPress={onDeleteConfirm}
+              activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel={
+                deleteSectionSummary?.canRemove
+                  ? `Remove ${deleteSectionSummary.lengthLabel} of line`
+                  : 'Remove span — pick both cut points first'
+              }
+            >
+              <Axe size={12} stroke="#FFFFFF" />
+              <Text style={[styles.spanBtnText, { color: '#FFFFFF', fontWeight: '700' }]}>
+                Remove span
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
 
       {/* ── Route-around works: radius + measured impact ────────────────── */}
       {routeAroundMode && (
@@ -480,9 +606,7 @@ export default function LineSelectionToolbar({
           : splitMode
             ? 'Tap the line where the new chamber goes — the span is cut into two features'
           : deleteSectionMode
-            ? deleteSectionStep === 0 ? 'Tap the line near a vertex to select start point'
-            : deleteSectionStep === 1 ? 'Tap the line near another vertex to select end point'
-            : 'Tap Confirm to remove the section, or Close to cancel'
+            ? 'Remove span applies straight away when you confirm — Undo sits in the toolbar'
           : continueMode
             ? continueLineStep === 0 ? 'Tap the map to place the segment start (snaps to nearest point)'
             : continueLineStep === 1 ? 'Tap the destination point; it will snap to the nearest point'
@@ -635,6 +759,62 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     marginTop: 2,
     fontStyle: 'italic',
+  },
+
+  // ── Remove span panel: step tracker + commit ──────────────────────────
+  spanPanel: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 8,
+    paddingTop: 6,
+    gap: 5,
+  },
+  stepRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  stepChip: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 3,
+    paddingHorizontal: 4,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  stepChipText: {
+    fontSize: 8,
+    fontWeight: '700',
+  },
+  stepRule: {
+    width: 6,
+    height: 1,
+  },
+  spanSummary: {
+    fontSize: 9,
+    fontWeight: '600',
+    lineHeight: 12,
+  },
+  spanBtnRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingBottom: 2,
+  },
+  spanBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    paddingVertical: 5,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+  },
+  spanBtnPrimary: {
+    flex: 1,
+  },
+  spanBtnText: {
+    fontSize: 9,
+    fontWeight: '600',
   },
 
   // ── Bundle propagation preview ─────────────────────────────────────────

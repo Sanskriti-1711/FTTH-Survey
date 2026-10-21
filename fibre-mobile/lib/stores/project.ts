@@ -228,7 +228,27 @@ export const useProjectStore = create<ProjectState>((set, get) => {
       `review project (${action})`,
     ),
 
-  setActiveProject: (project) => set({ activeProject: project }),
+  setActiveProject: (project) => {
+    const previousId = get().activeProject?.id ?? null;
+    const nextId = project?.id ?? null;
+
+    if (previousId !== nextId) {
+      // Opening a different project must not leave the previous project's
+      // layers on the map. The map only auto-fetches while the store is empty
+      // (`!hasImportedData`), so keeping them here meant every project after
+      // the first rendered the first project's trenches under the new title.
+      set({
+        activeProject: project,
+        projectGeojsons: {},
+        projectLayers: [],
+        layerFetchProgress: null,
+        layerLoadFailed: 0,
+      });
+      return;
+    }
+
+    set({ activeProject: project });
+  },
 
   importSurveyPackage: async (projectId, file) => {
     // Import flow — auto-create project → upload → discover → import

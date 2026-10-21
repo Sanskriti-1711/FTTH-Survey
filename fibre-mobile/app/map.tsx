@@ -7,6 +7,8 @@ import {
   FlatList,
   TextInput,
   ActivityIndicator,
+  useWindowDimensions,
+  Pressable,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -14,14 +16,14 @@ import { useThemeStore } from '../lib/stores/theme';
 import { useMapStore } from '../lib/stores/map';
 import { useProjectStore } from '../lib/stores/project';
 import { useSurveyStore } from '../lib/stores/survey';
-import { useSurveyFeaturesStore, SURVEY_COLOR, HLD_COLOR_OVERRIDE } from '../lib/stores/survey-features';
+import { useSurveyFeaturesStore, SURVEY_COLOR } from '../lib/stores/survey-features';
 import { useOfflineStore } from '../lib/stores/offline';
 import { recalculateDependentProperties } from '../lib/utils/spatial';
 import { getLayerSchema } from '../lib/stores/layer-schemas';
 import { gradeGpsAccuracy } from '../lib/utils/gps-quality';
 import { summarizeCommit } from '../lib/utils/commit';
 import { normalizeLayerId } from '../lib/utils/layer-ids';
-import { insertVertexAtPoint, deleteVertex, splitLineAtPoint, createLineString, findNearestLineCorner, extendLineToPoint, haversineMeters } from '../lib/utils/geometry-operations';
+import { insertVertexAtPoint, deleteVertex, splitLineAtPoint, createLineString, findNearestLineCorner, extendLineToPoint, haversineMeters, approximateLength, cutVertexIndexAtPoint, countVerticesBetween, planSpanRemoval } from '../lib/utils/geometry-operations';
 import { planObstacleDetour, metersPerDegLng } from '../lib/utils/obstacle-reroute';
 // Geometry operation utilities removed — all edits now route through survey-features store
 import GeometryEditor from '../lib/components/GeometryEditor';
@@ -38,27 +40,40 @@ import { Card, Badge } from '../components/ui/Card';
 import { StatusBadge } from '../components/ui/StatusBadge';
 import { Toast } from '../components/ui/Toast';
 import MapLibreMap, { BASEMAPS } from '../lib/components/MapLibreMap';
-import MapLegend, { buildLayerGroups, DEFAULT_LAYER_GROUPS } from '../lib/components/MapLegend';
+import { buildLayerGroups, DEFAULT_LAYER_GROUPS } from '../lib/components/MapLegend';
+// ── Field-console chrome (phone UI) ──────────────────────────────────────
+// One header, one dock, one rail, one sheet family. See lib/theme/chrome.ts.
+import MapHeader from '../lib/components/map/MapHeader';
+import MapDock from '../lib/components/map/MapDock';
+import MapRail from '../lib/components/map/MapRail';
+import ViewModeSwitch, { type ViewMode } from '../lib/components/map/ViewModeSwitch';
+import ToolsSheet from '../lib/components/map/ToolsSheet';
+import LayersSheet from '../lib/components/map/LayersSheet';
+import BasemapSheet from '../lib/components/map/BasemapSheet';
+import {
+  boundsOfFeatures,
+  expandBounds,
+  geometryBounds,
+  needsReframe,
+  FRAME_PADDING,
+  SELECTION_PADDING,
+  MIN_REGION_SPAN_M,
+  type Bounds,
+} from '../lib/utils/autozoom';
 import MapFeaturePopup from '../lib/components/MapFeaturePopup';
 import * as Location from 'expo-location';
 import type { MapLayerData, BasemapStyle } from '../lib/components/MapLibreMap';
-import type { GeoJSONFeature, LayerDisplayMode, SurveyFeatureData } from '../lib/utils/types';
+import type { GeoJSONFeature, SurveyFeatureData } from '../lib/utils/types';
 import { Spacing, Radius, Touch, Type } from '../lib/theme/colors';
-import ArrowLeft from 'lucide-react-native/icons/arrow-left';
+import { chromeColors } from '../lib/theme/chrome';
 import X from 'lucide-react-native/icons/x';
-import Plus from 'lucide-react-native/icons/plus';
 import ChevronRight from 'lucide-react-native/icons/chevron-right';
-import MapPin from 'lucide-react-native/icons/map-pin';
 import List from 'lucide-react-native/icons/list';
-import MapIcon from 'lucide-react-native/icons/map';
-import Crosshair from 'lucide-react-native/icons/crosshair';
 import Search from 'lucide-react-native/icons/search';
 import Move from 'lucide-react-native/icons/move';
-import Undo2 from 'lucide-react-native/icons/undo-2';
 import Satellite from 'lucide-react-native/icons/satellite';
 import Layers from 'lucide-react-native/icons/layers';
 import AlertTriangle from 'lucide-react-native/icons/triangle-alert';
-import Spline from 'lucide-react-native/icons/spline';
 
 // ── Layer config ──────────────────────────────────────────────────────────
 const LAYER_COLORS: Record<string, string> = {
@@ -592,6 +607,8 @@ function resolveGeometryType(layerId: string): string {
 // ── Map Screen ────────────────────────────────────────────────────────────
 export default function MapScreen() {
   const colors = useThemeStore((s) => s.colors);
+  const resolvedTheme = useThemeStore((s) => s.resolved);
+  const chrome = chromeColors(colors, resolvedTheme);
   const {
     layers: storeLayers,
     selectedFeaturePopup,
@@ -680,9 +697,23 @@ export default function MapScreen() {
   const [layerVisibility, setLayerVisibility] = useState<Record<string, boolean>>({});
   const [selectedMapFeatureId, setSelectedMapFeatureId] = useState<string | null>(null);
   const [activeBasemap, setActiveBasemap] = useState<string>('streets');
-  const [basemapPanelVisible, setBasemapPanelVisible] = useState(false);
-  // Tools menu — the FAB column is collapsed into a single expandable menu
-  const [toolsOpen, setToolsOpen] = useState(false);
+  // ── Chrome sheets ────────────────────────────────────────────────────
+  // One sheet open at a time. The survey-changes panel keeps its own boolean
+  // because it is a full review surface, not a chooser.
+  const [activeSheet, setActiveSheet] = useState<'tools' | 'layers' | 'basemap' | null>(null);
+  // ── Camera / auto-zoom ──────────────────────────────────────────────
+  // `fitRequest` asks the map to frame a region; `zoomRequest` is the rail's
+  // +/-. `cameraView` is the last settled zoom/centre, used to decide whether
+  // a re-frame is worth the motion.
+  const [fitRequest, setFitRequest] = useState<{
+    bounds: [number, number, number, number];
+    padding: { top: number; right: number; bottom: number; left: number };
+    ts: number;
+  } | null>(null);
+  const [zoomRequest, setZoomRequest] = useState<{ delta: number; ts: number } | null>(null);
+  const [cameraView, setCameraView] = useState<{ zoom: number; center: { lng: number; lat: number } } | null>(null);
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
+  const isOnline = useOfflineStore((s) => s.isOnline);
   const [featureNotes, setFeatureNotes] = useState<Record<string, string>>({});
   const [notesDraft, setNotesDraft] = useState('');
   const [popupScreenCoords, setPopupScreenCoords] = useState<{ x: number; y: number } | null>(null);
@@ -764,6 +795,12 @@ export default function MapScreen() {
   // Layers opted OUT of the bundle reroute relay (pre-Save explanation row).
   const [bundleSkipLayers, setBundleSkipLayers] = useState<string[]>([]);
   const [deleteSectionRange, setDeleteSectionRange] = useState<[number, number] | null>(null);
+  // Every Remove span pick, so "Last tap" can step back one cut point without
+  // rebuilding the line from scratch (and without leaving range indices
+  // pointing at coordinates that no longer exist).
+  const deleteSectionHistoryRef = useRef<
+    { coordinates: [number, number][]; range: [number, number] }[]
+  >([]);
 
   // ── Continue Line state ──────────────────────────────────────────────
   const [continueLineAnchor, setContinueLineAnchor] = useState<number | null>(null);
@@ -866,6 +903,13 @@ export default function MapScreen() {
       description: string;
       /** Created features have nothing to restore — undo deletes them */
       deleteOnUndo?: boolean;
+      /**
+       * Sibling rows created by the same operation (Remove span writes one row
+       * per surviving piece). Undo must retract them in the same step — undoing
+       * only the first piece left the rest of the split behind on the map and
+       * in the planner's data.
+       */
+      relatedDeleteIds?: string[];
     };
   };
   const undoStackRef = useRef<UndoEntry[]>([]);
@@ -900,6 +944,23 @@ export default function MapScreen() {
     if (entry.surveyUndo) {
       const { surveyFeatureId, layerId, previousGeometry, previousAttributes, previousStatus, description } = entry.surveyUndo;
       console.log(`[Undo] Restoring survey feature ${surveyFeatureId.slice(-8)}: ${description}`);
+
+      // Retract every sibling row the same operation created (Remove span's
+      // extra pieces), so one Undo puts the line back exactly as it was.
+      for (const relatedId of entry.surveyUndo.relatedDeleteIds ?? []) {
+        const st = useSurveyFeaturesStore.getState();
+        const list = st.surveyFeatures[layerId] ?? [];
+        useSurveyFeaturesStore.setState({
+          surveyFeatures: {
+            ...st.surveyFeatures,
+            [layerId]: list.filter((sf) => sf.id !== relatedId),
+          },
+        });
+        void deleteSurveyFeature(relatedId, layerId).catch((e) =>
+          console.warn('[Undo] Server delete of a split segment failed, local removal stands:', e instanceof Error ? e.message : e)
+        );
+        console.log(`[Undo] Removed split segment ${relatedId.slice(-8)} with the same step`);
+      }
 
       // ── Created features (spur trench, draw segment): undo removes them ──
       if (entry.surveyUndo.deleteOnUndo) {
@@ -1113,20 +1174,22 @@ export default function MapScreen() {
   const hasImportedData = Object.keys(projectGeojsons).length > 0;
 
   // ── Auto-fetch GeoJSON from backend when a real project is active but empty ──
-  const fetchAttemptedRef = useRef(false);
+  // The guard remembers WHICH project it fetched, not merely that it fetched
+  // once: a plain boolean meant only the first project of a session ever loaded.
+  const fetchAttemptedRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (
       storeActiveProject &&
       !storeActiveProject.id.startsWith('imported-') &&
       !hasImportedData &&
-      !fetchAttemptedRef.current
+      fetchAttemptedRef.current !== storeActiveProject.id
     ) {
-      fetchAttemptedRef.current = true;
+      fetchAttemptedRef.current = storeActiveProject.id;
       console.log('[Map] Active project found but GeoJSON empty — fetching from backend');
       fetchProjectGeojsons(storeActiveProject.id).catch((err) => {
         console.log('[Map] ⚠️ Project data fetch failed:', err);
-        fetchAttemptedRef.current = false;
+        fetchAttemptedRef.current = null;
       });
     }
   }, [storeActiveProject?.id, hasImportedData]);
@@ -1296,6 +1359,20 @@ export default function MapScreen() {
           displayMode === 'survey' ? 'Survey view' : displayMode === 'overlay' ? 'Overlay view' : 'HLD view'
         }`
       : '';
+
+  // One line of state under the project name. Offline first — it is the fact
+  // that changes how the engineer should behave.
+  const headerSubtitle = useMemo(() => {
+    const parts: string[] = [];
+    if (!isOnline) parts.push('Offline — saving on device');
+    if (surveyChangeCount > 0) {
+      parts.push(`${surveyChangeCount} change${surveyChangeCount === 1 ? '' : 's'}`);
+    }
+    parts.push(
+      displayMode === 'survey' ? 'Survey view' : displayMode === 'overlay' ? 'Overlay view' : 'HLD view',
+    );
+    return parts.join(' · ');
+  }, [isOnline, surveyChangeCount, displayMode]);
 
   // ── Build feature list for list view (from the active project's layers) ──
   const mergedFeatureList = useMemo(() => {
@@ -1561,6 +1638,47 @@ export default function MapScreen() {
       });
     }
 
+    // ── Remove span: show the gap that will disappear (red) + its cut points ──
+    // Without this the tool gave no feedback at all until Confirm: the engineer
+    // could not see which slice of trench had been selected. Red = removed,
+    // orange = the line that stays.
+    if (lineToolMode === 'delete-section' && tempLineCoords && deleteSectionRange) {
+      const [a, b] = deleteSectionRange;
+      const cutStart = Math.min(a, b), cutEnd = Math.max(a, b);
+      if (cutEnd > cutStart) {
+        previewLayers.push({
+          id: 'temp-preview-remove-span',
+          name: 'Removing this span',
+          features: [{
+            type: 'Feature' as const,
+            geometry: { type: 'LineString' as const, coordinates: tempLineCoords.slice(cutStart, cutEnd + 1) },
+            properties: { id: 'temp-preview-remove-span', _id: 'temp-preview-remove-span', _layer_id: 'temp-preview-remove-span', _is_preview: true },
+          }],
+          visible: true,
+          color: '#DC2626',
+          geometryType: 'LineString' as const,
+        });
+      }
+      const cutPoints = (cutStart === cutEnd
+        ? [tempLineCoords[cutStart]]
+        : [tempLineCoords[cutStart], tempLineCoords[cutEnd]]
+      ).filter(Boolean) as [number, number][];
+      if (cutPoints.length > 0) {
+        previewLayers.push({
+          id: 'temp-preview-cut-points',
+          name: 'Cut points',
+          features: cutPoints.map((coords, i) => ({
+            type: 'Feature' as const,
+            geometry: { type: 'Point' as const, coordinates: coords },
+            properties: { id: `temp-preview-cut-${i}`, _id: `temp-preview-cut-${i}`, _layer_id: 'temp-preview-cut-points', _is_preview: true },
+          })),
+          visible: true,
+          color: '#DC2626',
+          geometryType: 'Point' as const,
+        });
+      }
+    }
+
     // ── Temp Polygon Preview layer (orange) — shown during polygon edit mode ──
     // Mirrors the line preview: renders polygonEditCoords so the polygon shape
     // follows live vertex drags, and the vertex markers + highlight render on
@@ -1617,7 +1735,7 @@ export default function MapScreen() {
     }
 
     return [...hldLayers, ...previewLayers, ...surveyLayers, ...stagedLayers];
-  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, lineToolMode, continueLinePoints, tempLineCoords, selectedLineFeature, selectedPolygonFeature, polygonEditCoords, isolateFeatureId, drawTrenchActive, drawTrenchPoints, obstacleCentre, obstacleRadiusM]);
+  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, lineToolMode, continueLinePoints, tempLineCoords, selectedLineFeature, selectedPolygonFeature, polygonEditCoords, isolateFeatureId, drawTrenchActive, drawTrenchPoints, obstacleCentre, obstacleRadiusM, deleteSectionRange]);
 
   // Build visible layers from the active project's layers
   const visibleLayers = useMemo(() => {
@@ -1689,6 +1807,130 @@ export default function MapScreen() {
 
   // ── Draw order: the network above the dots (see orderLayersForDrawing) ──
   const orderedMapLayers = useMemo(() => orderLayersForDrawing(mapLayerData), [mapLayerData]);
+
+  // ── Region of interest + auto-zoom ──────────────────────────────────────
+  // The ROI is whatever the map is drawing right now: hiding a layer shrinks
+  // it, switching to Survey view frames only the edits.
+  const roiBounds = useMemo<Bounds | null>(() => {
+    const drawn = orderedMapLayers.filter((l) => l.visible);
+    return boundsOfFeatures(drawn.flatMap((l) => l.features));
+  }, [orderedMapLayers]);
+
+  // The map is inset by the header, the dock and the commit bar. Feeding the
+  // real numbers here keeps `needsReframe` honest about what is on screen.
+  const frameViewport = useMemo(
+    () =>
+      cameraView
+        ? {
+            ...cameraView,
+            viewportWidth: windowWidth,
+            viewportHeight: Math.max(320, windowHeight - 190),
+          }
+        : null,
+    [cameraView, windowWidth, windowHeight],
+  );
+
+  /**
+   * Frame `target`, unless it is already comfortably in view.
+   * Returns false when nothing is on the map, so callers can say so.
+   */
+  const frameBounds = useCallback(
+    (
+      target: Bounds | null,
+      opts?: {
+        force?: boolean;
+        minSpan?: number;
+        padding?: { top: number; right: number; bottom: number; left: number };
+      },
+    ) => {
+      if (!target) return false;
+      const padded = expandBounds(target, opts?.minSpan ?? MIN_REGION_SPAN_M);
+      if (!opts?.force && !needsReframe(padded, frameViewport)) return true;
+      setFitRequest({
+        bounds: padded,
+        padding: opts?.padding ?? { ...FRAME_PADDING },
+        ts: Date.now(),
+      });
+      return true;
+    },
+    [frameViewport],
+  );
+
+  // Frame the project's work area.
+  //
+  // Layers arrive one at a time, so the very first ROI is a fragment: fitting
+  // it once put the camera at street level in the middle of a 600 m project.
+  // While the project is still loading the camera re-fits (debounced) to the
+  // growing union; when the load settles there is exactly one final fit, and
+  // after that the camera only moves when the engineer asks it to.
+  //
+  // The helpers are reached through refs because `frameBounds` changes with
+  // every camera settle — depending on it here would re-arm the timer on each
+  // fit and loop.
+  const frameBoundsRef = useRef(frameBounds);
+  frameBoundsRef.current = frameBounds;
+
+  const roiKey = useMemo(
+    () => (roiBounds ? roiBounds.map((n) => n.toFixed(6)).join(',') : null),
+    [roiBounds],
+  );
+
+  const projectDataLoading = Boolean(
+    storeActiveProject && !storeActiveProject.id.startsWith('imported-') && !hasImportedData,
+  );
+
+  useEffect(() => {
+    if (!projectDataLoading || !roiBounds) return;
+    const timer = setTimeout(() => {
+      frameBoundsRef.current(roiBounds, { force: true, minSpan: MIN_REGION_SPAN_M });
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [roiKey, projectDataLoading]);
+
+  // One fit when the data settles (and for imported packages, which never
+  // enter the loading state).
+  const settledProjectRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!roiBounds || projectDataLoading) return;
+    const projectId = activeProject?.id ?? 'local';
+    if (settledProjectRef.current === projectId) return;
+    settledProjectRef.current = projectId;
+    frameBoundsRef.current(roiBounds, { force: true, minSpan: MIN_REGION_SPAN_M });
+  }, [roiKey, projectDataLoading, activeProject?.id]);
+
+  // Selecting a feature pulls the camera to it only when it is a speck or off
+  // screen — a tap on a neighbour at working zoom must not move the map.
+  const framedFeatureRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!selectedMapFeatureId) {
+      framedFeatureRef.current = null;
+      return;
+    }
+    if (framedFeatureRef.current === selectedMapFeatureId) return;
+    for (const layer of orderedMapLayers) {
+      for (const feature of layer.features) {
+        const props = feature.properties as Record<string, unknown> | undefined;
+        const fid = props?.id ?? props?._id;
+        if (fid !== selectedMapFeatureId) continue;
+        framedFeatureRef.current = selectedMapFeatureId;
+        const bounds = geometryBounds(feature.geometry as { type?: string; coordinates?: unknown });
+        // The feature card owns the bottom ~400 px once a feature is
+        // selected, so frame the feature into the strip above it.
+        if (bounds) frameBounds(bounds, { minSpan: 90, padding: SELECTION_PADDING });
+        return;
+      }
+    }
+  }, [selectedMapFeatureId, orderedMapLayers, frameBounds]);
+
+  const handleFrameRegion = useCallback(() => {
+    if (!frameBounds(roiBounds, { force: true })) {
+      showToast('No layers on the map to frame', 'info');
+    }
+  }, [frameBounds, roiBounds]);
+
+  const handleZoomRail = useCallback((delta: number) => {
+    setZoomRequest({ delta, ts: Date.now() });
+  }, []);
 
   // ── Empty-state copy, per view mode ─────────────────────────────────────
   // "All layers are currently hidden or contain no features. Toggle layers on
@@ -2988,6 +3230,7 @@ export default function MapScreen() {
       setLineMoveMode(false);
       setLineToolMode(null);
       setDeleteSectionRange(null);
+      deleteSectionHistoryRef.current = [];
       setTempLineCoords(null);
       setTempLineOriginal(null);
       return;
@@ -3015,6 +3258,7 @@ export default function MapScreen() {
     setLineMoveMode(true);
     setLineToolMode('delete-section');
     setDeleteSectionRange(null);
+    deleteSectionHistoryRef.current = [];
     // Drop any Draw Segment progress so the two tools cannot both be live.
     setContinueLineAnchor(null);
     setContinueLinePoints(0);
@@ -3081,20 +3325,22 @@ export default function MapScreen() {
 
   const handleDeleteSectionConfirm = useCallback(async () => {
     if (!deleteSectionRange || !tempLineCoords || !tempLineOriginal || !selectedLineFeature) return;
-    const [a, b] = deleteSectionRange; if (a === b) return;
-    const start = Math.min(a, b), end = Math.max(a, b);
+    const [a, b] = deleteSectionRange;
+    if (a === b) {
+      showToast('Pick both ends of the gap first — tap the line a second time', 'warning');
+      return;
+    }
     // ── Split into disconnected segments at the deletion boundary ──
-    // Keep B and D as endpoints of the remaining segments — only delete vertices BETWEEN them
-    const before = tempLineCoords.slice(0, start + 1);
-    const after = tempLineCoords.slice(end);
-    const segments: [number, number][][] = [];
-    if (before.length >= 2) segments.push(before);
-    else if (before.length === 1) console.warn('[DeleteSection] Dropped 1-vertex before-segment — not enough points for LineString');
-    if (after.length >= 2) segments.push(after);
-    else if (after.length === 1) console.warn('[DeleteSection] Dropped 1-vertex after-segment — not enough points for LineString');
+    // Keep B and D as endpoints of the remaining segments — only delete
+    // vertices BETWEEN them. Pure so the split can be unit-tested.
+    const { start, end, segments, removedM } = planSpanRemoval(tempLineCoords, a, b);
     if (segments.length === 0) {
+      // Both ends of the line were picked: there is nothing left to keep, and
+      // silently doing nothing is what made this tool feel broken. Keep the
+      // tool armed and say what the engineer should use instead.
       console.warn('[DeleteSection] No valid segments remain after deletion — aborting');
-      setLineMoveMode(false); setLineToolMode(null); setDeleteSectionRange(null); setTempLineCoords(null); setTempLineOriginal(null); return;
+      showToast('That is the whole line — use Delete to retire the feature instead', 'warning');
+      return;
     }
 
     const { id: featureId, layerId, layerName } = selectedLineFeature;
@@ -3106,11 +3352,38 @@ export default function MapScreen() {
     // ── First segment: update existing Survey Feature (or create new, tied to HLD) ──
     const existingSurvey = getSurveyFeatureForHld(featureId);
     const firstGeom = { type: 'LineString', coordinates: segments[0] } as Record<string, unknown>;
+    // One removal writes one or two rows. Both are recorded in a SINGLE undo
+    // entry: pressing Undo once has to put the line back whole. Two entries left
+    // the engineer with the original line plus a stray extra piece after one
+    // press — a silent duplicate in the planner's data.
+    const createdSegmentIds: string[] = [];
+    let undoMain: NonNullable<UndoEntry['surveyUndo']> | null = null;
+
     if (existingSurvey) {
-      pushUndo({ featureId, layerId, oldLng: 0, oldLat: 0, newLng: 0, newLat: 0, timestamp: Date.now(), surveyUndo: { surveyFeatureId: existingSurvey.id, layerId, previousGeometry: existingSurvey.survey_geometry, previousAttributes: existingSurvey.survey_attributes, previousStatus: existingSurvey.survey_status, description: `Undo section deletion for ${featureId.slice(-8)}` } });
+      undoMain = {
+        surveyFeatureId: existingSurvey.id,
+        layerId,
+        previousGeometry: existingSurvey.survey_geometry,
+        previousAttributes: existingSurvey.survey_attributes,
+        previousStatus: existingSurvey.survey_status,
+        description: `Undo section removal for ${featureId.slice(-8)}`,
+      };
       updateSurveyFeature(existingSurvey.id, layerId, { survey_geometry: firstGeom, survey_status: 'modified', change_reason: reason });
     } else {
-      upsertSurveyFeature(featureId, layerId, layerName, firstGeom, origAttrs ?? {}, origGeom, origAttrs, reason).then((sf) => { if (sf) { pushUndo({ featureId, layerId, oldLng: 0, oldLat: 0, newLng: 0, newLat: 0, timestamp: Date.now(), surveyUndo: { surveyFeatureId: sf.id, layerId, previousGeometry: { type: 'LineString', coordinates: tempLineOriginal } as Record<string, unknown>, previousAttributes: origAttrs as Record<string, unknown> ?? {}, previousStatus: 'new', description: `Undo: remove survey feature for ${featureId.slice(-8)}` } }); } });
+      const sf = await upsertSurveyFeature(featureId, layerId, layerName, firstGeom, origAttrs ?? {}, origGeom, origAttrs, reason);
+      if (sf) {
+        // There was no survey row before this cut, so undoing it deletes the row
+        // instead of restoring one — the project ends up exactly as it started.
+        undoMain = {
+          surveyFeatureId: sf.id,
+          layerId,
+          previousGeometry: firstGeom,
+          previousAttributes: {},
+          previousStatus: 'new',
+          description: `Undo: remove survey feature for ${featureId.slice(-8)}`,
+          deleteOnUndo: true,
+        };
+      }
     }
 
     // ── Additional segments: their OWN backend features, like spur trenches ──
@@ -3129,21 +3402,7 @@ export default function MapScreen() {
         );
         if (segSf) {
           console.log(`[DeleteSection] Created backend segment ${i + 1} (${segSf.id.slice(-8)}) for ${featureId.slice(-8)}`);
-          pushUndo({
-            featureId,
-            layerId,
-            oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
-            timestamp: Date.now(),
-            surveyUndo: {
-              surveyFeatureId: segSf.id,
-              layerId,
-              previousGeometry: segGeom,
-              previousAttributes: {},
-              previousStatus: 'new',
-              description: `Undo: remove segment ${i + 1} for ${featureId.slice(-8)}`,
-              deleteOnUndo: true,
-            },
-          });
+          createdSegmentIds.push(segSf.id);
         } else {
           console.warn(`[DeleteSection] Segment ${i + 1} not persisted (imported project or server refusal) — kept in map only for this session`);
         }
@@ -3151,50 +3410,144 @@ export default function MapScreen() {
         console.warn(`[DeleteSection] Segment ${i + 1} save failed:`, err instanceof Error ? err.message : err);
       }
     }
-    setLineMoveMode(false); setLineToolMode(null); setDeleteSectionRange(null); setContinueLineAnchor(null); setContinueLinePoints(0); setContinueSnapTarget(null); setContinueStartPt(null); setContinueIsSpur(false); lastContinueTapRef.current = null; setTempLineCoords(null); setTempLineOriginal(null);
-  }, [deleteSectionRange, tempLineCoords, tempLineOriginal, selectedLineFeature, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, activeProject]);
+    // The first piece failed to persist but a later piece did — still keep the
+    // created row retractable rather than stranding it on the map.
+    if (!undoMain && createdSegmentIds.length > 0) {
+      const [firstId, ...rest] = createdSegmentIds;
+      undoMain = {
+        surveyFeatureId: firstId,
+        layerId,
+        previousGeometry: { type: 'LineString', coordinates: segments[segments.length - 1] } as Record<string, unknown>,
+        previousAttributes: {},
+        previousStatus: 'new',
+        description: `Undo: remove segment for ${featureId.slice(-8)}`,
+        deleteOnUndo: true,
+        relatedDeleteIds: rest.length > 0 ? rest : undefined,
+      };
+    }
+
+    if (undoMain) {
+      pushUndo({
+        featureId,
+        layerId,
+        oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
+        timestamp: Date.now(),
+        surveyUndo: {
+          ...undoMain,
+          // Every created piece except the one this entry already owns (the
+          // fallback above may have adopted the first created id as its main
+          // row). Undo retracts these in the same step.
+          relatedDeleteIds: (() => {
+            const siblings = createdSegmentIds.filter((id) => id !== undoMain!.surveyFeatureId);
+            return siblings.length > 0 ? siblings : undefined;
+          })(),
+        },
+      });
+    }
+
+    const leavesText = segments.length === 2 ? 'two separate lines' : 'one shortened line';
+    showToast(`Removed ${Math.round(removedM)} m — ${leavesText} remain. One Undo puts the line back.`, 'success');
+    setLineMoveMode(false); setLineToolMode(null); setDeleteSectionRange(null); deleteSectionHistoryRef.current = []; setContinueLineAnchor(null); setContinueLinePoints(0); setContinueSnapTarget(null); setContinueStartPt(null); setContinueIsSpur(false); lastContinueTapRef.current = null; setTempLineCoords(null); setTempLineOriginal(null);
+  }, [deleteSectionRange, tempLineCoords, tempLineOriginal, selectedLineFeature, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, activeProject, showToast]);
 
   // ── Delete Section: tap handler ────────────────────────────────────────
-  // Snaps the actual tap location (lngLat from the map press event) to the
-  // nearest vertex on tempLineCoords. The FIRST tap sets the start vertex,
-  // the SECOND tap sets the end vertex (order independent — confirm handler
-  // normalizes with Math.min/Math.max). Only vertices of the selected line
-  // are considered: taps on the temp-preview layer OR the original HLD
-  // line layer both resolve. Taps on OTHER features are ignored.
+  // Two taps define the GAP to remove. Each tap CUTS a vertex into the line
+  // exactly where the finger landed (projected onto the nearest segment), so
+  // a long straight trench can be bitten out in the middle without first
+  // dragging vertices into place — the old tool only snapped to vertices that
+  // already existed, which mid-segment taps could never hit.
+  //
+  // The earlier cut point keeps its identity when the second tap inserts a
+  // vertex before it (index shifts by one). After both ends are picked the
+  // span is frozen; "Last tap" steps back, which is why every pick is stored
+  // in deleteSectionHistoryRef.
   const handleDeleteSectionTap = useCallback(
     (featureId: string, layerId: string, lngLat: [number, number]) => {
       if (lineToolMode !== 'delete-section' || !selectedLineFeature || !tempLineCoords) return;
-      const expectedPreview = `temp-preview-${selectedLineFeature.layerId}`;
-      const onSelectedLine =
-        layerId === expectedPreview ||
-        (featureId === selectedLineFeature.id && layerId === selectedLineFeature.layerId);
-      if (!onSelectedLine) {
-        console.log(`[DeleteSection] Ignored tap on layer "${layerId}" — not the selected line`);
+
+      // Both ends picked → the selection is final until the engineer steps back.
+      if (deleteSectionRange && deleteSectionRange[0] !== deleteSectionRange[1]) {
+        showToast('Both cut points are set — use Last tap to change one', 'info');
         return;
       }
 
-      // Snap to nearest vertex of tempLineCoords using the REAL tap point.
-      // No distance cap needed: onSelectedLine guarantees the tap landed on
-      // the selected line, so the nearest vertex is always the intended one
-      // (a cap would reject mid-segment taps on long straight trenches).
-      let bestIdx = 0;
-      let bestDist = Infinity;
-      tempLineCoords.forEach(([vlng, vlat], i) => {
-        const d = (lngLat[0] - vlng) ** 2 + (lngLat[1] - vlat) ** 2;
-        if (d < bestDist) { bestDist = d; bestIdx = i; }
-      });
+      const cut = cutVertexIndexAtPoint(tempLineCoords, lngLat[0], lngLat[1]);
+      if (!cut) return;
 
-      setDeleteSectionRange((prev) => {
-        if (!prev) {
-          console.log(`[DeleteSection] Start vertex = ${bestIdx}`);
-          return [bestIdx, bestIdx];
-        }
-        console.log(`[DeleteSection] End vertex = ${bestIdx} (range ${Math.min(prev[0], bestIdx)}→${Math.max(prev[0], bestIdx)})`);
-        return [prev[0], bestIdx];
-      });
+      const prev = deleteSectionRange;
+      const anchor = prev
+        ? (cut.inserted && cut.index <= prev[0] ? prev[0] + 1 : prev[0])
+        : cut.index;
+      const range: [number, number] =
+        anchor === cut.index
+          ? [anchor, cut.index]
+          : [Math.min(anchor, cut.index), Math.max(anchor, cut.index)];
+
+      const gapM = approximateLength(cut.coordinates.slice(range[0], range[1] + 1));
+
+      // A second tap on the first cut point (easy: its dot sits on the line)
+      // would otherwise commit a zero-length gap. Nothing is applied.
+      if (prev && gapM < 1) {
+        showToast('That is the same spot — tap further along the line for the other end', 'warning');
+        return;
+      }
+
+      deleteSectionHistoryRef.current = [
+        ...deleteSectionHistoryRef.current,
+        { coordinates: cut.coordinates, range },
+      ];
+      setTempLineCoords(cut.coordinates);
+      setDeleteSectionRange(range);
+
+      if (!prev) {
+        console.log(`[DeleteSection] Cut start at vertex ${cut.index} (${cut.inserted ? 'new vertex' : 'existing vertex'})`);
+        showToast('Cut point added where you tapped — now tap where the gap ends', 'info');
+        return;
+      }
+
+      const interior = countVerticesBetween(range[0], range[1]);
+      console.log(`[DeleteSection] Gap ${range[0]}→${range[1]} (${gapM} m, ${interior} vertices inside)`);
+      showToast(`Gap selected: ${Math.round(gapM)} m. The red preview is what will be removed.`, 'info');
     },
-    [lineToolMode, selectedLineFeature, tempLineCoords],
+    [lineToolMode, selectedLineFeature, tempLineCoords, deleteSectionRange, showToast],
   );
+
+  // Step back one cut point: restores the coordinates snapshot from before
+  // that tap, so any vertex the tap cut into the line is removed again.
+  const handleDeleteSectionUndoPick = useCallback(() => {
+    const history = deleteSectionHistoryRef.current;
+    if (history.length === 0) return;
+    history.pop();
+    const previous = history[history.length - 1];
+    if (!previous) {
+      const base = tempLineOriginal ?? tempLineCoords ?? [];
+      setTempLineCoords(base.map(([lng, lat]) => [lng, lat] as [number, number]));
+      setDeleteSectionRange(null);
+      showToast('Cut points cleared', 'info');
+      return;
+    }
+    setTempLineCoords(previous.coordinates);
+    setDeleteSectionRange(previous.range);
+    showToast('Last cut point removed', 'info');
+  }, [tempLineOriginal, tempLineCoords, showToast]);
+
+  // What the Remove span panel reports before the engineer commits: metres in
+  // the gap, how many vertices disappear with it, and how many lines remain.
+  // "Leaves 0" means the picks cover the whole line, so the action is refused.
+  const deleteSectionSummary = useMemo(() => {
+    if (lineToolMode !== 'delete-section' || !deleteSectionRange || !tempLineCoords) return null;
+    const [a, b] = deleteSectionRange;
+    const start = Math.min(a, b), end = Math.max(a, b);
+    if (start === end) return null;
+    const removed = tempLineCoords.slice(start, end + 1);
+    const leaves = (start > 0 ? 1 : 0) + (end < tempLineCoords.length - 1 ? 1 : 0);
+    return {
+      lengthLabel: `${Math.round(approximateLength(removed))} m`,
+      vertices: countVerticesBetween(start, end),
+      leaves,
+      canRemove: leaves > 0,
+    };
+  }, [lineToolMode, deleteSectionRange, tempLineCoords]);
 
   // ── Split here: cut the working copy into two spans at the tapped point ──
   // Wires splitLineAtPoint (until now dead code) so routing a new chamber into
@@ -3549,7 +3902,7 @@ export default function MapScreen() {
   }, [findTrenchSnap]);
 
   const handleTrenchToggle = useCallback(() => {
-    setToolsOpen(false);
+    setActiveSheet(null);
     if (drawTrenchActive) {
       setDrawTrenchActive(false);
       setDrawTrenchPoints([]);
@@ -3930,11 +4283,16 @@ export default function MapScreen() {
       setTempLineCoords(tempLineOriginal.map(([lng, lat]) => [lng, lat] as [number, number]));
       setContinueLinePoints(0);
       setContinueLineAnchor(null);
+      // Cut indices point at coordinates that the revert just replaced —
+      // leaving them set made the red preview slice the wrong slice.
+      setDeleteSectionRange(null);
+      deleteSectionHistoryRef.current = [];
+      showToast('Line reverted to its saved shape', 'info');
       console.log('[LineUndo] Reverted line to original coordinates');
       return;
     }
     handleUndo();
-  }, [lineMoveMode, tempLineCoords, tempLineOriginal, handleUndo]);
+  }, [lineMoveMode, tempLineCoords, tempLineOriginal, handleUndo, showToast]);
 
   // ── Polygon edit handlers ───────────────────────────────────────────
   const handlePolygonEditStart = useCallback((feature: EditingFeature) => {
@@ -4213,6 +4571,18 @@ export default function MapScreen() {
         handleContinueLineTap('', '', [lng, lat]);
         return;
       }
+      // ── Cut tools: a tap that misses the line must NOT deselect it ──
+      // This used to close the whole toolbar (the selection was cleared), so
+      // one imprecise tap lost the tool and the engineer had to start over.
+      if (lineToolMode === 'delete-section' || lineToolMode === 'split-here') {
+        showToast(
+          lineToolMode === 'delete-section'
+            ? 'Tap the line itself — no cut point was added'
+            : 'Tap the line to place the split',
+          'warning',
+        );
+        return;
+      }
       // Empty ground = no overlapping-feature stack to cycle through.
       setTapStack([]);
       setTapStackLngLat(null);
@@ -4282,7 +4652,7 @@ export default function MapScreen() {
         autoOverlayOnEdit();
       }
     },
-    [geoMode, addPointTargetLayer, activeLayerNames, upsertSurveyFeature, autoOverlayOnEdit, lineToolMode, selectedLineFeature, tempLineCoords, handleContinueLineTap, drawTrenchActive, handleTrenchTap, handleRouteAroundTap],
+    [geoMode, addPointTargetLayer, activeLayerNames, upsertSurveyFeature, autoOverlayOnEdit, lineToolMode, selectedLineFeature, tempLineCoords, handleContinueLineTap, drawTrenchActive, handleTrenchTap, handleRouteAroundTap, showToast],
   );
 
   // Clear line selection when geoMode changes away from select (entering add_point)
@@ -4521,56 +4891,37 @@ export default function MapScreen() {
     }
   }, [activeProject, submitSurveyCopy, showToast]);
 
+  const showCommitBar = !isolateFeatureId && !selectedLineFeature && !selectedPolygonFeature;
+
+  // A contextual toolbar and the dock both own the bottom strip; only one may.
+  const dockHidden = Boolean(
+    selectedLineFeature ||
+      selectedPolygonFeature ||
+      drawTrenchActive ||
+      editingFeature ||
+      surveyForm ||
+      geoMode !== 'select' ||
+      activeSheet !== null ||
+      surveyPanelVisible,
+  );
+
+  // Bottom edge included: the commit bar is the last thing on screen, and on
+  // Android the system navigation bar was drawn straight over Submit.
   return (
-    <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]} edges={['top']}>
-      {/* Header */}
-      <View style={styles.header}>
-        <View style={styles.headerLeft}>
-          {/* Back to Home — the map is now opened from a project, not a tab */}
-          <TouchableOpacity
-            onPress={() => (router.canGoBack() ? router.back() : router.replace('/(tabs)/home'))}
-            style={styles.backBtn}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            accessibilityRole="button"
-            accessibilityLabel="Back to my projects"
-          >
-            <ArrowLeft size={22} stroke={colors.textPrimary} />
-          </TouchableOpacity>
-          <MapIcon size={20} stroke={colors.primary} />
-          <View style={styles.headerTitleWrap}>
-            <Text style={[styles.title, { color: colors.textPrimary }]} numberOfLines={1}>
-              {mapProjectName}
-            </Text>
-            {surveySummaryLabel ? (
-              <Text style={[styles.headerSubtitle, { color: colors.textSecondary }]} numberOfLines={1}>
-                {surveySummaryLabel}
-              </Text>
-            ) : null}
-          </View>
-        </View>
-        <View style={styles.headerRight}>
-          <TouchableOpacity
-            style={[styles.headerBtn, { backgroundColor: viewMode === 'list' ? colors.primary + '15' : colors.surface }]}
-            onPress={() => setViewMode('list')}
-            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-            accessibilityRole="button"
-            accessibilityLabel="Show list view"
-            accessibilityState={{ selected: viewMode === 'list' }}
-          >
-            <List size={18} stroke={viewMode === 'list' ? colors.primary : colors.textSecondary} />
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.headerBtn, { backgroundColor: viewMode === 'map' ? colors.primary + '15' : colors.surface }]}
-            onPress={() => setViewMode('map')}
-            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-            accessibilityRole="button"
-            accessibilityLabel="Show map view"
-            accessibilityState={{ selected: viewMode === 'map' }}
-          >
-            <MapIcon size={18} stroke={viewMode === 'map' ? colors.primary : colors.textSecondary} />
-          </TouchableOpacity>
-        </View>
-      </View>
+    <SafeAreaView
+      style={[styles.safe, { backgroundColor: colors.background }]}
+      edges={['top', 'bottom']}
+    >
+      {/* Header — slim, one line of project, one line of state */}
+      <MapHeader
+        title={mapProjectName}
+        subtitle={headerSubtitle}
+        online={isOnline}
+        listMode={viewMode === 'list'}
+        onBack={() => (router.canGoBack() ? router.back() : router.replace('/(tabs)/home'))}
+        onOpenList={() => setViewMode(viewMode === 'list' ? 'map' : 'list')}
+        onOpenTools={() => setActiveSheet('tools')}
+      />
 
       {/* Main Content */}
       {viewMode === 'map' ? (
@@ -4672,7 +5023,7 @@ export default function MapScreen() {
                       }}
                       activeOpacity={0.7}
                       onPress={() => {
-                        fetchAttemptedRef.current = false;
+                        fetchAttemptedRef.current = null;
                         if (storeActiveProject) {
                           fetchProjectGeojsons(storeActiveProject.id).catch(() => {});
                         }
@@ -4768,55 +5119,59 @@ export default function MapScreen() {
             mapStyle={currentBasemapStyle}
             flyToCenter={flyToCenter}
             flyToUserTarget={flyToUserTarget}
+            fitBounds={fitRequest}
+            zoomRequest={zoomRequest}
+            onViewportChange={setCameraView}
             userLocation={userLocation}
           />
 
-          {/* HLD / Survey / Overlay view switcher — always available on the map,
-              so Overlay can be picked as a view without clicking a layer or
-              opening the tools menu. Hidden during review isolation (read-only). */}
-          {viewMode === 'map' && !isolateFeatureId && (
-            <View style={styles.viewSwitcher}>
-              {(
-                [
-                  { key: 'hld', label: 'HLD', dot: HLD_COLOR_OVERRIDE, activeColor: HLD_COLOR_OVERRIDE, onActive: colors.onPrimary },
-                  { key: 'survey', label: 'Survey', dot: SURVEY_COLOR, activeColor: SURVEY_COLOR, onActive: colors.onSecondary },
-                  { key: 'overlay', label: 'Overlay', dot: '#7C3AED', activeColor: '#7C3AED', onActive: colors.onPrimary },
-                ] as { key: LayerDisplayMode; label: string; dot: string; activeColor: string; onActive: string }[]
-              ).map((m) => {
-                const active = displayMode === m.key;
-                return (
-                  <TouchableOpacity
-                    key={m.key}
-                    style={[
-                      styles.viewSeg,
-                      {
-                        backgroundColor: active ? m.activeColor : colors.surface,
-                        borderColor: active ? m.activeColor : colors.outlineLight,
-                      },
-                    ]}
-                    onPress={() => {
-                      setToolsOpen(false);
-                      setDisplayMode(m.key);
-                    }}
-                    activeOpacity={0.8}
-                    accessibilityRole="button"
-                    accessibilityLabel={`${m.label} view`}
-                    accessibilityState={{ selected: active }}
-                  >
-                    <View style={[styles.modeDot, { backgroundColor: active ? colors.surface : m.dot }]} />
-                    <Text
-                      style={[
-                        styles.viewSegText,
-                        { color: active ? m.onActive : colors.textSecondary },
-                      ]}
-                    >
-                      {m.label}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
+          {/* HLD / Survey / Overlay — a reading of the same map, so it stays on
+              the map. Hidden during review isolation (nothing to switch to). */}
+          <View style={styles.mapTopRow} pointerEvents="box-none">
+            <ViewModeSwitch
+              value={displayMode as ViewMode}
+              onChange={(mode) => {
+                setActiveSheet(null);
+                setDisplayMode(mode);
+              }}
+              hidden={Boolean(isolateFeatureId)}
+            />
+          </View>
+
+          {/* Layers chip — the layer tree lives in a sheet now, so the map keeps
+              its area. The count is the number of layers currently drawn. */}
+          {!isolateFeatureId && !dragMode && (
+            <Pressable
+              onPress={() => setActiveSheet('layers')}
+              style={({ pressed }) => [
+                styles.layersChip,
+                { backgroundColor: chrome.panel, borderColor: chrome.hairline },
+                pressed && { opacity: 0.85 },
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel="Show layers"
+            >
+              <Layers size={16} stroke={colors.textSecondary} />
+              <Text style={[styles.layersChipText, { color: colors.textPrimary }]}>Layers</Text>
+              <View style={[styles.layersChipCount, { backgroundColor: colors.primary + '14' }]}>
+                <Text style={[styles.layersChipCountText, { color: colors.primary }]}>
+                  {legendPanelLayers.filter((l) => l.visible).length}
+                </Text>
+              </View>
+            </Pressable>
           )}
+
+          {/* Right-edge controls: zoom, layers, frame the survey area */}
+          <View style={styles.railWrap} pointerEvents="box-none">
+            <MapRail
+              onZoomIn={() => handleZoomRail(1)}
+              onZoomOut={() => handleZoomRail(-1)}
+              onOpenLayers={() => setActiveSheet('layers')}
+              onFrameRegion={handleFrameRegion}
+              layersOpen={activeSheet === 'layers'}
+              locked={Boolean(isolateFeatureId)}
+            />
+          </View>
 
           {/* Geometry Editor - editing toolbar OR add_point toolbar */}
           {viewMode === 'map' && (editingFeature !== null || geoMode !== 'select') && (
@@ -4845,15 +5200,6 @@ export default function MapScreen() {
               onDragModeChange={setDragMode}
             />
           )}
-
-          {/* Layer Legend Overlay — with collapsible group headers */}
-          <MapLegend
-            layers={legendPanelLayers}
-            groups={legendGroups}
-            maxVisible={0}
-            onToggleLayer={toggleLayerVisibility}
-            onLayerClick={handleViewLayerFeatures}
-          />
 
           {/* Layer Feature Panel — shows features when clicking a layer name */}
           {layerFeaturePanel.visible && layerFeaturePanel.layerId && (
@@ -4980,7 +5326,9 @@ export default function MapScreen() {
               onDeleteSection={handleDeleteSectionToggle}
               deleteSectionMode={activeLineTool === 'delete-section'}
               deleteSectionStep={deleteSectionRange ? (deleteSectionRange[0] === deleteSectionRange[1] ? 1 : 2) : 0}
-              onDeleteConfirm={deleteSectionRange && deleteSectionRange[0] !== deleteSectionRange[1] ? handleDeleteSectionConfirm : undefined}
+              onDeleteConfirm={handleDeleteSectionConfirm}
+              onDeleteReset={handleDeleteSectionUndoPick}
+              deleteSectionSummary={deleteSectionSummary}
               onDeleteFeature={handleLineDelete}
               onSplit={handleSplitToggle}
               splitMode={activeLineTool === 'split-here'}
@@ -5012,6 +5360,8 @@ export default function MapScreen() {
           {/* Pin-Anchored Feature Popup - hidden during editing mode or line selection */}
           {selectedFeaturePopup && !editingFeature && !selectedLineFeature && (
             <MapFeaturePopup
+              variant="card"
+              bottomOffset={88}
               screenX={popupScreenCoords?.x ?? 160}
               screenY={popupScreenCoords?.y ?? 300}
               featureName={selectedFeaturePopup.name}
@@ -5044,7 +5394,7 @@ export default function MapScreen() {
                 setSelectedMapFeatureId(null);
                 setPopupScreenCoords(null);
                 setDragMode(true);
-                setToolsOpen(false);
+                setActiveSheet(null);
                 console.log('[Popup] Move enabled — drag the feature to relocate it');
               }}
               notesDraft={notesDraft}
@@ -5177,235 +5527,50 @@ export default function MapScreen() {
         </View>
       )}
 
-      {/* FABs - only on map view, and hidden while a feature is selected or a
-          panel is open so they never overlap the bottom toolbars/panels */}
-      {viewMode === 'map' && !selectedLineFeature && !selectedPolygonFeature && !surveyPanelVisible && !basemapPanelVisible && (
-        <View style={styles.fabs}>
-          {toolsOpen && (
-            <>
-              {/* Undo */}
-              <View style={styles.toolRow}>
-                <View style={[styles.fabLabelPill, { backgroundColor: colors.surface }]}>
-                  <Text style={[styles.fabLabelText, { color: colors.textSecondary }]}>Undo</Text>
-                </View>
-                <TouchableOpacity
-                  style={[styles.fab, { backgroundColor: colors.surface, opacity: undoCount > 0 ? 1 : 0.4 }]}
-                  onPress={() => { setToolsOpen(false); handleUndo(); }}
-                  disabled={undoCount === 0}
-                  activeOpacity={0.7}
-                  accessibilityRole="button"
-                  accessibilityLabel={undoCount > 0 ? `Undo, ${undoCount} available` : 'Undo, nothing to undo'}
-                  accessibilityState={{ disabled: undoCount === 0 }}
-                >
-                  <Undo2 size={20} stroke={undoCount > 0 ? colors.textSecondary : colors.textTertiary} />
-                  {undoCount > 0 && (
-                    <View style={[styles.undoBadge, { backgroundColor: colors.primary }]}>
-                      <Text style={styles.undoBadgeText}>{undoCount > 99 ? '99+' : undoCount}</Text>
-                    </View>
-                  )}
-                </TouchableOpacity>
-              </View>
-
-              {/* Add Point */}
-              {!isolateFeatureId && (
-              <View style={styles.toolRow}>
-                <View style={[styles.fabLabelPill, { backgroundColor: colors.surface }]}>
-                  <Text style={[styles.fabLabelText, { color: colors.textSecondary }]}>Add Point</Text>
-                </View>
-                <TouchableOpacity
-                  style={[styles.fab, {
-                    backgroundColor: geoMode === 'add_point' ? colors.secondary : colors.surface,
-                    transform: [{ scale: geoMode === 'add_point' ? 1.1 : 1 }],
-                  }]}
-                  accessibilityRole="button"
-                  accessibilityLabel="Add a point to the survey"
-                  accessibilityState={{ selected: geoMode === 'add_point' }}
-                  onPress={() => {
-                    setToolsOpen(false);
-                    if (geoMode === 'add_point') {
-                      setGeoMode('select');
-                      setAddPointTargetLayer('');
-                    } else {
-                      setGeoMode('add_point');
-                      if (addPointLayers.length > 0 && !addPointTargetLayer) {
-                        setAddPointTargetLayer(addPointLayers[0].id);
-                      }
-                    }
-                  }}
-                  activeOpacity={0.8}
-                >
-                  <MapPin size={20} stroke={geoMode === 'add_point' ? colors.onSecondary : colors.textSecondary} />
-                </TouchableOpacity>
-              </View>
-              )}
-
-              {/* Draw trench — create a NEW survey LineString */}
-              {!isolateFeatureId && (
-              <View style={styles.toolRow}>
-                <View style={[styles.fabLabelPill, { backgroundColor: colors.surface }]}>
-                  <Text style={[styles.fabLabelText, { color: colors.textSecondary }]}>Draw Trench</Text>
-                </View>
-                <TouchableOpacity
-                  style={[styles.fab, {
-                    backgroundColor: drawTrenchActive ? '#FF8C00' : colors.surface,
-                    transform: [{ scale: drawTrenchActive ? 1.1 : 1 }],
-                  }]}
-                  accessibilityRole="button"
-                  accessibilityLabel="Draw a new trench line on the map"
-                  accessibilityState={{ selected: drawTrenchActive }}
-                  onPress={handleTrenchToggle}
-                  activeOpacity={0.8}
-                >
-                  <Spline size={20} stroke={drawTrenchActive ? colors.onSecondary : colors.textSecondary} />
-                </TouchableOpacity>
-              </View>
-              )}
-
-              {/* Survey Changes */}
-              <View style={styles.toolRow}>
-                <View style={[styles.fabLabelPill, { backgroundColor: colors.surface }]}>
-                  <Text style={[styles.fabLabelText, { color: colors.textSecondary }]}>Survey Changes</Text>
-                </View>
-                <TouchableOpacity
-                  style={[styles.fab, {
-                    backgroundColor: colors.surface,
-                    opacity: Object.keys(surveyFeatures).length > 0 ? 1 : 0.4,
-                  }]}
-                  onPress={() => { setToolsOpen(false); setSurveyPanelVisible(true); }}
-                  disabled={Object.keys(surveyFeatures).length === 0}
-                  activeOpacity={0.8}
-                  accessibilityRole="button"
-                  accessibilityLabel="Review survey changes"
-                  accessibilityState={{ disabled: Object.keys(surveyFeatures).length === 0 }}
-                >
-                  <Layers size={20} stroke={colors.textSecondary} />
-                  {Object.keys(surveyFeatures).length > 0 && (
-                    <View style={[styles.undoBadge, { backgroundColor: colors.secondary }]}>
-                      <Text style={styles.undoBadgeText}>
-                        {(() => {
-                          let total = 0;
-                          for (const list of Object.values(surveyFeatures)) total += list.length;
-                          return total > 99 ? '99+' : total;
-                        })()}
-                      </Text>
-                    </View>
-                  )}
-                </TouchableOpacity>
-              </View>
-
-              {/* HLD/Survey/Overlay display mode */}
-              <View style={styles.toolRow}>
-                <View style={[styles.fabLabelPill, { backgroundColor: colors.surface }]}>
-                  <Text style={[styles.fabLabelText, { color: colors.textSecondary }]}>
-                    {displayMode === 'hld' ? 'HLD View' : displayMode === 'survey' ? 'Survey View' : 'Overlay View'}
-                  </Text>
-                </View>
-                <TouchableOpacity
-                  style={[styles.fab, {
-                    backgroundColor: displayMode === 'survey' ? SURVEY_COLOR : displayMode === 'overlay' ? '#7C3AED' : colors.surface,
-                  }]}
-                  onPress={() => {
-                    setToolsOpen(false);
-                    const next: LayerDisplayMode = displayMode === 'hld' ? 'survey' : displayMode === 'survey' ? 'overlay' : 'hld';
-                    setDisplayMode(next);
-                  }}
-                  activeOpacity={0.8}
-                  accessibilityRole="button"
-                  accessibilityLabel={
-                    displayMode === 'hld'
-                      ? 'Showing HLD only. Switch to survey view'
-                      : displayMode === 'survey'
-                        ? 'Showing survey only. Switch to overlay view'
-                        : 'Showing HLD and survey overlaid. Switch to HLD view'
-                  }
-                >
-                  <View
-                    style={[
-                      styles.modeDotLarge,
-                      { backgroundColor: displayMode === 'hld' ? colors.textSecondary : colors.onPrimary },
-                    ]}
-                  />
-                </TouchableOpacity>
-              </View>
-
-              {/* Basemap */}
-              <View style={styles.toolRow}>
-                <View style={[styles.fabLabelPill, { backgroundColor: colors.surface }]}>
-                  <Text style={[styles.fabLabelText, { color: colors.textSecondary }]}>Basemap</Text>
-                </View>
-                <TouchableOpacity
-                  style={[styles.fab, { backgroundColor: colors.surface }]}
-                  onPress={() => { setToolsOpen(false); setBasemapPanelVisible(true); }}
-                  activeOpacity={0.8}
-                  accessibilityRole="button"
-                  accessibilityLabel="Choose a basemap"
-                >
-                  <View style={[styles.basemapSwatch, { backgroundColor: BASEMAP_SWATCH[activeBasemap] ?? colors.outline }]} />
-                </TouchableOpacity>
-              </View>
-
-              {/* Move */}
-              {!isolateFeatureId && (
-              <View style={styles.toolRow}>
-                <View style={[styles.fabLabelPill, { backgroundColor: colors.surface }]}>
-                  <Text style={[styles.fabLabelText, { color: colors.textSecondary }]}>Move</Text>
-                </View>
-                <TouchableOpacity
-                  style={[styles.fab, { backgroundColor: dragMode ? colors.primary : colors.surface }]}
-                  onPress={() => { setToolsOpen(false); setDragMode(!dragMode); }}
-                  activeOpacity={0.8}
-                  accessibilityRole="button"
-                  accessibilityLabel={dragMode ? 'Move mode on. Turn off' : 'Move mode. Drag features to reposition them'}
-                  accessibilityState={{ selected: dragMode }}
-                >
-                  <Move size={20} stroke={dragMode ? colors.onPrimary : colors.textSecondary} />
-                </TouchableOpacity>
-              </View>
-              )}
-
-              {/* My Location */}
-              <View style={styles.toolRow}>
-                <View style={[styles.fabLabelPill, { backgroundColor: colors.surface }]}>
-                  <Text style={[styles.fabLabelText, { color: colors.textSecondary }]}>My Location</Text>
-                </View>
-                <TouchableOpacity
-                  style={[styles.fab, { backgroundColor: colors.surface }]}
-                  accessibilityRole="button"
-                  accessibilityLabel="Centre the map on my location"
-                  accessibilityState={{ selected: followUser }}
-                  onPress={() => {
-                    setToolsOpen(false);
-                    if (userLocation) {
-                      setFlyToUserTarget({ lng: userLocation.longitude, lat: userLocation.latitude, zoom: 17, ts: Date.now() });
-                      setFollowUser(true);
-                    } else {
-                      setFollowUser(!followUser);
-                    }
-                  }}
-                  activeOpacity={0.8}
-                >
-                  <Crosshair size={20} stroke={followUser ? colors.primary : colors.textSecondary} />
-                </TouchableOpacity>
-              </View>
-            </>
-          )}
-
-          {/* Tools menu toggle — collapses the FAB column into one button */}
-          <TouchableOpacity
-            style={[styles.fab, { backgroundColor: toolsOpen ? colors.primary : colors.surface }]}
-            onPress={() => setToolsOpen((v) => !v)}
-            activeOpacity={0.8}
-            accessibilityRole="button"
-            accessibilityLabel={toolsOpen ? 'Close the tools menu' : 'Open the tools menu'}
-            accessibilityState={{ expanded: toolsOpen }}
-          >
-            {toolsOpen ? <X size={22} stroke={colors.onPrimary} /> : <Plus size={22} stroke={colors.textSecondary} />}
-            {!toolsOpen && undoCount > 0 && (
-              <View style={[styles.undoBadge, { backgroundColor: colors.primary }]}>
-                <Text style={styles.undoBadgeText}>{undoCount > 99 ? '99+' : undoCount}</Text>
-              </View>
-            )}
-          </TouchableOpacity>
+      {/* Bottom action dock — the five field actions, always in the same place.
+          Hidden while a contextual toolbar owns the bottom of the screen, so
+          nothing ever stacks two rows of buttons under a thumb. */}
+      {viewMode === 'map' && !dockHidden && (
+        <View
+          style={[styles.dockWrap, { bottom: showCommitBar ? commitBarHeight + 10 : 12 }]}
+          pointerEvents="box-none"
+        >
+          <MapDock
+            onLocate={() => {
+              if (userLocation) {
+                setFlyToUserTarget({
+                  lng: userLocation.longitude,
+                  lat: userLocation.latitude,
+                  zoom: 18,
+                  ts: Date.now(),
+                });
+                setFollowUser(true);
+              } else {
+                setFollowUser(!followUser);
+                showToast('Waiting for a GPS fix — move into the open', 'info');
+              }
+            }}
+            following={followUser}
+            onDrawTrench={handleTrenchToggle}
+            drawActive={drawTrenchActive}
+            onAddPoint={() => {
+              if (geoMode === 'add_point') {
+                setGeoMode('select');
+                setAddPointTargetLayer('');
+              } else {
+                setGeoMode('add_point');
+                if (addPointLayers.length > 0 && !addPointTargetLayer) {
+                  setAddPointTargetLayer(addPointLayers[0].id);
+                }
+              }
+            }}
+            addActive={geoMode === 'add_point'}
+            onUndo={handleUndo}
+            undoCount={undoCount}
+            onOpenTools={() => setActiveSheet('tools')}
+            toolsOpen={activeSheet === 'tools'}
+            locked={Boolean(isolateFeatureId)}
+          />
         </View>
       )}
 
@@ -5425,41 +5590,72 @@ export default function MapScreen() {
         />
       )}
 
-      {/* Basemap Switcher Panel */}
-      {basemapPanelVisible && viewMode === 'map' && (
-        <View style={[styles.panel, { backgroundColor: colors.surface, bottom: Spacing.xxl }]}>
-          <View style={styles.panelHeader}>
-            <Text style={[styles.panelTitle, { color: colors.textPrimary }]}>Basemap</Text>
-            <TouchableOpacity
-              onPress={() => setBasemapPanelVisible(false)}
-              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-              accessibilityRole="button"
-              accessibilityLabel="Close the basemap chooser"
-            >
-              <X size={20} stroke={colors.textSecondary} />
-            </TouchableOpacity>
-          </View>
-          <View style={styles.basemapRow}>
-            {Object.values(BASEMAPS).map((bm) => {
-              const isActive = activeBasemap === bm.id;
-              return (
-                <TouchableOpacity
-                  key={bm.id}
-                  style={[styles.basemapItem, { backgroundColor: isActive ? colors.primary + '15' : colors.background, borderColor: isActive ? colors.primary : colors.outline }]}
-                  onPress={() => { setActiveBasemap(bm.id); setBasemapPanelVisible(false); }}
-                  activeOpacity={0.7}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Use the ${bm.name} basemap`}
-                  accessibilityState={{ selected: isActive }}
-                >
-                  <View style={[styles.basemapSwatchLarge, { backgroundColor: BASEMAP_SWATCH[bm.id] ?? colors.outline }]} />
-                  <Text style={[styles.basemapLabel, { color: isActive ? colors.primary : colors.textPrimary }]}>{bm.name}</Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        </View>
-      )}
+      {/* ── Chrome sheets ─────────────────────────────────────────────────
+          One overlay family for tools, layers and basemap. They sit above the
+          dock and the commit bar, and close on scrim tap or the close button. */}
+      <ToolsSheet
+        visible={activeSheet === 'tools'}
+        onClose={() => setActiveSheet(null)}
+        changeCount={commitSummary.changes}
+        layerCount={legendPanelLayers.length}
+        visibleLayerCount={legendPanelLayers.filter((l) => l.visible).length}
+        basemapName={BASEMAPS[activeBasemap]?.name ?? 'Streets'}
+        moveActive={dragMode}
+        online={isOnline}
+        locked={Boolean(isolateFeatureId)}
+        onOpenChanges={() => {
+          setActiveSheet(null);
+          setSurveyPanelVisible(true);
+        }}
+        onToggleMove={() => {
+          setActiveSheet(null);
+          setDragMode(!dragMode);
+        }}
+        onOpenLayers={() => setActiveSheet('layers')}
+        onOpenBasemap={() => setActiveSheet('basemap')}
+        onOpenList={() => {
+          setActiveSheet(null);
+          setViewMode('list');
+        }}
+        onFrameRegion={() => {
+          setActiveSheet(null);
+          handleFrameRegion();
+        }}
+      />
+
+      <LayersSheet
+        visible={activeSheet === 'layers'}
+        onClose={() => setActiveSheet(null)}
+        layers={legendPanelLayers}
+        groups={legendGroups}
+        onToggleLayer={toggleLayerVisibility}
+        onLayerClick={(layerId) => {
+          setActiveSheet(null);
+          handleViewLayerFeatures(layerId);
+        }}
+      />
+
+      <BasemapSheet
+        visible={activeSheet === 'basemap'}
+        onClose={() => setActiveSheet(null)}
+        options={Object.values(BASEMAPS).map((bm) => ({
+          id: bm.id,
+          name: bm.name,
+          swatch: BASEMAP_SWATCH[bm.id] ?? colors.outline,
+          hint:
+            bm.id === 'satellite'
+              ? 'Aerial imagery — best for yards and surfaces'
+              : bm.id === 'light'
+                ? 'Minimal detail — the network stands out'
+                : 'OSM streets — building and street names',
+        }))}
+        value={activeBasemap}
+        onChange={(id) => {
+          setActiveBasemap(id);
+          setActiveSheet(null);
+        }}
+      />
+
       {/* Commit path — the survey's ONE submit, on the screen where the work
           happens instead of three taps away on the project list.
 
@@ -5468,7 +5664,7 @@ export default function MapScreen() {
           put while the changes panel is open: the panel floats above the bar's
           measured height, so reviewing changes never costs the engineer the
           Submit button. */}
-      {!isolateFeatureId && !selectedLineFeature && !selectedPolygonFeature && (
+      {showCommitBar && (
         <CommitBar
           summary={commitSummary}
           onSubmit={handleSubmitSurvey}
@@ -5481,6 +5677,7 @@ export default function MapScreen() {
           }
           busy={submittingSurvey}
           disabled={!activeProject}
+          compact
         />
       )}
 
@@ -5520,10 +5717,56 @@ const styles = StyleSheet.create({
   // ── Map View ───────────────────────────────────────────────────────────
   mapContainer: { flex: 1, position: 'relative' },
 
+  // ── Field-console chrome ───────────────────────────────────────────────
+  mapTopRow: {
+    position: 'absolute',
+    top: 10,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    zIndex: 24,
+  },
+  layersChip: {
+    position: 'absolute',
+    top: 56,
+    left: Spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    height: 40,
+    paddingLeft: 12,
+    paddingRight: 6,
+    borderRadius: Radius.full,
+    borderWidth: StyleSheet.hairlineWidth,
+    zIndex: 22,
+  },
+  layersChipText: { ...Type.label },
+  layersChipCount: {
+    minWidth: 24,
+    height: 24,
+    paddingHorizontal: 5,
+    borderRadius: Radius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  layersChipCountText: { fontSize: 13, fontWeight: '700' },
+  railWrap: {
+    position: 'absolute',
+    right: Spacing.md,
+    top: 110,
+    zIndex: 23,
+  },
+  dockWrap: {
+    position: 'absolute',
+    left: Spacing.md,
+    right: Spacing.md,
+    zIndex: 40,
+  },
+
   // ── Drag Mode Indicator ────────────────────────────────────────────────
   dragIndicator: {
     position: 'absolute',
-    top: 58, // below the always-visible HLD/Survey/Overlay view switcher
+    top: 54, // below the view switch; the layers chip steps aside for it
     left: Spacing.xl,
     right: Spacing.xl,
     flexDirection: 'row',
@@ -5572,7 +5815,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  filterList: { flexGrow: 0, marginBottom: Spacing.sm },
+  // Horizontal list in a column: without an explicit height and shrink:0 the
+  // flex parent squeezed the chip row to 4 px (a blue sliver under search).
+  filterList: { flexGrow: 0, flexShrink: 0, height: 44, marginBottom: Spacing.sm },
   filterContent: { gap: Spacing.sm, paddingHorizontal: Spacing.lg },
   filterChip: {
     paddingHorizontal: 16,
@@ -5626,6 +5871,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    minHeight: Touch.minTarget,
     paddingVertical: 10,
     borderRadius: Radius.md,
     gap: 4,
@@ -5762,7 +6008,8 @@ const styles = StyleSheet.create({
   },
   isolateBanner: {
     position: 'absolute',
-    top: 12,
+    // Below the view switch row, which owns the top of the map now.
+    top: 54,
     left: 12,
     right: 12,
     zIndex: 30,

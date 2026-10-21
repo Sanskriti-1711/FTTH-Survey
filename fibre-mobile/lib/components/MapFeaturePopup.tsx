@@ -67,6 +67,15 @@ export interface FeaturePopupProps {
   overlapIndex?: number;
   /** Advance to the next overlapping feature */
   onCycleOverlap?: () => void;
+  /**
+   * 'pin' anchors the card to the tapped coordinate (desktop / tablet).
+   * 'card' pins it to the bottom of the map, full width, above the dock.
+   * The pinned variant on a 390 px screen put a 260 px card over the header
+   * with 8-10 px text.
+   */
+  variant?: 'pin' | 'card';
+  /** Height of the chrome below the card in 'card' mode (dock + gap). */
+  bottomOffset?: number;
 }
 
 // ── Arrow pointer size ────────────────────────────────────────────────────
@@ -101,7 +110,10 @@ export default function MapFeaturePopup({
   overlapCount = 0,
   overlapIndex = 0,
   onCycleOverlap,
+  variant = 'pin',
+  bottomOffset = 88,
 }: FeaturePopupProps) {
+  const isCard = variant === 'card';
   const colors = useThemeStore((s) => s.colors);
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const scaleAnim = useRef(new Animated.Value(0.92)).current;
@@ -189,7 +201,12 @@ export default function MapFeaturePopup({
     return [...roOrdered, ...edOrdered, ...rest];
   }, [properties, schema]);
 
-  const displayProps = showAllProps ? sortedProperties : sortedProperties.slice(0, 6);
+  // The phone card holds four rows before it turns into a scroll box, which
+  // is exactly where a half-visible row looks broken.
+  const visiblePropRows = isCard ? 4 : 6;
+  const displayProps = showAllProps
+    ? sortedProperties
+    : sortedProperties.slice(0, visiblePropRows);
 
   // Compute position — popup appears ABOVE the pin (screenY), centered horizontally
   const estimationHeight = Math.min(properties.length * 22 + 200, 380);
@@ -213,22 +230,27 @@ export default function MapFeaturePopup({
     <Animated.View
       style={[
         styles.container,
+        isCard
+          ? { left: 12, right: 12, bottom: bottomOffset }
+          : { left: popupLeft, top: popupTop, width: popupWidth },
         {
-          left: popupLeft,
-          top: popupTop,
-          width: popupWidth,
           opacity: fadeAnim,
           transform: [{ scale: scaleAnim }, { translateY: 0 }],
         },
       ]}
     >
       {/* Main card */}
-      <View style={[styles.card, { backgroundColor: colors.surface }]}>
+      <View
+        style={[styles.card, isCard && styles.cardPhone, { backgroundColor: colors.surface }]}
+      >
         {/* Header row: feature name + status badge + close */}
         <View style={styles.header}>
           <View style={styles.headerLeft}>
-            <MapPin size={14} stroke={colors.primary} />
-            <Text style={[styles.title, { color: colors.textPrimary }]} numberOfLines={1}>
+            <MapPin size={isCard ? 18 : 14} stroke={colors.primary} />
+            <Text
+              style={[styles.title, isCard && styles.titlePhone, { color: colors.textPrimary }]}
+              numberOfLines={1}
+            >
               {featureName}
             </Text>
           </View>
@@ -240,13 +262,16 @@ export default function MapFeaturePopup({
               activeOpacity={0.7}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
-              <X size={12} stroke={colors.textSecondary} />
+              <X size={isCard ? 20 : 12} stroke={colors.textSecondary} />
             </TouchableOpacity>
           </View>
         </View>
 
         {/* Layer name */}
-        <Text style={[styles.layerName, { color: colors.textTertiary }]} numberOfLines={1}>
+        <Text
+          style={[styles.layerName, isCard && styles.layerNamePhone, { color: colors.textTertiary }]}
+          numberOfLines={1}
+        >
           {layerName}
         </Text>
 
@@ -258,8 +283,11 @@ export default function MapFeaturePopup({
             onPress={onCycleOverlap}
             activeOpacity={0.7}
           >
-            <Layers size={10} stroke={colors.warning} />
-            <Text style={[styles.overlapText, { color: colors.warning }]} numberOfLines={1}>
+            <Layers size={isCard ? 15 : 10} stroke={colors.warning} />
+            <Text
+              style={[styles.overlapText, isCard && styles.metaPhone, { color: colors.warning }]}
+              numberOfLines={1}
+            >
               {overlapIndex + 1} of {overlapCount} here · tap to cycle
             </Text>
           </TouchableOpacity>
@@ -268,30 +296,36 @@ export default function MapFeaturePopup({
         {/* Properties — show up to 6, expandable */}
         {properties.length > 0 && (
           <ScrollView
-            style={styles.propsScroll}
+            style={[styles.propsScroll, isCard && styles.propsScrollPhone]}
             nestedScrollEnabled
             showsVerticalScrollIndicator={false}
           >
             <View style={[styles.propsContainer, { backgroundColor: colors.background }]}>
               {displayProps.map(([key, val]) => (
-                <View key={key} style={styles.propRow}>
-                  <Text style={[styles.propKey, { color: colors.textTertiary }]} numberOfLines={1}>
+                <View key={key} style={[styles.propRow, isCard && styles.propRowPhone]}>
+                  <Text
+                    style={[styles.propKey, isCard && styles.propKeyPhone, { color: colors.textTertiary }]}
+                    numberOfLines={1}
+                  >
                     {getLabel(key)}
                   </Text>
-                  <Text style={[styles.propVal, { color: colors.textPrimary }]} numberOfLines={1}>
+                  <Text
+                    style={[styles.propVal, isCard && styles.propValPhone, { color: colors.textPrimary }]}
+                    numberOfLines={1}
+                  >
                     {formatValue(key, val)}
                   </Text>
                 </View>
               ))}
             </View>
-            {properties.length > 6 && (
+            {properties.length > visiblePropRows && (
               <TouchableOpacity
                 style={[styles.expandBtn, { borderTopColor: colors.outlineLight }]}
                 onPress={() => setShowAllProps(!showAllProps)}
                 activeOpacity={0.6}
               >
-                <Text style={[styles.expandText, { color: colors.primary }]}>
-                  {showAllProps ? 'Show less' : `+${properties.length - 6} more attributes`}
+                <Text style={[styles.expandText, isCard && styles.metaPhone, { color: colors.primary }]}>
+                  {showAllProps ? 'Show less' : `+${properties.length - visiblePropRows} more attributes`}
                 </Text>
                 {showAllProps ? (
                   <ChevronUp size={10} stroke={colors.primary} />
@@ -306,8 +340,11 @@ export default function MapFeaturePopup({
         {/* Required Photos indicator */}
         {schema && schema.requiredPhotos.length > 0 && (
           <View style={[styles.photoReq, { backgroundColor: colors.warning + '10' }]}>
-            <Camera size={10} stroke={colors.warning} />
-            <Text style={[styles.photoReqText, { color: colors.warning }]} numberOfLines={1}>
+            <Camera size={isCard ? 15 : 10} stroke={colors.warning} />
+            <Text
+              style={[styles.photoReqText, isCard && styles.metaPhone, { color: colors.warning }]}
+              numberOfLines={2}
+            >
               {schema.requiredPhotos.length} photo{schema.requiredPhotos.length !== 1 ? 's' : ''} required: {schema.requiredPhotos.join(', ')}
             </Text>
           </View>
@@ -316,8 +353,8 @@ export default function MapFeaturePopup({
         {/* GPS Accuracy indicator */}
         {schema && schema.gpsAccuracyM && (
           <View style={[styles.gpsReq, { backgroundColor: colors.primary + '10' }]}>
-            <Crosshair size={10} stroke={colors.primary} />
-            <Text style={[styles.gpsReqText, { color: colors.primary }]}>
+            <Crosshair size={isCard ? 15 : 10} stroke={colors.primary} />
+            <Text style={[styles.gpsReqText, isCard && styles.metaPhone, { color: colors.primary }]}>
               GPS accuracy: within {schema.gpsAccuracyM}m
             </Text>
           </View>
@@ -325,9 +362,13 @@ export default function MapFeaturePopup({
 
         {/* Quick notes */}
         <View style={styles.notesRow}>
-          <Edit3 size={12} stroke={colors.textTertiary} />
+          <Edit3 size={isCard ? 16 : 12} stroke={colors.textTertiary} />
           <TextInput
-            style={[styles.notesInput, { color: colors.textPrimary, borderColor: colors.outline }]}
+            style={[
+              styles.notesInput,
+              isCard && styles.notesInputPhone,
+              { color: colors.textPrimary, borderColor: colors.outline },
+            ]}
             value={notesDraft}
             onChangeText={onNotesChange}
             placeholder="Add note..."
@@ -345,55 +386,65 @@ export default function MapFeaturePopup({
         </View>
 
         {/* Action buttons */}
-        <View style={styles.actions}>
+        <View style={[styles.actions, isCard && styles.actionsPhone]}>
           {onStartEdit && (
             <TouchableOpacity
-              style={[styles.actionBtn, { backgroundColor: colors.primary }]}
+              style={[styles.actionBtn, isCard && styles.actionBtnPhone, { backgroundColor: colors.primary }]}
               onPress={onStartEdit}
               activeOpacity={0.7}
             >
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                 <Edit3 size={14} stroke={colors.onPrimary} />
-                <Text style={[styles.actionText, { color: colors.onPrimary }]}>Edit</Text>
+                <Text style={[styles.actionText, isCard && styles.actionTextPhone, { color: colors.onPrimary }]}>
+                  Edit
+                </Text>
               </View>
               <ChevronRight size={13} stroke={colors.onPrimary} />
             </TouchableOpacity>
           )}
           {onQuickMove && (
             <TouchableOpacity
-              style={[styles.actionBtn, { backgroundColor: '#FF8C00' }]}
+              style={[styles.actionBtn, isCard && styles.actionBtnPhone, { backgroundColor: '#FF8C00' }]}
               onPress={onQuickMove}
               activeOpacity={0.7}
             >
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                 <Move size={14} stroke={colors.onPrimary} />
-                <Text style={[styles.actionText, { color: colors.onPrimary }]}>Move</Text>
+                <Text style={[styles.actionText, isCard && styles.actionTextPhone, { color: colors.onPrimary }]}>
+                  Move
+                </Text>
               </View>
               <ChevronRight size={13} stroke={colors.onPrimary} />
             </TouchableOpacity>
           )}
           <TouchableOpacity
-            style={[styles.actionBtn, { backgroundColor: colors.primary }]}
+            style={[styles.actionBtn, isCard && styles.actionBtnPhone, { backgroundColor: colors.primary }]}
             onPress={onOpenDetails}
             activeOpacity={0.7}
           >
-            <Text style={[styles.actionText, { color: colors.onPrimary }]}>Open Details</Text>
+            <Text style={[styles.actionText, isCard && styles.actionTextPhone, { color: colors.onPrimary }]}>
+              Open Details
+            </Text>
             <ChevronRight size={13} stroke={colors.onPrimary} />
           </TouchableOpacity>
           <TouchableOpacity
-            style={[styles.dismissBtn, { borderColor: colors.outline }]}
+            style={[styles.dismissBtn, isCard && styles.actionBtnPhone, { borderColor: colors.outline }]}
             onPress={onDismiss}
             activeOpacity={0.7}
           >
-            <Text style={[styles.dismissText, { color: colors.textSecondary }]}>Dismiss</Text>
+            <Text style={[styles.dismissText, isCard && styles.actionTextPhone, { color: colors.textSecondary }]}>
+              Dismiss
+            </Text>
           </TouchableOpacity>
         </View>
       </View>
 
       {/* Downward arrow pointer */}
+      {isCard ? null : (
       <View style={[styles.arrowContainer, { left: arrowLeft }]}>
         <View style={[styles.arrow, { borderTopColor: colors.surface }]} />
       </View>
+      )}
     </Animated.View>
   );
 }
@@ -460,6 +511,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  propsScrollPhone: { maxHeight: 132 },
   propsScroll: {
     maxHeight: 120,
     marginBottom: 4,
@@ -592,6 +644,18 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '600',
   },
+  // ── Phone card variant ──────────────────────────────────────────────
+  cardPhone: { borderRadius: 20, padding: 14, maxHeight: 380 },
+  titlePhone: { fontSize: 17, fontWeight: '600' },
+  layerNamePhone: { fontSize: 13, marginLeft: 0, marginBottom: 6 },
+  propRowPhone: { paddingVertical: 3 },
+  propKeyPhone: { fontSize: 13 },
+  propValPhone: { fontSize: 13, fontWeight: '600' },
+  metaPhone: { fontSize: 13 },
+  notesInputPhone: { fontSize: 15, height: 44, borderRadius: 10, paddingHorizontal: 10 },
+  actionsPhone: { flexWrap: 'wrap', gap: 8, marginTop: 4 },
+  actionBtnPhone: { flexBasis: '47%', flexGrow: 1, minHeight: 48, borderRadius: 10 },
+  actionTextPhone: { fontSize: 15 },
   arrowContainer: {
     position: 'absolute',
     bottom: -ARROW_SIZE,

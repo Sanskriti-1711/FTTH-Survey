@@ -94,3 +94,4 @@ builds/
 
 # ── Local e2e snapshots (contain real project rows) ─────────
 tmp/e2e-snapshot/
+fibre-mobile/build_output_verify/
