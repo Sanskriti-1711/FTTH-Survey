@@ -43,6 +43,9 @@ interface DrawTrenchPanelProps {
   onSave: () => void;
   /** Formatted length of the drawn line (e.g. '84.2 m'), when known */
   lengthLabel?: string | null;
+  /** Is this route new work, or a trench that already exists in the ground? */
+  buildState?: 'to_build' | 'existing';
+  onBuildStateChange?: (state: 'to_build' | 'existing') => void;
 }
 
 export default function DrawTrenchPanel({
@@ -56,6 +59,8 @@ export default function DrawTrenchPanel({
   onCancel,
   onSave,
   lengthLabel,
+  buildState = 'to_build',
+  onBuildStateChange,
 }: DrawTrenchPanelProps) {
   const colors = useThemeStore((s) => s.colors);
   const canSave = pointCount >= 2 && !!targetLayer && !busy;
@@ -85,6 +90,40 @@ export default function DrawTrenchPanel({
         >
           <X size={16} stroke={colors.textSecondary} />
         </TouchableOpacity>
+      </View>
+
+      {/* To build / existing — the LLD's bill of quantities reads this */}
+      <View style={styles.stateRow}>
+        {([
+          { id: 'to_build' as const, label: 'To build', hint: 'New work' },
+          { id: 'existing' as const, label: 'Existing', hint: 'Reuse in place' },
+        ]).map((s) => {
+          const active = s.id === buildState;
+          return (
+            <TouchableOpacity
+              key={s.id}
+              style={[
+                styles.stateChip,
+                {
+                  backgroundColor: active ? '#0D5CFF' + '18' : colors.background,
+                  borderColor: active ? '#0D5CFF' : colors.outlineLight,
+                },
+              ]}
+              onPress={() => onBuildStateChange?.(s.id)}
+              activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel={`${s.label} trench. ${s.hint}`}
+              accessibilityState={{ selected: active }}
+            >
+              <Text style={[styles.stateLabel, { color: active ? '#0D5CFF' : colors.textPrimary }]}>
+                {s.label}
+              </Text>
+              <Text style={[styles.stateHint, { color: active ? '#0D5CFF' : colors.textTertiary }]}>
+                {s.hint}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
       </View>
 
       {/* Target layer chips */}
@@ -211,6 +250,22 @@ const styles = StyleSheet.create({
   geomDot: { width: 8, height: 8, borderRadius: 4 },
   title: { fontSize: 12, fontWeight: '700' },
   subtitle: { fontSize: 9, fontWeight: '500' },
+  stateRow: {
+    flexDirection: 'row',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingTop: 8,
+  },
+  stateChip: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: Radius.md,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    gap: 1,
+  },
+  stateLabel: { fontSize: 12, fontWeight: '700' },
+  stateHint: { fontSize: 9, fontWeight: '500' },
   closeBtn: {
     width: 24,
     height: 24,

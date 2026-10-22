@@ -1,17 +1,20 @@
 // ── Line Selection Toolbar ──────────────────────────────────────────────────
 // Bottom toolbar that appears when a LINE feature is tapped on the map.
 //
-// Actions (labels say what they do to the line, not what the code calls it):
-//   Edit shape — toggles vertex editing (draggable handles + long-press bend)
-//   Split here — cuts the line into two spans at the tapped point (new chamber)
-//   Remove span — removes the section between two selected vertices
-//   Extend line — continues the line from a vertex to a new point
-//   Attributes — opens the survey attribute form for this line
-//   Delete — logical delete of the feature (survey layer stays intact)
-//   Undo — reverts the most recent edit
-//   Save — pinned at the right edge (outside the scroll row); persists the working copy
+// Five intents, not nine buttons. A row of nine truncated its own labels on a
+// 390 px phone ("Route ar…", "Ext…", "Remove…") and hid the two actions the
+// LLD actually consumes behind the least informative copy. The row now reads:
+//
+//   Shape   — where the line runs      (Edit shape · Continue line)
+//   Break   — how it is divided        (Add joint · Cut out span)
+//   Detour  — around the works / closure
+//   Details — the field data LLD needs (depth, ducts, cables, crossings)
+//   Retire  — logical removal the planner reviews
+//
+// Save stays pinned at the right edge. Undo lives in the map dock, where it
+// also carries the count, so it is not duplicated here.
 
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { ComponentType } from 'react';
 import {
   View,
@@ -69,6 +72,8 @@ interface LineSelectionToolbarProps {
   detourImpactLabel?: string | null;
   /** Whether Split here mode is armed (waiting for the tap on the line) */
   splitMode?: boolean;
+  /** Summary shown once a joint is staged and Save is the only step left */
+  splitStagedLabel?: string | null;
   /** Called when user taps the Attributes button (opens the survey form) */
   onAttributes?: () => void;
   /**
@@ -98,7 +103,7 @@ interface LineSelectionToolbarProps {
     leaves: number;
     canRemove: boolean;
   } | null;
-  /** Called when user taps the Delete (logical delete) button */
+  /** Called when user taps the Retire (logical delete) button */
   onDeleteFeature?: () => void;
   /** Whether there are unsaved geometry changes in Move Mode */
   hasUnsavedChanges?: boolean;
@@ -122,19 +127,29 @@ interface ActionDef {
   icon: ComponentType<{ size?: number; stroke?: string }>;
   danger?: boolean;
   accent?: boolean;
+  /** Members of Shape / Break only render once their group is open. */
+  group?: 'shape' | 'break';
 }
 
 const ACTIONS: ActionDef[] = [
-  { id: 'move', label: 'Edit shape', icon: Route },
-  { id: 'split', label: 'Split here', icon: Scissors },
-  { id: 'route_around', label: 'Route around', icon: Construction },
-  { id: 'del_section', label: 'Remove span', icon: Axe, danger: true },
-  { id: 'continue', label: 'Extend line', icon: CornerUpLeft, accent: true },
-  { id: 'attributes', label: 'Attributes', icon: ClipboardList },
-  { id: 'del_feature', label: 'Delete', icon: Trash2, danger: true },
-  { id: 'undo', label: 'Undo', icon: Undo2 },
+  { id: 'move', label: 'Edit shape', icon: Route, group: 'shape' },
+  { id: 'continue', label: 'Continue line', icon: CornerUpLeft, accent: true, group: 'shape' },
+  { id: 'split', label: 'Add joint', icon: Scissors, group: 'break' },
+  { id: 'del_section', label: 'Cut out span', icon: Axe, danger: true, group: 'break' },
+  { id: 'route_around', label: 'Detour', icon: Construction },
+  { id: 'attributes', label: 'Details', icon: ClipboardList },
+  { id: 'del_feature', label: 'Retire', icon: Trash2, danger: true },
   // Save is pinned outside the scroll row, always the rightmost button.
   { id: 'save', label: 'Save', icon: Save, accent: true },
+];
+
+/** The five intents on the top-level row; Shape and Break open their members. */
+const MAIN_ROW: { id: string; label: string; hint: string; icon: ActionDef['icon']; group?: 'shape' | 'break' }[] = [
+  { id: 'shape', label: 'Shape', hint: 'Where it runs', icon: Route, group: 'shape' },
+  { id: 'break', label: 'Break', hint: 'Joint or gap', icon: Scissors, group: 'break' },
+  { id: 'route_around', label: 'Detour', hint: 'Around works', icon: Construction },
+  { id: 'attributes', label: 'Details', hint: 'LLD data', icon: ClipboardList },
+  { id: 'del_feature', label: 'Retire', hint: 'Mark removed', icon: Trash2 },
 ];
 
 // ── Component ───────────────────────────────────────────────────────────────
@@ -150,6 +165,7 @@ export default function LineSelectionToolbar({
   onDeleteSection,
   onSplit,
   splitMode = false,
+  splitStagedLabel = null,
   onRouteAround,
   routeAroundMode = false,
   obstacleRadiusM = 10,
@@ -173,6 +189,12 @@ export default function LineSelectionToolbar({
 }: LineSelectionToolbarProps) {
   const colors = useThemeStore((s) => s.colors);
   const slideAnim = useRef(new Animated.Value(0)).current;
+  const [openGroup, setOpenGroup] = useState<'shape' | 'break' | null>(null);
+
+  // A new selection always starts on the five-intent row.
+  useEffect(() => {
+    setOpenGroup(null);
+  }, [selectedFeature?.id]);
 
   const isVisible = selectedFeature !== null && selectedFeature.geometryType === 'LineString';
 
@@ -187,6 +209,49 @@ export default function LineSelectionToolbar({
   }, [isVisible]);
 
   if (!isVisible) return null;
+
+  const runMain = (id: string) => {
+    if (id === 'shape' || id === 'break') {
+      // Tapping the open group again folds it away; the five intents always
+      // stay on screen so switching intent is one tap, never Back first.
+      setOpenGroup((current) => (current === id ? null : id));
+      return;
+    }
+    if (id === 'route_around') onRouteAround?.();
+    else if (id === 'attributes') onAttributes?.();
+    else if (id === 'del_feature') onDeleteFeature?.();
+  };
+
+  const renderMain = (item: (typeof MAIN_ROW)[number]) => {
+    const active =
+      (item.id === 'route_around' && routeAroundMode) ||
+      (item.group !== undefined && openGroup === item.group);
+    return (
+      <View key={item.id} style={styles.actionWrapper}>
+        <TouchableOpacity
+          style={[
+            styles.actionBtn,
+            {
+              backgroundColor: active ? '#FF8C00' + '20' : colors.background,
+              borderColor: active ? '#FF8C00' : colors.outlineLight,
+            },
+          ]}
+          activeOpacity={0.7}
+          onPress={() => runMain(item.id)}
+          accessibilityRole="button"
+          accessibilityLabel={`${item.label}. ${item.hint}`}
+        >
+          <item.icon size={18} stroke={active ? '#FF8C00' : colors.textSecondary} />
+          <Text style={[styles.actionLabel, { color: active ? '#FF8C00' : colors.textSecondary }]} numberOfLines={1}>
+            {item.label}
+          </Text>
+        </TouchableOpacity>
+        <Text style={[styles.soonLabel, { color: active ? '#FF8C00' : colors.textTertiary }]} numberOfLines={1}>
+          {item.hint}
+        </Text>
+      </View>
+    );
+  };
 
   const renderAction = (action: ActionDef) => {
     const isUndo = action.id === 'undo';
@@ -259,8 +324,8 @@ export default function LineSelectionToolbar({
             else if (isRouteAround && onRouteAround) onRouteAround();
             else if (isAttributes && onAttributes) onAttributes();
             else if (isDeleteFeature && onDeleteFeature) onDeleteFeature();
-            else if (isUndo && onUndo) onUndo();
             else if (isContinue && onContinue) onContinue();
+            if (action.group) setOpenGroup(null);
           }}
         >
           <action.icon size={18} stroke={textColor} />
@@ -273,7 +338,7 @@ export default function LineSelectionToolbar({
               : isSplit && splitMode
                 ? 'Tap line'
                 : isRouteAround && routeAroundMode
-                  ? 'Tap works'
+                  ? (detourImpactLabel ? 'Zone set' : 'Tap works')
                 : isDeleteSection && deleteSectionMode
                   ? (deleteSectionStep === 2 ? 'Pick: 2/2' : deleteSectionStep === 1 ? 'Pick: 1/2' : 'Cut: ON')
                   : isContinue && continueMode
@@ -293,7 +358,7 @@ export default function LineSelectionToolbar({
 
         {isSplit && (
           <Text style={[styles.soonLabel, { color: splitMode ? '#FF8C00' : colors.textTertiary }]} numberOfLines={1}>
-            {splitMode ? 'Where?' : 'New chamber'}
+            {splitMode ? 'Where?' : 'New joint'}
           </Text>
         )}
         {isRouteAround && (
@@ -371,11 +436,13 @@ export default function LineSelectionToolbar({
             </Text>
             <Text style={[styles.headerSubtitle, { color: colors.textTertiary }]} numberOfLines={1}>
               {selectedFeature?.layerName ?? 'Line Layer'} · LineString
+              {openGroup === 'shape' && ' · Shape tools'}
+              {openGroup === 'break' && ' · Break tools'}
               {moveMode && ' · Editing shape'}
-              {splitMode && ' · Split here (tap the line)'}
-              {routeAroundMode && ` · Route around works (${obstacleRadiusM} m)`}
-              {deleteSectionMode && ` · Remove span · ${deleteSectionStep === 0 ? 'tap start' : deleteSectionStep === 1 ? 'tap end' : 'ready'}`}
-              {continueMode && ` · Extend line ${continueLineStep === 1 ? '(select point)' : continueLineStep === 2 ? '(ready to save)' : ''}`}
+              {splitMode && ' · Add joint (tap the line)'}
+              {routeAroundMode && ` · Detour around works (${obstacleRadiusM} m)`}
+              {deleteSectionMode && ` · Cut out span · ${deleteSectionStep === 0 ? 'tap start' : deleteSectionStep === 1 ? 'tap end' : 'ready'}`}
+              {continueMode && ` · Continue line ${continueLineStep === 1 ? '(select point)' : continueLineStep === 2 ? '(ready to save)' : ''}`}
               {continueMode && continueSnapLabel && ` · ${continueSnapLabel}`}
               {moveMode && hasUnsavedChanges && ' · Unsaved'}
             </Text>
@@ -401,12 +468,23 @@ export default function LineSelectionToolbar({
           style={styles.actionsScroll}
           contentContainerStyle={styles.actionsContainer}
         >
-          {ACTIONS.filter((a) => a.id !== 'save').map(renderAction)}
+          {MAIN_ROW.map(renderMain)}
         </ScrollView>
         <View style={styles.pinnedSave}>
           {ACTIONS.filter((a) => a.id === 'save').map(renderAction)}
         </View>
       </View>
+
+      {/* ── Opened group: its own row, always in view ────────────────────
+          These used to sit inside the scroll row behind a hairline. On a
+          384 dp phone that put them past the pinned Save, so opening Shape
+          showed nothing — measured on the device. A second row keeps the
+          five intents and the members visible at once. */}
+      {openGroup ? (
+        <View style={[styles.groupRow, { borderTopColor: colors.outlineLight }]}>
+          {ACTIONS.filter((a) => a.group === openGroup).map(renderAction)}
+        </View>
+      ) : null}
 
       {/* ── Remove span: step tracker + commit ──────────────────────────── */}
       {deleteSectionMode && (
@@ -502,12 +580,12 @@ export default function LineSelectionToolbar({
               accessibilityLabel={
                 deleteSectionSummary?.canRemove
                   ? `Remove ${deleteSectionSummary.lengthLabel} of line`
-                  : 'Remove span — pick both cut points first'
+                  : 'Cut out span — pick both cut points first'
               }
             >
               <Axe size={12} stroke="#FFFFFF" />
               <Text style={[styles.spanBtnText, { color: '#FFFFFF', fontWeight: '700' }]}>
-                Remove span
+                Cut out span
               </Text>
             </TouchableOpacity>
           </View>
@@ -599,14 +677,18 @@ export default function LineSelectionToolbar({
 
       {/* ── Hint text ──────────────────────────────────────────────────── */}
       <Text style={[styles.hintText, { color: colors.textTertiary }]}>
-        {moveMode
+        {splitStagedLabel
+          ? splitStagedLabel
+          : moveMode
           ? 'Drag a handle to move a vertex · Long-press the line to add a bend · Long-press a handle to remove it · Save to persist'
           : routeAroundMode
-            ? 'Tap the map at the works — the line is re-routed clear of the zone; adjust the radius, then Save'
+            ? detourImpactLabel
+              ? 'Zone set — adjust the radius to re-cut the diversion, or Save to keep it'
+              : 'Tap the map at the works — the line is re-routed clear of the zone; adjust the radius, then Save'
           : splitMode
             ? 'Tap the line where the new chamber goes — the span is cut into two features'
           : deleteSectionMode
-            ? 'Remove span applies straight away when you confirm — Undo sits in the toolbar'
+            ? 'Cut out span applies straight away when you confirm — Undo sits in the map dock'
           : continueMode
             ? continueLineStep === 0 ? 'Tap the map to place the segment start (snaps to nearest point)'
             : continueLineStep === 1 ? 'Tap the destination point; it will snap to the nearest point'
@@ -688,7 +770,10 @@ const styles = StyleSheet.create({
   },
   actionsContainer: {
     flexDirection: 'row',
-    gap: 6,
+    // 3 dp, not 6: the five intents + pinned Save have to fit the toolbar on a
+    // 384 dp phone (Samsung 1440 px @ 600 dpi). At 6 dp they overflowed and
+    // Retire sat half-clipped behind Save — measured on the device, not guessed.
+    gap: 3,
     paddingLeft: 8,
     paddingVertical: 6,
     alignItems: 'flex-start',
@@ -700,7 +785,25 @@ const styles = StyleSheet.create({
   },
   actionWrapper: {
     alignItems: 'center',
-    width: 50,
+    // 46 dp wrapper around a 44 dp button: five of them plus Save must land
+    // inside 360 dp of inner width (384 dp screen minus the 12 dp side insets).
+    width: 46,
+  },
+  // Members of an opened group sit to the right of the five intents, behind a
+  // hairline: the row reads "these belong to what you just tapped".
+  groupDivider: {
+    width: StyleSheet.hairlineWidth,
+    height: 40,
+    alignSelf: 'center',
+    marginHorizontal: 2,
+  },
+  groupRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 3,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderTopWidth: StyleSheet.hairlineWidth,
   },
   actionBtn: {
     alignItems: 'center',
@@ -716,14 +819,14 @@ const styles = StyleSheet.create({
   // Save is the primary action: wider, taller, laid out left-to-right, and
   // always the last button in the row.
   saveBtn: {
-    width: 96,
+    width: 82,
     height: 46,
     flexDirection: 'row',
     gap: 5,
     paddingHorizontal: 10,
   },
   saveWrapper: {
-    width: 102,
+    width: 88,
   },
   actionIcon: {
     fontSize: 16,

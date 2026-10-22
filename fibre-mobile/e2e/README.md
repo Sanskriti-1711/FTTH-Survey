@@ -16,11 +16,30 @@ E2E_EMAIL=you@example.com E2E_PASSWORD=secret npm run test:e2e
 | `E2E_BASE_URL` | `https://fibre-survey-web.onrender.com` | web build to drive |
 | `E2E_EMAIL` / `E2E_PASSWORD` | — (required) | survey login |
 | `E2E_PROJECT` | `UI-Brownfield-Verify` | project that already has imported layers and at least one survey change |
+| `E2E_ONLY` | — | comma-separated case ids to run (`SA-050,SA-090`); the rest skip with a reason |
+| `E2E_SERVER_URL` | — (baked into the build) | repoints the bundle at another backend, e.g. `http://localhost:8000` |
+| `E2E_BLOCK_TILES` | — | `1` stops waiting on basemap tiles (no case asserts on them) |
 
 `playwright` is a devDependency; the suite uses the installed Chrome
-(`channel: 'chrome'`), so no browser download is needed. A run takes ~4–5
-minutes: every case re-opens the project because `/map` does not carry the
-project id, and a cold Render instance can spend ~20 s fetching 13 layers.
+(`channel: 'chrome'`), so no browser download is needed. A full read-only run
+takes ~4–5 minutes: every case re-opens the project because `/map` does not
+carry the project id, and the 13 imported layers take ~10 s to load even from a
+local backend (measured: 17 API calls, 10.6 s, of which sign-in is another
+5 s).
+
+When iterating on one tool, skip the rest of the suite and the remote backend:
+
+```bash
+# one toolbar case, against a locally exported build, in ~30 s instead of ~5 min
+E2E_ONLY=SA-050 \
+E2E_BASE_URL=http://localhost:8081 \
+E2E_SERVER_URL=http://localhost:8000 \
+E2E_EMAIL=... E2E_PASSWORD=... npm run test:e2e
+```
+
+`E2E_SERVER_URL` works on any already-exported bundle: the app persists its API
+base in `localStorage` under `fibre360_server_url` and prefers it over the value
+compiled in, so pointing a build at a local Django needs no re-export.
 
 ## Covered automatically
 

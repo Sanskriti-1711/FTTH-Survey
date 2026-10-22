@@ -15,12 +15,15 @@ import type { GeoJSONFeature } from './types';
 // Returns two arrays of coordinates (or null if the split point is at an
 // endpoint or the line has too few coordinates).
 
+// A two-vertex line is the normal shape of a trench drawn on site (two taps),
+// so it must be splittable: refusing it made "Add joint" do nothing on exactly
+// the lines an engineer draws most often. Only a single point is too little.
 export function splitLineAtPoint(
   coords: [number, number][],
   clickLng: number,
   clickLat: number,
 ): { coordsA: [number, number][]; coordsB: [number, number][]; splitIndex: number } | null {
-  if (coords.length < 3) return null;
+  if (coords.length < 2) return null;
 
   // Find the nearest segment (pair of consecutive vertices)
   let bestDist = Infinity;
@@ -1024,6 +1027,48 @@ export function extendLineToPoint(
 }
 
 // ── Approximate length of a LineString in metres (Haversine) ──────────────
+
+/**
+ * Metres from a tap to the nearest point of a polyline.
+ *
+ * The line tools take a single tap on a 3 px trench; without a tolerance the
+ * engineer has to hit the stroke exactly, which is why "Split here" looked
+ * broken on a phone. Callers use this to decide whether a tap meant "this
+ * line" even when the hit-test resolved to empty ground or a neighbour.
+ */
+export function distanceToPolylineM(
+  coords: [number, number][],
+  lng: number,
+  lat: number,
+): number {
+  if (coords.length === 0) return Infinity;
+  const mPerDegLat = 110540;
+  const mPerDegLng = 111320 * Math.cos((lat * Math.PI) / 180);
+  let best = Infinity;
+
+  for (let i = 0; i < coords.length - 1; i++) {
+    const [x1, y1] = coords[i];
+    const [x2, y2] = coords[i + 1];
+    const ax = (x1 - lng) * mPerDegLng;
+    const ay = (y1 - lat) * mPerDegLat;
+    const bx = (x2 - lng) * mPerDegLng;
+    const by = (y2 - lat) * mPerDegLat;
+    const dx = bx - ax;
+    const dy = by - ay;
+    const lenSq = dx * dx + dy * dy;
+    const t = lenSq > 0 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / lenSq)) : 0;
+    const px = ax + t * dx;
+    const py = ay + t * dy;
+    best = Math.min(best, Math.hypot(px, py));
+  }
+
+  if (coords.length === 1) {
+    const [x, y] = coords[0];
+    best = Math.hypot((x - lng) * mPerDegLng, (y - lat) * mPerDegLat);
+  }
+
+  return best;
+}
 
 export function approximateLength(coords: [number, number][]): number {
   let total = 0;

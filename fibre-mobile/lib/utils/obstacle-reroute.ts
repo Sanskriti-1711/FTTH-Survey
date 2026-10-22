@@ -421,7 +421,7 @@ export function formatDetourImpact(
   const parts = [
     `${sign}${Math.abs(d) < 1000 ? `${Math.abs(d).toFixed(1)} m` : `${(Math.abs(d) / 1000).toFixed(3)} km`}`,
     `${impact.extraChambers} chamber${impact.extraChambers === 1 ? '' : 's'}`,
-    `${impact.insertedVertices} vertex${impact.insertedVertices === 1 ? '' : 'es'}`,
+    `${impact.insertedVertices} ${impact.insertedVertices === 1 ? 'vertex' : 'vertices'}`,
   ];
   if (impact.otherLinesCrossing > 0) {
     parts.push(`${impact.otherLinesCrossing} other line${impact.otherLinesCrossing === 1 ? '' : 's'} in the works`);

@@ -211,6 +211,15 @@ interface MapErrorInfo {
   message: string;
 }
 
+/**
+ * Ground metres covered by one screen pixel at a latitude/zoom (512 px tiles —
+ * MapLibre's zoom convention). Handed to the tap callbacks so "tap the line"
+ * tools can keep a finger-sized tolerance at every zoom level.
+ */
+function metresPerPixel(lat: number, zoom: number): number {
+  return (78271.5 * Math.cos((lat * Math.PI) / 180)) / Math.pow(2, zoom);
+}
+
 interface MapLibreMapProps {
   layers: MapLayerData[];
   /**
@@ -220,7 +229,16 @@ interface MapLibreMapProps {
    * the caller's. Omit it for the generic message.
    */
   emptyState?: { title: string; description: string };
-  onFeatureClick?: (featureId: string, layerId: string, lngLat: [number, number], screenPoint?: { x: number; y: number }) => void;
+  onFeatureClick?: (
+    featureId: string,
+    layerId: string,
+    lngLat: [number, number],
+    screenPoint?: { x: number; y: number },
+    /** Ground size of one screen pixel at the tapped point — lets tools keep
+     *  a finger-sized tolerance instead of a metre value that shrinks when the
+     *  map is zoomed out. */
+    metresPerPx?: number,
+  ) => void;
   /**
    * Fired when a tap hits MORE THAN ONE feature (e.g. a premise point sitting
    * on a trench). Ordered point-first, then top-most; the first entry is the
@@ -233,7 +251,12 @@ interface MapLibreMapProps {
     screenPoint?: { x: number; y: number },
   ) => void;
   /** Called when clicking on empty map area (no feature found). Used for draw bypass mode. */
-  onEmptyAreaClick?: (lng: number, lat: number, screenPoint?: { x: number; y: number }) => void;
+  onEmptyAreaClick?: (
+    lng: number,
+    lat: number,
+    screenPoint?: { x: number; y: number },
+    metresPerPx?: number,
+  ) => void;
   /** Called when a point feature is dragged to a new location. Only fires when dragMode is true. */
   onFeatureDragEnd?: (featureId: string, layerId: string, newLng: number, newLat: number) => void;
   /** Called when a vertex of a LineString or polygon corner is dragged to a new location. */
@@ -866,10 +889,12 @@ function NativeMapView({
           ? [rawCoords[0] as number, rawCoords[1] as number]
           : undefined;
 
+      const mpp = lngLat ? metresPerPixel(lngLat[1], zoomRef.current) : undefined;
+
       if (!features || features.length === 0) {
         // No feature under tap — fire empty-area click for draw / add-point modes
         if (onEmptyAreaClick && lngLat) {
-          onEmptyAreaClick(lngLat[0], lngLat[1], undefined);
+          onEmptyAreaClick(lngLat[0], lngLat[1], undefined, mpp);
         }
         return;
       }
@@ -881,7 +906,7 @@ function NativeMapView({
       const feature = pickTappedFeature(features);
       if (!feature) {
         if (onEmptyAreaClick && lngLat) {
-          onEmptyAreaClick(lngLat[0], lngLat[1], undefined);
+          onEmptyAreaClick(lngLat[0], lngLat[1], undefined, mpp);
         }
         return;
       }
@@ -960,7 +985,7 @@ function NativeMapView({
         // features the first vertex is NOT where the user tapped — snapping
         // tools (delete-section, draw-segment) need the real tap location
         // to find the nearest vertex.
-        onFeatureClick(fid, lid, lngLat ?? geomPoint, undefined);
+        onFeatureClick(fid, lid, lngLat ?? geomPoint, undefined, mpp);
       }
     },
     [onFeatureClick, onEmptyAreaClick, onFeatureCandidates, dragMode]
@@ -2865,6 +2890,10 @@ function WebMapView({
       const features = map.queryRenderedFeatures(e.point);
       const screenPt = e.point ? { x: e.point.x, y: e.point.y } : undefined;
       const tapLngLat: [number, number] = [e.lngLat.lng, e.lngLat.lat];
+      let mpp: number | undefined;
+      try {
+        mpp = metresPerPixel(e.lngLat.lat, map.getZoom());
+      } catch { mpp = undefined; }
 
       // Taps that land ONLY on the GPS user-location dot are not feature
       // interactions — ignore them so draw/continue-line modes don't place a
@@ -2901,13 +2930,13 @@ function WebMapView({
               const stack = tapCandidates(paddedTargets);
               if (stack.length > 1) onFeatureCandidates(stack, tapLngLat, screenPt);
             }
-            onFeatureClick(fid, lid, tapLngLat, screenPt);
+            onFeatureClick(fid, lid, tapLngLat, screenPt, mpp);
             return;
           }
         }
         // No custom feature at click point — fire empty-area click for draw/geometry modes
         if (onEmptyAreaClick) {
-          onEmptyAreaClick(e.lngLat.lng, e.lngLat.lat, screenPt);
+          onEmptyAreaClick(e.lngLat.lng, e.lngLat.lat, screenPt, mpp);
         }
         return;
       }
@@ -2921,7 +2950,7 @@ function WebMapView({
       if (!hasOurFeature) {
         // No custom feature at click point — fire empty-area click for draw/geometry modes
         if (onEmptyAreaClick) {
-          onEmptyAreaClick(e.lngLat.lng, e.lngLat.lat, screenPt);
+          onEmptyAreaClick(e.lngLat.lng, e.lngLat.lat, screenPt, mpp);
         }
         return;
       }
@@ -2937,7 +2966,7 @@ function WebMapView({
       if (!props) return;
       const fid = props._id as string | undefined;
       const lid = props._layer_id as string | undefined;
-      if (fid && lid) onFeatureClick(fid, lid, tapLngLat, screenPt);
+      if (fid && lid) onFeatureClick(fid, lid, tapLngLat, screenPt, mpp);
     };
 
     map.on('click', handleClick);

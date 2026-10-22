@@ -95,3 +95,6 @@ builds/
 # ── Local e2e snapshots (contain real project rows) ─────────
 tmp/e2e-snapshot/
 fibre-mobile/build_output_verify/
+# Exported with EXPO_PUBLIC_API_URL pointing at a local backend, for running
+# the P0 suite without the Render round-trip.
+fibre-mobile/build_output_local/

@@ -21,7 +21,7 @@
 
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { after, before, describe, it } from 'node:test';
+import { after, before, describe, it as baseIt } from 'node:test';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
@@ -33,6 +33,30 @@ const PROJECT = process.env.E2E_PROJECT ?? 'UI-Brownfield-Verify';
 
 const MAP_READY_TIMEOUT = 90_000;
 const UI_TIMEOUT = 30_000;
+
+// Every case re-opens the project (the /map route does not carry its id), so a
+// full read-only run spends minutes on navigation alone. E2E_ONLY=SA-050,SA-090
+// runs just those cases while iterating on one tool, and the rest report why
+// they were skipped instead of silently vanishing.
+const ONLY = new Set(
+  (process.env.E2E_ONLY ?? '')
+    .split(',')
+    .map((id) => id.trim().toUpperCase())
+    .filter(Boolean),
+);
+
+const notSelected = (name) => {
+  if (ONLY.size === 0) return null;
+  const id = (name.match(/^SA-\d+/) ?? [])[0];
+  return id && !ONLY.has(id) ? `not selected by E2E_ONLY (${id})` : null;
+};
+
+const it = (name, fn) =>
+  baseIt(name, async (t) => {
+    const skip = notSelected(name);
+    if (skip) return t.skip(skip);
+    return fn(t);
+  });
 
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -130,6 +154,30 @@ before(async () => {
     args: ['--enable-unsafe-swiftshader', '--use-angle=swiftshader'],
   });
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  // E2E_SERVER_URL repoints an already-exported bundle at another backend
+  // without re-exporting: the app keeps its API base in localStorage and
+  // prefers it over the value baked in at build time. A local Django answers
+  // the same 13-layer project in a fraction of the Render round-trip, which is
+  // most of a case's runtime.
+  if (process.env.E2E_SERVER_URL) {
+    const serverUrl = process.env.E2E_SERVER_URL;
+    await context.addInitScript((url) => {
+      try {
+        localStorage.setItem('fibre360_server_url', url);
+      } catch {
+        /* storage disabled */
+      }
+    }, serverUrl);
+  }
+  // Basemap tiles are the slowest thing on the page and no case asserts on
+  // them — the vector layers under test are drawn regardless. E2E_BLOCK_TILES=1
+  // drops them so a case is not waiting on a CDN between every tap.
+  if (process.env.E2E_BLOCK_TILES === '1') {
+    await context.route(
+      /tile\.openstreetmap\.org|basemaps\.cartocdn\.com|server\.arcgisonline\.com|api\.maptiler\.com/,
+      (route) => route.abort(),
+    );
+  }
   page = await context.newPage();
 
   page.on('response', async (response) => {
@@ -344,17 +392,24 @@ describe('P0 map tools on the web build', { concurrency: 1 }, () => {
     await openFeatureFromList('final_trenches');
     await page.getByText('Edit', { exact: true }).last().click();
 
-    for (const action of [
-      'Edit shape',
-      'Split here',
-      'Route around',
-      'Remove span',
-      'Extend line',
-      'Attributes',
-      'Delete',
-      'Undo',
-      'Save',
-    ]) {
+    // Five intents on the row, Save pinned; Shape and Break hold their members.
+    for (const action of ['Shape', 'Break', 'Detour', 'Details', 'Retire', 'Save']) {
+      await page
+        .getByText(action, { exact: true })
+        .first()
+        .waitFor({ state: 'visible', timeout: UI_TIMEOUT })
+        .catch(() => assert.fail(`line toolbar is missing "${action}"`));
+    }
+    await page.getByText('Shape', { exact: true }).first().click();
+    for (const action of ['Edit shape', 'Continue line']) {
+      await page
+        .getByText(action, { exact: true })
+        .first()
+        .waitFor({ state: 'visible', timeout: UI_TIMEOUT })
+        .catch(() => assert.fail(`Shape group is missing "${action}"`));
+    }
+    await page.getByText('Break', { exact: true }).first().click();
+    for (const action of ['Add joint', 'Cut out span']) {
       await page
         .getByText(action, { exact: true })
         .first()
@@ -434,7 +489,14 @@ describe('P0 mutating map cases (restored from snapshot)', { concurrency: 1 }, (
       await reset();
       await openFeatureFromList('chambers');
       await page.getByText('Edit', { exact: true }).last().click();
-      await page.getByDisplayValue(value).first().waitFor({ state: 'visible', timeout: UI_TIMEOUT });
+      // Read the live DOM values: the value is a property on RN Web inputs, not
+      // an attribute, and the installed Playwright has no getByDisplayValue.
+      await page.waitForTimeout(1200);
+      const values = await page.locator('input').evaluateAll((els) => els.map((e) => e.value));
+      assert.ok(
+        values.includes(value),
+        `saved value did not survive the reload (inputs: ${JSON.stringify(values.slice(0, 6))})`,
+      );
     });
   });
 
