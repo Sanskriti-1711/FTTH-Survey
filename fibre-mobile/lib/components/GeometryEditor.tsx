@@ -14,6 +14,7 @@ import {
   TouchableOpacity,
   Animated,
   Easing,
+  ScrollView,
 } from 'react-native';
 import { useThemeStore } from '../stores/theme';
 import { Spacing, Radius } from '../theme/colors';
@@ -290,7 +291,16 @@ export default function GeometryEditor({
             <View style={styles.addPointLayerPicker}>
               <Text style={[styles.pickerLabel, { color: colors.textSecondary }]}>Target layer:</Text>
               {addPointLayers.length > 0 ? (
-                <View style={{ flexDirection: 'row', gap: 6 }}>
+                // 13 layers do not fit on a phone: the row used to clip after
+                // the third chip with no way to reach the rest, so the layer an
+                // object point belongs on could not be chosen at all.
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={{ flexGrow: 0 }}
+                  contentContainerStyle={{ flexDirection: 'row', gap: 6, paddingRight: 4 }}
+                  accessibilityLabel="Point layers"
+                >
                   {addPointLayers.map((layer) => (
                     <TouchableOpacity
                       key={layer.id}
@@ -309,7 +319,7 @@ export default function GeometryEditor({
                       </Text>
                     </TouchableOpacity>
                   ))}
-                </View>
+                </ScrollView>
               ) : (
                 <Text style={[styles.pickerEmpty, { color: colors.textTertiary }]}>
                   No point layers available
