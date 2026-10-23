@@ -10,7 +10,8 @@
 // and duct/chamber endpoints, nothing written until Save.
 //
 // Actions: target-layer chips · Undo last vertex · Cancel · Save (primary,
-// rightmost, disabled until there are 2+ vertices).
+// rightmost, disabled until there are 2+ vertices). Save writes the trench and
+// leaves the tool armed, so a run of trenches is drawn without re-opening it.
 
 import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from 'react-native';
@@ -217,7 +218,7 @@ export default function DrawTrenchPanel({
       <Text style={[styles.hint, { color: colors.textTertiary }]} numberOfLines={2}>
         {snapLabel
           ? `Last vertex snapped to ${snapLabel} — vertices snap to nearby points and duct ends`
-          : 'Vertices snap to nearby object points and duct/chamber ends · nothing is saved until Save'}
+          : 'Vertices snap to nearby points and duct/chamber ends · Save keeps the tool open for the next trench'}
       </Text>
     </View>
   );
