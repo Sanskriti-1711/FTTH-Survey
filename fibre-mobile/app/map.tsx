@@ -3096,6 +3096,7 @@ export default function MapScreen() {
       }
       const trenchGeometry = { type: 'LineString', coordinates: coords };
       const trenchAttrs = buildConnectionAttrs({ construction_type: 'new_trench' }, continueSnapTarget);
+      let savedTrenchId: string | null = null;
       try {
         const sf = await upsertSurveyFeature(
           null, layerId, layerName,
@@ -3107,6 +3108,7 @@ export default function MapScreen() {
             : `Drew new trench (${coords.length} vertices) off ${layerName} #${featureId.slice(-6)}`,
         );
         if (sf) {
+          savedTrenchId = sf.id;
           pushUndo({
             featureId, layerId,
             oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
@@ -3138,8 +3140,13 @@ export default function MapScreen() {
         showToast('Save failed — check the server connection and retry', 'error');
         return;
       }
-      // Re-arm for the next trench: the selected line goes back to being the
-      // working copy (and the anchor), with nothing staged.
+      // Re-arm for the next trench: nothing staged, and the trench that was
+      // just written becomes the SELECTION. Re-arming on the line we branched
+      // from left the freshly drawn trench unreachable — Shape → Edit shape and
+      // Retire kept acting on the parent line, so deleting or correcting the
+      // trench you had just made meant closing the tool and tapping it again.
+      // Chaining from the new trench is also what a survey run does: feeder
+      // run, then the drop that starts at its end.
       setNewTrenchCoords(null);
       setContinueStartPt(null);
       setContinueLineAnchor(null);
@@ -3147,12 +3154,25 @@ export default function MapScreen() {
       setContinueSnapTarget(null);
       setContinueIsSpur(false);
       lastContinueTapRef.current = null;
-      setTempLineCoords(
-        tempLineOriginal
-          ? tempLineOriginal.map(([lng, lat]) => [lng, lat] as [number, number])
-          : tempLineCoords,
-      );
-      console.log('[Continue] New trench saved as its own feature — tool re-armed for the next one');
+      setTempLineCoords(coords.map(([lng, lat]) => [lng, lat] as [number, number]));
+      setTempLineOriginal(coords.map(([lng, lat]) => [lng, lat] as [number, number]));
+      if (savedTrenchId) {
+        const baseLayerName = activeLayerNames[layerId] ?? layerId.toUpperCase();
+        setSelectedLineFeature({
+          id: savedTrenchId,
+          layerId,
+          geometryType: 'LineString',
+          // Same title a tapped survey line shows; layerName stays the plain
+          // layer so the next save still writes a clean layer_name.
+          name: `Survey: ${baseLayerName} #${savedTrenchId.slice(-4)}`,
+          layerName: baseLayerName,
+        });
+        setSelectedMapFeatureId(savedTrenchId);
+        // The new trench only exists in the survey layer — switch to Overlay so
+        // it is actually on screen (and tappable) after the save.
+        autoOverlayOnEdit();
+        console.log(`[Continue] New trench ${savedTrenchId.slice(-8)} saved — selected it for edit/delete, tool re-armed`);
+      }
       return;
     }
 
@@ -3396,7 +3416,7 @@ export default function MapScreen() {
     lastContinueTapRef.current = null;
     setDeleteSectionRange(null);
     console.log(`[MoveMode] Saved line geometry for ${featureId.slice(-8)} — SurveyFeature ${existingSurvey ? 'updated' : 'created'}${continueSnapTarget ? ` (snapped to ${continueSnapTarget.name})` : ''}`);
-  },    [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, continueSnapTarget, surveyFeatures, propagateBundleReroute, lineToolMode, continueLinePoints, continueIsSpur, continueNewTrench, newTrenchCoords, activeProject, showToast, bundleSkipLayers]);
+  },    [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, continueSnapTarget, surveyFeatures, propagateBundleReroute, lineToolMode, continueLinePoints, continueIsSpur, continueNewTrench, newTrenchCoords, activeProject, showToast, bundleSkipLayers, activeLayerNames, autoOverlayOnEdit]);
 
   // ── Current coordinates of the selected line ──────────────────────────
   // Every line tool (Detour, Continue, Cut out span, Split) arms from this.
