@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -7,15 +7,18 @@ import {
   TextInput,
   TouchableOpacity,
   ActivityIndicator,
+  Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useLocalSearchParams, router } from 'expo-router';
+import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { useThemeStore } from '../../lib/stores/theme';
 import { useAuthStore } from '../../lib/stores/auth';
 import { useSurveyStore } from '../../lib/stores/survey';
 import { useImageStore } from '../../lib/stores/image';
 import { useProjectStore } from '../../lib/stores/project';
 import { getFeatureDetail as apiGetFeatureDetail } from '../../lib/api/projects';
+import { getFeaturePhotos } from '../../lib/api/features';
+import { getSurveyFeaturePhotos } from '../../lib/api/survey';
 import { getLayerSchema } from '../../lib/stores/layer-schemas';
 import { Card } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
@@ -90,6 +93,7 @@ export default function FeatureDetailScreen() {
   const [toastMsg, setToastMsg] = useState('');
   const [toastType, setToastType] = useState<'success' | 'error'>('success');
   const [loading, setLoading] = useState(true);
+  const [photos, setPhotos] = useState<Array<{ id: string; url: string }>>([]);
 
   const { projectGeojsons } = useProjectStore();
 
@@ -139,6 +143,36 @@ export default function FeatureDetailScreen() {
     if (!featureId) return;
     loadData();
   }, [featureId, routeProjectId]);
+
+  // The route id is a SurveyFeature id when the engineer opened a survey copy;
+  // its gallery lives on the survey endpoints. Otherwise use the HLD feature's
+  // photo gallery.
+  const surveyFeatureId = useMemo((): string | null => {
+    const routeId = (featureId as string) ?? '';
+    const st = useSurveyFeaturesStore.getState();
+    for (const list of Object.values(st.surveyFeatures)) {
+      if (list.some((entry) => entry.id === routeId)) return routeId;
+    }
+    return null;
+  }, [featureId]);
+
+  const loadPhotos = useCallback(async () => {
+    try {
+      const data = surveyFeatureId
+        ? await getSurveyFeaturePhotos(surveyFeatureId)
+        : await getFeaturePhotos(backendFeatureId);
+      setPhotos((data?.results as Array<{ id: string; url: string }>) ?? []);
+    } catch {
+      setPhotos([]);
+    }
+  }, [surveyFeatureId, backendFeatureId]);
+
+  // Re-read on focus so a photo taken in /camera appears when the stack pops back.
+  useFocusEffect(
+    useCallback(() => {
+      void loadPhotos();
+    }, [loadPhotos])
+  );
 
   const loadData = async () => {
     try {
@@ -632,11 +666,13 @@ export default function FeatureDetailScreen() {
             </TouchableOpacity>
           }
         >
-          {feature.photo_url ? (
-            <View style={styles.photoPreview}>
-              <Text style={[styles.photoUrl, { color: colors.textSecondary }]} numberOfLines={1}>
-                Photo uploaded
-              </Text>
+          {photos.length || feature.photo_url ? (
+            <View style={styles.photoGrid}>
+              {(photos.length ? photos : [{ id: 'legacy', url: feature.photo_url as string }]).map(
+                (photo) => (
+                  <Image key={photo.id} source={{ uri: photo.url }} style={styles.photoThumb} />
+                )
+              )}
             </View>
           ) : (
             <Text style={[styles.noPhoto, { color: colors.textTertiary }]}>
@@ -738,6 +774,8 @@ const styles = StyleSheet.create({
   noSchema: { fontSize: 14, textAlign: 'center', paddingVertical: Spacing.lg },
   photoPreview: { padding: Spacing.md },
   photoUrl: { fontSize: 13 },
+  photoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, padding: Spacing.md },
+  photoThumb: { width: 84, height: 84, borderRadius: 8, backgroundColor: '#e5e7eb' },
   noPhoto: { fontSize: 14, textAlign: 'center', paddingVertical: Spacing.lg },
   addPhotoBtn: {
     flexDirection: 'row',

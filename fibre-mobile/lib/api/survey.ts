@@ -301,6 +301,67 @@ export async function uploadSurveyFeaturePhoto(
   });
 }
 
+/** One photo in a survey feature's gallery (SurveyFeaturePhoto). */
+export interface SurveyFeaturePhotoData {
+  id: string;
+  project_id: string;
+  url: string;
+  description: string;
+  uploaded_by: string | null;
+  uploaded_at: string;
+  order: number;
+}
+
+/**
+ * GET /api/survey/survey-features/<id>/photos/ — every photo attached to the
+ * survey point, oldest first. The single `photo_url` on the feature is only the
+ * legacy first photo, so the gallery is the full evidence set.
+ */
+export async function getSurveyFeaturePhotos(featureId: string): Promise<{
+  count: number;
+  max_photos: number;
+  results: SurveyFeaturePhotoData[];
+}> {
+  return apiFetch(`/api/survey/survey-features/${featureId}/photos/`);
+}
+
+/**
+ * POST /api/survey/survey-features/<id>/photos/ — append one or more photos.
+ * (The legacy upload-photo route still works and also appends to the gallery.)
+ */
+export async function uploadSurveyFeaturePhotos(
+  featureId: string,
+  photos: { uri: string; name: string; type: string }[]
+): Promise<{
+  count: number;
+  max_photos: number;
+  uploaded: SurveyFeaturePhotoData[];
+}> {
+  const form = new FormData();
+  photos.forEach((photo) => {
+    form.append('photos', {
+      uri: photo.uri,
+      name: photo.name,
+      type: photo.type,
+    } as unknown as Blob);
+  });
+
+  return apiFetch(`/api/survey/survey-features/${featureId}/photos/`, {
+    method: 'POST',
+    body: form,
+    isFormData: true,
+  });
+}
+
+export async function deleteSurveyFeaturePhoto(
+  featureId: string,
+  photoId: string
+): Promise<{ detail: string; count: number }> {
+  return apiFetch(`/api/survey/survey-features/${featureId}/photos/${photoId}/`, {
+    method: 'DELETE',
+  });
+}
+
 export async function getSurveyFeature(featureId: string): Promise<SurveyFeatureData> {
   return apiFetch(`/api/survey/survey-features/${featureId}/`);
 }

@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { PendingPhoto } from '../utils/types';
-import { uploadFeaturePhoto } from '../api/features';
+import { uploadFeaturePhotoToGallery } from '../api/features';
 import { uploadSurveyFeaturePhoto } from '../api/survey';
 import { useSurveyFeaturesStore } from './survey-features';
 
@@ -77,17 +77,19 @@ export const useImageStore = create<ImageState>((set, get) => ({
     }));
 
     try {
+      const upload = {
+        uri: photo.localUri,
+        name: `photo_${id}.jpg`,
+        type: 'image/jpeg',
+      };
+      // Survey features keep using the classifying endpoint (it also appends to
+      // the gallery server-side); HLD features go straight to the gallery so a
+      // second photo no longer overwrites the first in Feature.photo.
       const result = isSurveyFeatureId(featureId)
-        ? await uploadSurveyFeaturePhoto(featureId, {
-            uri: photo.localUri,
-            name: `photo_${id}.jpg`,
-            type: 'image/jpeg',
-          })
-        : await uploadFeaturePhoto(featureId, {
-            uri: photo.localUri,
-            name: `photo_${id}.jpg`,
-            type: 'image/jpeg',
-          });
+        ? await uploadSurveyFeaturePhoto(featureId, upload)
+        : await uploadFeaturePhotoToGallery(featureId, upload);
+      const remoteUrl =
+        'photo_url' in result ? result.photo_url : result.uploaded?.[0]?.url ?? null;
 
       set((state) => ({
         uploading: false,
@@ -96,7 +98,7 @@ export const useImageStore = create<ImageState>((set, get) => ({
             ? {
                 ...p,
                 uploadStatus: 'uploaded' as const,
-                remoteUrl: result.photo_url,
+                remoteUrl: remoteUrl ?? undefined,
                 // A1 tags + A3 suggestions from the server classifier
                 // (survey-feature uploads only — HLD endpoint returns none).
                 tags: (result as { photo_tags?: string[] }).photo_tags ?? undefined,
