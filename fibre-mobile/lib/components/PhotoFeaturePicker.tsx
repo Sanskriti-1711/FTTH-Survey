@@ -272,7 +272,7 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.xs,
   },
   layerTagText: {
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: '600',
   },
   rowTextWrap: {

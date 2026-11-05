@@ -359,7 +359,7 @@ export default function LayerEditor({
         <View style={[styles.legacyNotice, { backgroundColor: colors.warning + '10', borderColor: colors.warning + '30' }]}>
           <Text style={[styles.legacyTitle, { color: colors.warning }]}>Generic Layer</Text>
           <Text style={[styles.legacyHint, { color: colors.textSecondary }]}>
-            No survey data dictionary found for layer "{layerId}". All properties are editable.
+            {`No survey data dictionary found for layer "${layerId}". All properties are editable.`}
           </Text>
         </View>
 
@@ -562,7 +562,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   fieldUnit: {
-    fontSize: 10,
+    fontSize: 13,
     fontStyle: 'italic',
   },
   readOnlyValue: {
@@ -672,7 +672,7 @@ const styles = StyleSheet.create({
     borderRadius: Radius.full,
   },
   photoStatusText: {
-    fontSize: 10,
+    fontSize: 13,
     fontWeight: '600',
     textTransform: 'uppercase',
   },

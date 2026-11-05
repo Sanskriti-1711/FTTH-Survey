@@ -605,7 +605,7 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     paddingHorizontal: 5,
     paddingVertical: 3,
-    fontSize: 10,
+    fontSize: 13,
     height: 24,
   },
   notesSaveBtn: {
@@ -629,7 +629,7 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   actionText: {
-    fontSize: 10,
+    fontSize: 13,
     fontWeight: '700',
   },
   dismissBtn: {
@@ -641,7 +641,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   dismissText: {
-    fontSize: 10,
+    fontSize: 13,
     fontWeight: '600',
   },
   // ── Phone card variant ──────────────────────────────────────────────

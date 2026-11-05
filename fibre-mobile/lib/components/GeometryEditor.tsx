@@ -411,7 +411,7 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   pickerLabel: {
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: '600',
   },
   layerChip: {
@@ -425,7 +425,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   pickerEmpty: {
-    fontSize: 11,
+    fontSize: 13,
     fontStyle: 'italic',
   },
 
@@ -454,7 +454,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   editSubtitle: {
-    fontSize: 10,
+    fontSize: 13,
     fontWeight: '500',
   },
   geomTypeDot: {
@@ -492,7 +492,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   editToolLabel: {
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: '600',
   },
 });

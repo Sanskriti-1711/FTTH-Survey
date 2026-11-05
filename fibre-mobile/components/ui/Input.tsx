@@ -63,7 +63,10 @@ export function Input({
           style={[
             styles.input,
             { color: colors.textPrimary },
-            icon ? { paddingLeft: 0 } : undefined,
+            // Keep a gap between the leading icon and the text: the icon is a
+            // sibling in a row, so dropping paddingLeft to 0 on web put the
+            // placeholder flush against it.
+            icon ? { paddingLeft: Spacing.sm } : undefined,
             style as any,
           ]}
           placeholderTextColor={colors.textTertiary}

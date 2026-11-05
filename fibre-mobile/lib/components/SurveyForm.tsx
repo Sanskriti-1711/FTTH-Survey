@@ -1249,7 +1249,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   suggestionBtnText: {
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: '600',
   },
   container: {
@@ -1394,7 +1394,7 @@ const styles = StyleSheet.create({
     borderRadius: Radius.full,
     borderWidth: 1,
   },
-  catText: { fontSize: 11, fontWeight: '500' },
+  catText: { fontSize: 13, fontWeight: '500' },
   weatherChip: {
     paddingHorizontal: 12,
     paddingVertical: 7,
@@ -1453,7 +1453,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderWidth: 2,
   },
-  toggleText: { fontSize: 11, fontWeight: '500' },
+  toggleText: { fontSize: 13, fontWeight: '500' },
   textarea: {
     borderWidth: 1,
     borderRadius: Radius.md,
@@ -1476,7 +1476,7 @@ const styles = StyleSheet.create({
     borderRadius: Radius.md,
     borderWidth: 1,
   },
-  statusChipText: { fontSize: 11 },
+  statusChipText: { fontSize: 13 },
   statusActions: {
     flexDirection: 'row',
     gap: Spacing.sm,
@@ -1516,8 +1516,8 @@ const styles = StyleSheet.create({
     borderBottomColor: '#E5E7EB',
   },
   changeField: { fontSize: 13, fontWeight: '500' },
-  changeReason: { fontSize: 11, marginTop: 1 },
-  changeTime: { fontSize: 10 },
+  changeReason: { fontSize: 13, marginTop: 1 },
+  changeTime: { fontSize: 13 },
   toastWrap: {
     position: 'absolute',
     bottom: 60,
@@ -1573,7 +1573,7 @@ const sectionStyles = StyleSheet.create({
     justifyContent: 'center',
   },
   title: { fontSize: 14, fontWeight: '700' },
-  subtitle: { fontSize: 10, marginTop: 1 },
+  subtitle: { fontSize: 13, marginTop: 1 },
   badge: {
     paddingHorizontal: 6,
     paddingVertical: 1,
@@ -1600,8 +1600,8 @@ const fieldStyles = StyleSheet.create({
     gap: 4,
     marginBottom: 4,
   },
-  fieldLabel: { fontSize: 11, fontWeight: '600' },
-  fieldUnit: { fontSize: 10, fontStyle: 'italic' },
+  fieldLabel: { fontSize: 13, fontWeight: '600' },
+  fieldUnit: { fontSize: 13, fontStyle: 'italic' },
   inputField: {
     height: 36,
     borderWidth: 1,

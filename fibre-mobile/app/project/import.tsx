@@ -4,7 +4,6 @@ import {
   Text,
   StyleSheet,
   TouchableOpacity,
-  Alert,
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -23,12 +22,13 @@ import { ArrowLeft, Upload, FileArchive, CheckCircle, FileText } from 'lucide-re
 export default function ProjectImportScreen() {
   const { projectId } = useLocalSearchParams<{ projectId?: string }>();
   const colors = useThemeStore((s) => s.colors);
-  const { importSurveyPackage, activeProject, isLoading, error: storeError } = useProjectStore();
+  const { importSurveyPackage, activeProject, isLoading } = useProjectStore();
 
   const [file, setFile] = useState<{ uri: string; name: string; type: string; size?: number } | null>(null);
   const [step, setStep] = useState<'select' | 'uploading' | 'done'>('select');
   const [toastVisible, setToastVisible] = useState(false);
-  const [toastMsg, setToastMsg] = useState('');  const [toastType, setToastType] = useState<'success' | 'error' | 'warning'>('error');
+  const [toastMsg, setToastMsg] = useState('');
+  const [toastType, setToastType] = useState<'success' | 'error' | 'warning'>('error');
   const showToast = (msg: string, type: 'success' | 'error' | 'warning' = 'error') => {
     setToastMsg(msg);
     setToastType(type);
@@ -103,7 +103,12 @@ export default function ProjectImportScreen() {
       <View style={styles.container}>
         {/* Header */}
         <View style={styles.topBar}>
-          <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
+          <TouchableOpacity
+            onPress={() => router.back()}
+            style={styles.backBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Go back"
+          >
             <ArrowLeft size={22} stroke={colors.textPrimary} />
           </TouchableOpacity>
           <Text style={[styles.title, { color: colors.textPrimary }]}>Import Survey Package</Text>
@@ -121,6 +126,8 @@ export default function ProjectImportScreen() {
             ]}
             onPress={pickFile}
             activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel={file ? `Change selected file, ${file.name}` : 'Select a survey package file'}
           >
             {file ? (
               <View style={styles.fileInfo}>
@@ -227,7 +234,7 @@ const styles = StyleSheet.create({
     gap: Spacing.md,
     marginBottom: Spacing.xl,
   },
-  backBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
+  backBtn: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center' },
   title: { fontSize: 20, fontWeight: '600' },
   uploadArea: {
     borderWidth: 2,

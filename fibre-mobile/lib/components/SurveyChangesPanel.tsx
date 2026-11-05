@@ -265,7 +265,7 @@ const layerStyles = StyleSheet.create({
     borderRadius: 6,
   },
   countText: {
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: '700',
   },
   statusSummary: {
@@ -547,7 +547,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   headerSubtitle: {
-    fontSize: 10,
+    fontSize: 13,
     fontWeight: '500',
   },
   closeBtn: {
@@ -573,7 +573,7 @@ const styles = StyleSheet.create({
     gap: 3,
   },
   summaryCount: {
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: '700',
   },
   summarySpacer: {

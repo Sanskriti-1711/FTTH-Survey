@@ -33,6 +33,10 @@ export interface Project {
     | 'completed'
     | 'archived';
   standard_completion: number;
+  /** Set when this project is a supervision project opened from an LLD run. */
+  source_lld_run_id?: string | null;
+  /** 'lld_run' for supervision, 'manual_gpkg' for a contractor upload. */
+  origin?: 'lld_run' | 'manual_gpkg';
   created_at: string;
   updated_at: string;
   last_activity_at: string | null;

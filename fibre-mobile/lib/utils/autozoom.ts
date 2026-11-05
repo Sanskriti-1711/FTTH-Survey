@@ -97,7 +97,7 @@ export function mergeBounds(a: Bounds, b: Bounds): Bounds {
 
 /** Union of every feature that passes `include` (default: all). */
 export function boundsOfFeatures(
-  features: ReadonlyArray<{ geometry?: MaybeGeometry | null }>,
+  features: readonly { geometry?: MaybeGeometry | null }[],
   include?: (feature: { geometry?: MaybeGeometry | null }) => boolean,
 ): Bounds | null {
   let out: Bounds | null = null;

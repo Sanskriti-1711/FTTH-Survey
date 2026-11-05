@@ -63,7 +63,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.92)',
   },
   dot: { width: 8, height: 8, borderRadius: 4 },
-  label: { fontSize: 11, fontWeight: '600' },
+  label: { fontSize: 13, fontWeight: '600' },
 });
 
 export default GPSQualityBadge;

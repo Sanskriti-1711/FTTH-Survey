@@ -81,6 +81,59 @@ E2E_EMAIL=... E2E_PASSWORD=... npm run test:e2e
 The scripts use `psql`, so it must be on the PATH. Without the opt-in the cases
 skip. Do not point the opt-in at a project you need to keep.
 
+## CI
+
+`.github/workflows/ci.yml` has three jobs:
+
+| Job | When | Needs |
+|---|---|---|
+| `quality` | every PR/push | nothing (typecheck, unit, lint) |
+| `e2e-read-only` | every PR/push | `E2E_EMAIL`, `E2E_PASSWORD` secrets; optional `E2E_BASE_URL` / `E2E_PROJECT` repo variables |
+| `e2e-mutating` | weekly schedule + manual dispatch | the credentials above **plus** `E2E_SERVER_URL` (staging API), the `e2e-staging` environment secrets `PGHOST` `PGPORT` `PGUSER` `PGPASSWORD` `PGDATABASE`, and the `E2E_SURVEY_PROJECT_ID` variable |
+
+The mutating job runs only `SA-040`, `SA-041`, `SA-098` (`E2E_ONLY`) and therefore still snapshots and restores the survey rows around each case. It deliberately never runs on a pull request: point it at a disposable project, never one you need to keep.
+
+The 19 cases in the manual list below are **not** in CI yet. They need a seeded disposable project plus coordinate-level map gestures; running them against the shared project would corrupt it. The mutating job is the place to add them once that fixture exists.
+
+## Preview-only gesture checks (19 cases)
+
+`e2e/p0-gestures.spec.mjs` performs each gesture from the sheet's line-tool,
+create and polygon cases, then **cancels before the write**: no Save, no
+"Cut out span" confirm, no second delete tap, no second Submit tap. A case
+fails if the page sends any non-GET `/api` request while it runs, and if the
+commit-bar state changes.
+
+The spec needs the live map instance to project GeoJSON to screen pixels, so
+the web build must be exported with the test hook:
+
+```bash
+EXPO_PUBLIC_E2E_MAP_HOOK=1 npx expo export --platform web --output-dir .e2e-build
+node serve-web.mjs .e2e-build 8081
+
+E2E_BASE_URL=http://localhost:8081 \
+E2E_EMAIL=... E2E_PASSWORD=... \
+E2E_BLOCK_TILES=1 npm run test:e2e:gestures
+```
+
+SA-096 (undo badge after two saved edits) and SA-106 (zero-change submit
+warning) are skipped: their premise is saved data that a preview-only run must
+not create. SA-087 stops at the layer picker because the map tap itself creates
+the survey row; SA-071 and SA-100 stop at the confirm label for the same reason.
+
+Current status on the local web export against `UI-Brownfield-Verify`:
+
+| Result | Cases |
+|---|---|
+| pass | 13: SA-018, 028, 039, 051, 052, 059, 061, 066, 071, 076, 087, 100, 137 |
+| skip by design | SA-096, SA-106 |
+| skip when fixture/gesture does not arm | SA-069 (detour preview) |
+| fail (observed defect) | SA-082 (map taps in Draw mode append no vertex) · SA-091 (polygon corner drag does not mark Unsaved) |
+
+SA-107 also passes: the first Submit tap arms `Tap again to submit …` and the
+arm expires without a request. SA-052's snap is exercised by dragging onto a
+nearby rendered line; the snapped coordinate itself is not readable from the
+DOM, so the check asserts the drag armed Save instead.
+
 ## Deliberately manual
 
 The remaining P0 cases need a map gesture at a coordinate (drag, tap on a line,

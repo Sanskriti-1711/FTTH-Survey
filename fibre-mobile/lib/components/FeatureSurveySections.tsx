@@ -1130,7 +1130,9 @@ export default function FeatureSurveySections({ featureId, layerId, initialGeome
                       placeholderTextColor={colors.textTertiary}
                     />
                   </View>
-                  <Text style={[styles.attrLabel, { color: colors.textTertiary }]}>Strands in this physical cable — Feeder 288, Distribution ≥ 48, Garden 12. LLD reads this as the cable's capacity.</Text>
+                  <Text style={[styles.attrLabel, { color: colors.textTertiary }]}>
+                    {"Strands in this physical cable — Feeder 288, Distribution ≥ 48, Garden 12. LLD reads this as the cable's capacity."}
+                  </Text>
                 </View>
               )}
             </>
@@ -1298,7 +1300,7 @@ const styles = StyleSheet.create({
   },
   sectionHeaderLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
   sectionTitle: { fontSize: 16, fontWeight: '700' },
-  sectionSubtitle: { fontSize: 11, marginTop: 1 },
+  sectionSubtitle: { fontSize: 13, marginTop: 1 },
   moduleToggle: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
 
   // ── "Saved …" chip ───────────────────────────────────────────────────
@@ -1339,7 +1341,7 @@ const styles = StyleSheet.create({
   severityBtn: { flex: 1, paddingVertical: 12, borderRadius: Radius.md, borderWidth: 1, alignItems: 'center' },
   severityText: { fontSize: 13 },
   mitigationChip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: Radius.md, borderWidth: 1 },
-  mitigationText: { fontSize: 11, fontWeight: '500' },
+  mitigationText: { fontSize: 13, fontWeight: '500' },
   evidenceTypes: { flexDirection: 'row', gap: Spacing.sm, marginBottom: Spacing.md },
   evidenceBtn: { flex: 1, alignItems: 'center', paddingVertical: Spacing.lg, borderRadius: Radius.lg, borderWidth: 1.5, borderStyle: 'dashed', gap: Spacing.sm },
   evidenceBtnText: { fontSize: 13, fontWeight: '600' },
@@ -1354,5 +1356,5 @@ const styles = StyleSheet.create({
   changeLeft: { flex: 1 },
   changeField: { fontSize: 14, fontWeight: '500' },
   changeReason: { fontSize: 12, marginTop: 2 },
-  changeTime: { fontSize: 11 },
+  changeTime: { fontSize: 13 },
 });

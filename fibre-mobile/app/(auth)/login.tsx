@@ -405,7 +405,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   serverToggleText: {
-    fontSize: 12,
+    fontSize: 13,
     flexShrink: 1,
   },
   serverPanel: {
@@ -420,7 +420,7 @@ const styles = StyleSheet.create({
     marginBottom: Spacing.xs,
   },
   serverPanelHint: {
-    fontSize: 12,
+    fontSize: 13,
     lineHeight: 17,
     marginBottom: Spacing.md,
   },

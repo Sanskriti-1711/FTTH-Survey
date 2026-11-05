@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+  schedule:
+    # Weekly, so the destructive cases run against the staging fixture even
+    # when nobody has opened the repo that week.
+    - cron: '0 3 * * 0'
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  quality:
+    name: Typecheck, unit tests, lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm test
+      - run: npm run lint
+
+  e2e-read-only:
+    name: Read-only map E2E
+    needs: quality
+    runs-on: ubuntu-latest
+    env:
+      E2E_BASE_URL: ${{ vars.E2E_BASE_URL || 'https://fibre-survey-web.onrender.com' }}
+      E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
+      E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+      E2E_PROJECT: ${{ vars.E2E_PROJECT || 'UI-Brownfield-Verify' }}
+      E2E_SERVER_URL: ${{ secrets.E2E_SERVER_URL }}
+      E2E_BLOCK_TILES: '1'
+      E2E_BROWSER_CHANNEL: chromium
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Require E2E credentials
+        run: |
+          test -n "$E2E_EMAIL" || { echo "::error::E2E_EMAIL secret is not set"; exit 1; }
+          test -n "$E2E_PASSWORD" || { echo "::error::E2E_PASSWORD secret is not set"; exit 1; }
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+
+  e2e-mutating:
+    name: Mutating map E2E (snapshot + restore)
+    # Writes survey rows, then restores them. Only run it against the
+    # disposable staging project, never from a random pull request.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: quality
+    environment: e2e-staging
+    runs-on: ubuntu-latest
+    env:
+      E2E_BASE_URL: ${{ vars.E2E_BASE_URL || 'https://fibre-survey-web.onrender.com' }}
+      E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
+      E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+      E2E_PROJECT: ${{ vars.E2E_PROJECT || 'UI-Brownfield-Verify' }}
+      E2E_SERVER_URL: ${{ secrets.E2E_SERVER_URL }}
+      E2E_ALLOW_DB_RESET: '1'
+      E2E_ONLY: 'SA-040,SA-041,SA-098'
+      E2E_SURVEY_PROJECT_ID: ${{ vars.E2E_SURVEY_PROJECT_ID }}
+      E2E_BLOCK_TILES: '1'
+      E2E_BROWSER_CHANNEL: chromium
+      PGHOST: ${{ secrets.PGHOST }}
+      PGPORT: ${{ secrets.PGPORT }}
+      PGUSER: ${{ secrets.PGUSER }}
+      PGPASSWORD: ${{ secrets.PGPASSWORD }}
+      PGDATABASE: ${{ secrets.PGDATABASE }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Require fixture credentials
+        run: |
+          for v in E2E_EMAIL E2E_PASSWORD E2E_SERVER_URL PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE E2E_SURVEY_PROJECT_ID; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set"; exit 1; fi
+          done
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - run: npx playwright install --with-deps chromium
+      - name: Run mutating cases (snapshot, test, restore)
+        run: npm run test:e2e

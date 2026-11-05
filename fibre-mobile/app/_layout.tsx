@@ -2,8 +2,9 @@ import React, { useEffect, useRef } from 'react';
 import { View, ActivityIndicator, Text, StyleSheet } from 'react-native';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useThemeStore } from '../lib/stores/theme';
+import { useThemeStore, hydrateTheme } from '../lib/stores/theme';
 import { useAuthStore } from '../lib/stores/auth';
+import { hydrateOfflineQueue } from '../lib/stores/survey-features';
 import { useNetworkStatus } from '../lib/hooks/useNetworkStatus';
 
 // ── Root Layout ───────────────────────────────────────────────────────────
@@ -44,6 +45,9 @@ export default function RootLayout() {
       .catch((e) => console.warn('Restore session error:', e))
       .finally(() => {
         clearTimeout(timeout);
+        // Restore the saved theme and any edits that never reached the server.
+        void hydrateTheme();
+        void hydrateOfflineQueue();
       });
   }, []);
 
@@ -65,6 +69,11 @@ export default function RootLayout() {
         <Stack.Screen name="deeplink" />
         <Stack.Screen name="map" options={{ animation: 'fade' }} />
         <Stack.Screen name="feature/[featureId]" options={{ animation: 'slide_from_bottom' }} />
+        <Stack.Screen name="supervision/[projectId]" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen
+          name="supervision/feature/[featureId]"
+          options={{ animation: 'slide_from_bottom' }}
+        />
         <Stack.Screen name="project/import" options={{ animation: 'slide_from_bottom' }} />
         <Stack.Screen name="camera" options={{ animation: 'slide_from_bottom' }} />
       </Stack>

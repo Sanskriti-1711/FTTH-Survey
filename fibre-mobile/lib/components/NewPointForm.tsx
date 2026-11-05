@@ -462,7 +462,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   subtitle: {
-    fontSize: 11,
+    fontSize: 13,
     paddingHorizontal: Spacing.md,
     paddingVertical: Spacing.xs,
   },
@@ -472,7 +472,7 @@ const styles = StyleSheet.create({
     borderRadius: Radius.full,
   },
   layerBadgeText: {
-    fontSize: 10,
+    fontSize: 13,
     fontWeight: '600',
   },
   fieldsScroll: {
@@ -493,11 +493,11 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   fieldLabel: {
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: '600',
   },
   fieldUnit: {
-    fontSize: 10,
+    fontSize: 13,
     fontStyle: 'italic',
   },
   inputField: {

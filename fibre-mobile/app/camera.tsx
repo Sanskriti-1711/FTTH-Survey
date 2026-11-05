@@ -5,7 +5,6 @@ import {
   StyleSheet,
   TouchableOpacity,
   Image,
-  Alert,
   ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -18,6 +17,7 @@ import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Card';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Spacing, Radius } from '../lib/theme/colors';
+import { notify } from '../lib/utils/dialog';
 import { Camera as CameraIcon, Image as ImageIcon, X, Upload, Check, ArrowLeft, Link2 } from 'lucide-react-native';
 import { PhotoFeaturePicker } from '../lib/components/PhotoFeaturePicker';
 import type { PendingPhoto } from '../lib/utils/types';
@@ -39,7 +39,7 @@ export default function CameraScreen() {
   const takePhoto = async () => {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
     if (status !== 'granted') {
-      Alert.alert('Permission needed', 'Camera permission is required to take photos.');
+      notify('Permission needed', 'Camera permission is required to take photos.');
       return;
     }
 
@@ -92,7 +92,7 @@ export default function CameraScreen() {
       (p) => p.featureId && p.uploadStatus !== 'uploaded' && p.uploadStatus !== 'uploading'
     );
     if (toUpload.length === 0) {
-      Alert.alert(
+      notify(
         'Nothing to upload',
         featureId
           ? 'All photos for this feature are already uploaded.'
@@ -105,7 +105,7 @@ export default function CameraScreen() {
         await uploadPhoto(p.id, p.featureId);
       }
     }
-    Alert.alert('Upload complete', `${toUpload.length} photo${toUpload.length === 1 ? '' : 's'} uploaded.`);
+    notify('Upload complete', `${toUpload.length} photo${toUpload.length === 1 ? '' : 's'} uploaded.`);
   };
 
   const statusCount = {
@@ -133,12 +133,12 @@ export default function CameraScreen() {
           : prev
       );
       if (ok) {
-        Alert.alert('Photo attached', `Photo linked to ${label} and uploaded.`);
+        notify('Photo attached', `Photo linked to ${label} and uploaded.`);
       } else {
-        Alert.alert('Upload failed', 'The photo was linked to the feature, but the upload failed. Tap Upload to retry.');
+        notify('Upload failed', 'The photo was linked to the feature, but the upload failed. Tap Upload to retry.');
       }
     } catch {
-      Alert.alert('Upload failed', 'The photo was linked locally, but the upload failed. Tap Upload to retry.');
+      notify('Upload failed', 'The photo was linked locally, but the upload failed. Tap Upload to retry.');
     } finally {
       setAttachBusyId(null);
     }

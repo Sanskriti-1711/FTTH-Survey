@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -18,9 +18,11 @@ import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
 import CommitBar from '../../lib/components/CommitBar';
 import { Spacing, Radius, StatusColors, Touch, Type, type StatusKey } from '../../lib/theme/colors';
-import { Camera, Upload, Bell, ChevronRight } from 'lucide-react-native';
-import type { Project } from '../../lib/utils/types';
+import { Camera, Upload, User, ChevronRight, ClipboardList } from 'lucide-react-native';
+import type { Project, AssignmentJob } from '../../lib/utils/types';
 import type { ReviewAction } from '../../lib/api/projects';
+import { getJobsForEngineer } from '../../lib/api/assignments';
+import { isSupervisionProject, lldVersionLabel } from '../../lib/api/supervision';
 
 // ── Home Screen ───────────────────────────────────────────────────────────
 
@@ -28,21 +30,39 @@ export default function HomeScreen() {
   const colors = useThemeStore((s) => s.colors);
   const { user } = useAuthStore();
   const isAdmin = user?.role === 'SUBADMIN';
-  const { projects, fetchProjects, acceptSurveyCopy, submitSurveyCopy, reviewSurveyProject } = useProjectStore();
+  const {
+    projects,
+    fetchProjects,
+    acceptSurveyCopy,
+    submitSurveyCopy,
+    reviewSurveyProject,
+    error: projectsError,
+  } = useProjectStore();
   const [refreshing, setRefreshing] = useState(false);
   // The first fetch decides between "no projects" and "not loaded yet". A
   // 390 px phone showed "No Projects Yet" over a project list that arrived a
   // moment later, which reads as data loss.
   const [loadingProjects, setLoadingProjects] = useState(true);
   const [statusFilter, setStatusFilter] = useState<Project['status'] | 'all'>('all');
+  const [workspace, setWorkspace] = useState<'survey' | 'supervision'>('survey');
+  // Supervision work arrives as assignment jobs on the same project row, so the
+  // jobs feed decides which supervision projects belong to this engineer.
+  const [supervisionJobs, setSupervisionJobs] = useState<AssignmentJob[] | null>(null);
 
   const loadData = useCallback(async () => {
     try {
-      await fetchProjects();
+      await Promise.all([
+        fetchProjects(),
+        user?.id
+          ? getJobsForEngineer(user.id, { page_size: 100 })
+              .then((data) => setSupervisionJobs(data.results))
+              .catch(() => setSupervisionJobs([]))
+          : Promise.resolve(),
+      ]);
     } finally {
       setLoadingProjects(false);
     }
-  }, [fetchProjects]);
+  }, [fetchProjects, user?.id]);
 
   useEffect(() => {
     loadData();
@@ -112,14 +132,30 @@ export default function HomeScreen() {
   const activeFilterLabel =
     filterChips.find((c) => c.key === statusFilter)?.label ?? 'matching';
 
-  // Auto-reset the filter to 'all' when the filtered list becomes empty.
-  // This handles the case where an action (accept, submit, review) removes
-  // the last project matching the current filter.
-  useEffect(() => {
-    if (statusFilter !== 'all' && filteredProjects.length === 0) {
-      setStatusFilter('all');
+  // ── Supervision workspace ───────────────────────────────────────────────
+  // A supervision project is a project opened from a completed LLD run. The
+  // engineer sees only the projects they hold a job on; an admin sees all.
+  const supervisionProjects = useMemo(() => {
+    const all = projects.filter(isSupervisionProject);
+    if (isAdmin) return all;
+    const assigned = new Set((supervisionJobs ?? []).map((job) => job.project.id));
+    return all.filter((project) => assigned.has(project.id));
+  }, [projects, supervisionJobs, isAdmin]);
+
+  const supervisionJobsByProject = useMemo(() => {
+    const map: Record<string, AssignmentJob[]> = {};
+    for (const job of supervisionJobs ?? []) {
+      (map[job.project.id] ??= []).push(job);
     }
-  }, [statusFilter, filteredProjects.length]);
+    return map;
+  }, [supervisionJobs]);
+
+  const supervisionStats = {
+    assigned: supervisionProjects.filter((p) => p.status === 'assigned').length,
+    active: supervisionProjects.filter((p) => p.status === 'active' || p.status === 'in_progress').length,
+    done: supervisionProjects.filter((p) => p.status === 'accepted' || p.status === 'completed').length,
+  };
+  const supervisionCount = supervisionProjects.length;
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]}>
@@ -147,11 +183,47 @@ export default function HomeScreen() {
               accessibilityRole="button"
               accessibilityLabel="Open my profile"
             >
-              <Bell size={20} stroke={colors.textSecondary} />
+              <User size={20} stroke={colors.textSecondary} />
             </TouchableOpacity>
           </View>
         </View>
 
+        {/* Workspace switch — survey work and supervision work are different
+            stages of the same rollout, so they get separate lists rather than
+            one mixed queue. */}
+        <View style={[styles.workspaceRow, { backgroundColor: colors.surface }]}>
+          {([
+            { key: 'survey', label: `Survey (${projects.length})` },
+            { key: 'supervision', label: `Supervision (${supervisionCount})` },
+          ] as const).map((tab) => {
+            const active = workspace === tab.key;
+            return (
+              <TouchableOpacity
+                key={tab.key}
+                onPress={() => setWorkspace(tab.key)}
+                style={[
+                  styles.workspaceTab,
+                  active && { backgroundColor: colors.primary },
+                ]}
+                accessibilityRole="tab"
+                accessibilityState={{ selected: active }}
+                accessibilityLabel={`Show ${tab.key} projects`}
+              >
+                <Text
+                  style={[
+                    styles.workspaceText,
+                    { color: active ? colors.onPrimary : colors.textSecondary },
+                  ]}
+                >
+                  {tab.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+
+        {workspace === 'survey' ? (
+          <>
         {/* Quick stats — three numbers, one row, no cards competing with the
             project list for attention. */}
         <View style={styles.statsRow}>
@@ -193,21 +265,24 @@ export default function HomeScreen() {
                 : projects.filter((p) => p.status === chip.key).length;
             const chipColor =
               chip.key === 'all' ? colors.primary : (StatusColors[chip.key as StatusKey]?.dot ?? colors.primary);
+            const isEmpty = chip.key !== 'all' && count === 0;
             return (
               <TouchableOpacity
                 key={chip.key}
                 onPress={() => setStatusFilter(chip.key)}
+                disabled={isEmpty}
                 style={[
                   styles.filterChip,
                   {
                     borderColor: isActive ? chipColor : colors.textTertiary + '55',
                     backgroundColor: isActive ? chipColor : 'transparent',
+                    opacity: isEmpty ? 0.45 : 1,
                   },
                 ]}
                 activeOpacity={0.7}
                 accessibilityRole="button"
                 accessibilityLabel={`Show ${chip.label} projects, ${count}`}
-                accessibilityState={{ selected: isActive }}
+                accessibilityState={{ selected: isActive, disabled: isEmpty }}
               >
                 <Text
                   style={[
@@ -230,6 +305,16 @@ export default function HomeScreen() {
               Loading your projects…
             </Text>
           </View>
+        ) : projectsError && projects.length === 0 ? (
+          <View style={[styles.loadingCard, { backgroundColor: colors.surface }]}>
+            <Text style={[styles.errorTitle, { color: colors.textPrimary }]}>
+              {"Couldn't Load Projects"}
+            </Text>
+            <Text style={[styles.errorText, { color: colors.textSecondary }]}>
+              {projectsError}
+            </Text>
+            <Button title="Try Again" variant="secondary" size="sm" onPress={loadData} />
+          </View>
         ) : projects.length === 0 ? (
           <EmptyState
             title="No Projects Yet"
@@ -247,6 +332,14 @@ export default function HomeScreen() {
           <EmptyState
             title={`No ${activeFilterLabel} Projects`}
             description="Nothing matches this status filter yet"
+            action={
+              <Button
+                title="Show All Projects"
+                variant="secondary"
+                size="sm"
+                onPress={() => setStatusFilter('all')}
+              />
+            }
           />
         ) : (
           filteredProjects.map((proj) => (
@@ -303,6 +396,60 @@ export default function HomeScreen() {
             <Text style={[styles.quickHint, { color: colors.textTertiary }]}>ZIP or GeoPackage</Text>
           </TouchableOpacity>
         </View>
+          </>
+        ) : (
+          <>
+            <View style={styles.statsRow}>
+              <StatCard title="Assigned" value={supervisionStats.assigned} color={colors.primary} />
+              <View style={styles.statsGap} />
+              <StatCard title="Active" value={supervisionStats.active} color={colors.success} />
+              <View style={styles.statsGap} />
+              <StatCard title="Done" value={supervisionStats.done} color={colors.warning} />
+            </View>
+
+            <View style={styles.sectionHeader}>
+              <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>
+                Supervision Tasks
+              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                <ClipboardList size={15} stroke={colors.textTertiary} />
+                <Text style={[styles.seeAll, { color: colors.textTertiary }]}>
+                  {supervisionCount}
+                </Text>
+              </View>
+            </View>
+
+            {supervisionJobs === null && supervisionCount === 0 ? (
+              <View style={[styles.loadingCard, { backgroundColor: colors.surface }]}>
+                <Text style={[styles.loadingText, { color: colors.textSecondary }]}>
+                  Loading your supervision tasks…
+                </Text>
+              </View>
+            ) : supervisionCount === 0 ? (
+              <EmptyState
+                title="No Supervision Tasks Yet"
+                description="Supervision projects assigned to you from a completed LLD run will appear here."
+                action={
+                  <Button title="Refresh" variant="secondary" size="sm" onPress={loadData} />
+                }
+              />
+            ) : (
+              supervisionProjects.map((project) => (
+                <SupervisionCard
+                  key={project.id}
+                  project={project}
+                  jobs={supervisionJobsByProject[project.id] ?? []}
+                  onPress={() =>
+                    router.push({
+                      pathname: '/supervision/[projectId]',
+                      params: { projectId: project.id },
+                    })
+                  }
+                />
+              ))
+            )}
+          </>
+        )}
 
       </ScrollView>
     </SafeAreaView>
@@ -463,8 +610,69 @@ function ProjectCard({
   );
 }
 
+function SupervisionCard({
+  project,
+  jobs,
+  onPress,
+}: {
+  project: Project;
+  jobs: AssignmentJob[];
+  onPress: () => void;
+}) {
+  const colors = useThemeStore((s) => s.colors);
+  const featureTotal = jobs.reduce((sum, job) => sum + (job.feature_count || 0), 0);
+
+  return (
+    <TouchableOpacity
+      style={[styles.jobCard, { backgroundColor: colors.surface }]}
+      onPress={onPress}
+      activeOpacity={0.7}
+      accessibilityRole="button"
+      accessibilityLabel={`${project.name}, supervision, ${lldVersionLabel(project)}, status ${project.status.replace(/_/g, ' ')}`}
+    >
+      <View style={styles.jobHeader}>
+        <View style={styles.jobInfo}>
+          <Text style={[styles.jobName, { color: colors.textPrimary }]} numberOfLines={1}>
+            {project.name}
+          </Text>
+          <Text style={[styles.jobMeta, { color: colors.textSecondary }]} numberOfLines={1}>
+            {lldVersionLabel(project)} · {jobs.length} {jobs.length === 1 ? 'task' : 'tasks'} ·{' '}
+            {featureTotal} features
+          </Text>
+        </View>
+        <View style={{ alignItems: 'flex-end', gap: 6 }}>
+          <StatusBadge status={project.status} />
+          <ChevronRight size={16} stroke={colors.textTertiary} />
+        </View>
+      </View>
+      <View style={styles.jobFooter}>
+        <Text style={[styles.jobDate, { color: colors.textTertiary }]}>
+          Assigned: {jobs[0] ? new Date(jobs[0].created_at).toLocaleDateString() : '—'}
+        </Text>
+        <Text style={[styles.jobDate, { color: colors.primary, fontWeight: '700' }]}>
+          Inspect in field
+        </Text>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
 const styles = StyleSheet.create({
   safe: { flex: 1 },
+  workspaceRow: {
+    flexDirection: 'row',
+    borderRadius: Radius.full,
+    padding: 4,
+    marginBottom: Spacing.lg,
+  },
+  workspaceTab: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 36,
+    borderRadius: Radius.full,
+  },
+  workspaceText: { fontSize: 13, fontWeight: '700' },
   scroll: { padding: Spacing.lg, paddingBottom: Spacing.xxl * 2 },
   header: {
     flexDirection: 'row',
@@ -542,8 +750,10 @@ const styles = StyleSheet.create({
   },
   quickLabel: { ...Type.title, marginTop: 6 },
   quickHint: { ...Type.meta },
-  loadingCard: { borderRadius: Radius.lg, padding: Spacing.lg },
+  loadingCard: { borderRadius: Radius.lg, padding: Spacing.lg, gap: Spacing.sm },
   loadingText: { ...Type.body },
+  errorTitle: { fontSize: 16, fontWeight: '600' },
+  errorText: { ...Type.body },
   filterRow: {
     flexDirection: 'row',
     gap: 8,

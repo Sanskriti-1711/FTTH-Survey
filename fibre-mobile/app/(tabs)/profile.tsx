@@ -5,9 +5,10 @@ import {
   StyleSheet,
   ScrollView,
   TouchableOpacity,
-  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { router } from 'expo-router';
+import Constants from 'expo-constants';
 import { useThemeStore } from '../../lib/stores/theme';
 import { useAuthStore } from '../../lib/stores/auth';
 import { useOfflineStore } from '../../lib/stores/offline';
@@ -16,17 +17,15 @@ import { Card } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
 import { StatusBadge } from '../../components/ui/StatusBadge';
 import { Spacing, Radius } from '../../lib/theme/colors';
+import { confirmAction } from '../../lib/utils/dialog';
 import {
   User,
-  Settings,
   Cloud,
   CloudOff,
   Moon,
   Sun,
   LogOut,
   ChevronRight,
-  Shield,
-  HelpCircle,
 } from 'lucide-react-native';
 
 // ── Profile Screen ────────────────────────────────────────────────────────
@@ -38,15 +37,15 @@ export default function ProfileScreen() {
   const { user, logout } = useAuthStore();
   const { isOnline, lastSyncAt, isSyncing, pendingSyncCount, setSyncing, setLastSync } = useOfflineStore();
 
-  const handleLogout = () => {
-    Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Sign Out',
-        style: 'destructive',
-        onPress: () => logout(),
-      },
-    ]);
+  const handleLogout = async () => {
+    const confirmed = await confirmAction(
+      'Sign Out',
+      'Are you sure you want to sign out?',
+      'Sign Out',
+    );
+    if (!confirmed) return;
+    await logout();
+    router.replace('/(auth)/login');
   };
 
   const handleManualSync = async () => {
@@ -137,30 +136,6 @@ export default function ProfileScreen() {
               <ChevronRight size={16} stroke={colors.textTertiary} />
             </View>
           </TouchableOpacity>
-
-          <View style={[styles.divider, { backgroundColor: colors.outlineLight }]} />
-
-          <TouchableOpacity style={styles.settingRow} activeOpacity={0.6}>
-            <View style={styles.settingLeft}>
-              <Shield size={20} stroke={colors.textSecondary} />
-              <Text style={[styles.settingText, { color: colors.textPrimary }]}>Privacy</Text>
-            </View>
-            <View style={styles.settingRight}>
-              <ChevronRight size={16} stroke={colors.textTertiary} />
-            </View>
-          </TouchableOpacity>
-
-          <View style={[styles.divider, { backgroundColor: colors.outlineLight }]} />
-
-          <TouchableOpacity style={styles.settingRow} activeOpacity={0.6}>
-            <View style={styles.settingLeft}>
-              <HelpCircle size={20} stroke={colors.textSecondary} />
-              <Text style={[styles.settingText, { color: colors.textPrimary }]}>Help & Support</Text>
-            </View>
-            <View style={styles.settingRight}>
-              <ChevronRight size={16} stroke={colors.textTertiary} />
-            </View>
-          </TouchableOpacity>
         </Card>
 
         {/* Sign Out */}
@@ -173,7 +148,7 @@ export default function ProfileScreen() {
         />
 
         <Text style={[styles.version, { color: colors.textTertiary }]}>
-          Fiber360 v1.0.0
+          Fiber360 v{Constants.expoConfig?.version ?? '1.0.0'}
         </Text>
       </ScrollView>
     </SafeAreaView>
@@ -219,7 +194,7 @@ const styles = StyleSheet.create({
     gap: Spacing.sm,
   },
   syncText: { fontSize: 14, fontWeight: '500' },
-  syncLast: { fontSize: 12 },
+  syncLast: { fontSize: 13 },
   pendingText: { fontSize: 13, fontWeight: '500', marginBottom: Spacing.md },
   syncBtn: { marginTop: Spacing.sm },
   settingRow: {
@@ -240,14 +215,11 @@ const styles = StyleSheet.create({
     gap: Spacing.xs,
   },
   settingValue: { fontSize: 13 },
-  divider: {
-    height: 1,
-  },
   logoutBtn: {
     marginTop: Spacing.md,
   },
   version: {
-    fontSize: 12,
+    fontSize: 13,
     textAlign: 'center',
     marginTop: Spacing.xl,
   },

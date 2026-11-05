@@ -15,7 +15,7 @@ import { Elevation, chromeColors } from '../../theme/chrome';
 
 export type ViewMode = 'hld' | 'survey' | 'overlay';
 
-const MODES: Array<{ key: ViewMode; label: string; dot: string; fill: string; ink: string }> = [
+const MODES: { key: ViewMode; label: string; dot: string; fill: string; ink: string }[] = [
   { key: 'hld', label: 'HLD', dot: '#0D5CFF', fill: '#0D5CFF', ink: '#FFFFFF' },
   { key: 'survey', label: 'Survey', dot: '#FF8C00', fill: '#FF8C00', ink: '#1F2937' },
   { key: 'overlay', label: 'Overlay', dot: '#7C3AED', fill: '#7C3AED', ink: '#FFFFFF' },

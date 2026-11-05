@@ -319,7 +319,7 @@ const styles = StyleSheet.create({
     borderRadius: Radius.md,
     borderWidth: 1.5,
   },
-  actionText: { fontSize: 10, fontWeight: '600' },
+  actionText: { fontSize: 13, fontWeight: '600' },
   hint: {
     fontSize: 9,
     fontWeight: '500',

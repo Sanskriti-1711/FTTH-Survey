@@ -149,7 +149,8 @@ async function openFeatureFromList(layerName) {
 before(async () => {
   if (!EMAIL || !PASSWORD) return;
   browser = await chromium.launch({
-    channel: 'chrome',
+    // Local machines have branded Chrome; CI installs Playwright's Chromium.
+    channel: process.env.E2E_BROWSER_CHANNEL || 'chrome',
     headless: true,
     args: ['--enable-unsafe-swiftshader', '--use-angle=swiftshader'],
   });

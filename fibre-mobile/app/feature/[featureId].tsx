@@ -93,7 +93,7 @@ export default function FeatureDetailScreen() {
   const [toastMsg, setToastMsg] = useState('');
   const [toastType, setToastType] = useState<'success' | 'error'>('success');
   const [loading, setLoading] = useState(true);
-  const [photos, setPhotos] = useState<Array<{ id: string; url: string }>>([]);
+  const [photos, setPhotos] = useState<{ id: string; url: string }[]>([]);
 
   const { projectGeojsons } = useProjectStore();
 
@@ -161,7 +161,7 @@ export default function FeatureDetailScreen() {
       const data = surveyFeatureId
         ? await getSurveyFeaturePhotos(surveyFeatureId)
         : await getFeaturePhotos(backendFeatureId);
-      setPhotos((data?.results as Array<{ id: string; url: string }>) ?? []);
+      setPhotos((data?.results as { id: string; url: string }[]) ?? []);
     } catch {
       setPhotos([]);
     }
@@ -800,7 +800,7 @@ const styles = StyleSheet.create({
 
   // ── Card Header Hint ──────────────────────────────────────────────
   cardHeaderHint: {
-    fontSize: 11,
+    fontSize: 13,
     fontStyle: 'italic',
   },
 

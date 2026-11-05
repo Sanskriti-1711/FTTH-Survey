@@ -1,7 +1,15 @@
 import { create } from 'zustand';
 import type { User } from '../utils/types';
 import { login as apiLogin, register as apiRegister } from '../api/auth';
-import { saveTokens, clearTokens, loadStoredToken, refreshAccessToken } from '../api/client';
+import {
+  saveTokens,
+  clearTokens,
+  loadStoredToken,
+  refreshAccessToken,
+  saveStoredUser,
+  loadStoredUser,
+  clearStoredUser,
+} from '../api/client';
 
 // ── Auth Store ────────────────────────────────────────────────────────────
 
@@ -30,9 +38,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       const token = await loadStoredToken();
       if (!token) {
-        set({ isRestoring: false });
+        set({ user: null, isRestoring: false });
         return;
       }
+      const storedUser = await loadStoredUser<User>();
       // Try to validate token by refreshing it (with 3s timeout).
       // refreshAccessToken reads the stored refresh token and sends it in the body,
       // which Django's SimpleJWT endpoint requires (an empty POST body always 400s).
@@ -42,13 +51,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       const newAccess = await refreshAccessToken(controller.signal);
       clearTimeout(timeout);
       if (newAccess) {
-        set({ token: newAccess, isRestoring: false });
+        set({ token: newAccess, user: storedUser, isRestoring: false });
         return;
       }
       // Refresh failed (e.g. refresh token expired after 1 day) — but the stored
       // access token is valid for 7 days, so keep the session instead of logging
       // the user out. The next 401 will re-attempt refresh via apiFetch.
-      set({ token, isRestoring: false });
+      set({ token, user: storedUser, isRestoring: false });
     } catch {
       set({ isRestoring: false });
     }
@@ -59,6 +68,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       const data = await apiLogin(email, password);
       await saveTokens(data.access, data.refresh);
+      await saveStoredUser(data.user);
       set({
         user: data.user,
         token: data.access,
@@ -86,6 +96,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   logout: async () => {
     await clearTokens();
+    await clearStoredUser();
     set({ user: null, token: null });
   },
 

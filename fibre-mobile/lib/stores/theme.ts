@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { Colors, type ThemeColors } from '../theme/colors';
+import { getStoredTheme, getStoredThemeSync, storeTheme, type StoredTheme } from '../utils/theme-storage';
 
 // ── Theme Store ───────────────────────────────────────────────────────────
 
@@ -14,21 +15,27 @@ interface ThemeState {
   toggleTheme: () => void;
 }
 
-export const useThemeStore = create<ThemeState>((set) => ({
-  mode: 'light',
-  resolved: 'light',
-  colors: Colors.light,
+const initialTheme: StoredTheme = getStoredThemeSync() ?? 'light';
 
-  setMode: (mode) =>
+export const useThemeStore = create<ThemeState>((set) => ({
+  mode: initialTheme,
+  resolved: initialTheme,
+  colors: initialTheme === 'dark' ? Colors.dark : Colors.light,
+
+  setMode: (mode) => {
+    const resolved = mode === 'system' ? 'light' : mode;
+    storeTheme(resolved);
     set({
       mode,
-      resolved: mode === 'system' ? 'light' : mode,
+      resolved,
       colors: mode === 'dark' ? Colors.dark : Colors.light,
-    }),
+    });
+  },
 
   toggleTheme: () =>
     set((state) => {
       const next = state.resolved === 'light' ? 'dark' : 'light';
+      storeTheme(next);
       return {
         mode: next,
         resolved: next,
@@ -36,3 +43,11 @@ export const useThemeStore = create<ThemeState>((set) => ({
       };
     }),
 }));
+
+/** Native has no synchronous storage: read the saved theme once at startup. */
+export async function hydrateTheme(): Promise<void> {
+  const stored = await getStoredTheme();
+  if (stored && stored !== useThemeStore.getState().resolved) {
+    useThemeStore.getState().setMode(stored);
+  }
+}

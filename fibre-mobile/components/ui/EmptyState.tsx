@@ -50,7 +50,7 @@ export function ConnectionStatus() {
     >
       <CloudOff size={16} color={StatusColors.flagged.text} />
       <Text style={[styles.offlineText, { color: StatusColors.flagged.text }]}>
-        You're offline. Changes will sync when connected.
+        {"You're offline. Changes will sync when connected."}
       </Text>
     </View>
   );

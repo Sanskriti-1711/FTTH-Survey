@@ -710,7 +710,7 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   title: {
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: '700',
     textTransform: 'uppercase',
     letterSpacing: 0.8,
@@ -723,11 +723,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   countPillText: {
-    fontSize: 10,
+    fontSize: 13,
     fontWeight: '700',
   },
   hiddenHint: {
-    fontSize: 10,
+    fontSize: 13,
     fontWeight: '500',
   },
   emptyDot: {
@@ -736,7 +736,7 @@ const styles = StyleSheet.create({
     borderRadius: 3,
   },
   emptyText: {
-    fontSize: 11,
+    fontSize: 13,
     fontStyle: 'italic',
     paddingHorizontal: 4,
     paddingTop: 4,
@@ -779,7 +779,7 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   layerName: {
-    fontSize: 10,
+    fontSize: 13,
     fontWeight: '600',
     flex: 1,
   },
@@ -824,7 +824,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   groupLabel: {
-    fontSize: 10,
+    fontSize: 13,
     fontWeight: '700',
     textTransform: 'uppercase',
     letterSpacing: 0.5,
@@ -858,7 +858,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   showMoreText: {
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: '600',
   },
   // ── Geo Icons ─────────────────────────────────────────────────────────

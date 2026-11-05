@@ -7,6 +7,7 @@ import { useOfflineStore } from '../stores/offline';
 // ── Token Management ─────────────────────────────────────────────────────
 // SecureStore only works on native (iOS/Android). On web, fall back to localStorage.
 const TOKENS = { access: 'fibre360_access', refresh: 'fibre360_refresh' } as const;
+const USER_KEY = 'fibre360_user';
 
 const isWeb = Platform.OS === 'web';
 
@@ -58,6 +59,37 @@ export async function clearTokens(): Promise<void> {
   } else {
     await SecureStore.deleteItemAsync(TOKENS.access);
     await SecureStore.deleteItemAsync(TOKENS.refresh);
+  }
+}
+
+// The user (and therefore the role) must survive the same restart as the
+// token. Without it a refreshed SUBADMIN loses every review action because
+// `isAdmin` reads user.role.
+export async function saveStoredUser(user: unknown): Promise<void> {
+  const value = JSON.stringify(user);
+  if (isWeb) {
+    webStorage.setItem(USER_KEY, value);
+  } else {
+    await SecureStore.setItemAsync(USER_KEY, value);
+  }
+}
+
+export async function loadStoredUser<T>(): Promise<T | null> {
+  try {
+    const raw = isWeb
+      ? webStorage.getItem(USER_KEY)
+      : await SecureStore.getItemAsync(USER_KEY);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function clearStoredUser(): Promise<void> {
+  if (isWeb) {
+    webStorage.removeItem(USER_KEY);
+  } else {
+    await SecureStore.deleteItemAsync(USER_KEY);
   }
 }
 

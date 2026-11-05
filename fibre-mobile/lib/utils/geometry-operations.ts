@@ -945,10 +945,10 @@ export function extendLineString(
 export interface MapLineLayer {
   id: string;
   name?: string;
-  features: Array<{
+  features: {
     geometry?: { type?: string; coordinates?: unknown } | null;
     properties?: Record<string, unknown> | null;
-  }>;
+  }[];
 }
 
 export interface LineCornerSnap {

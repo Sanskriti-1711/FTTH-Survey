@@ -609,7 +609,7 @@ export function getLayerSchema(layerId: string): LayerSchema | null {
 
   // Fuzzy matching for real-world layer names: final_trenches, feeder_ducts,
   // distribution_cable, garden_trench, service areas/zones, etc.
-  const rules: Array<[RegExp, LayerSchema]> = [
+  const rules: [RegExp, LayerSchema][] = [
     [/trench/i, TRENCH_SCHEMA],
     [/duct/i, DUCT_SCHEMA],
     [/cable/i, CABLE_SCHEMA],

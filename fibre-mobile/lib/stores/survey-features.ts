@@ -13,6 +13,7 @@ import { create } from 'zustand';
 import * as surveyApi from '../api/survey';
 import { useProjectStore } from './project';
 import { useOfflineStore } from './offline';
+import { loadOfflineState, saveOfflineState } from '../utils/offline-storage';
 import type { TypedSurveyPayload } from '../api/survey';
 import type { SurveyFeatureData, GeoJSONFeature, LayerDisplayMode } from '../utils/types';
 
@@ -23,9 +24,9 @@ import type { SurveyFeatureData, GeoJSONFeature, LayerDisplayMode } from '../uti
 // the server are now applied to the LOCAL store with sync_status='pending' and
 // queued; they are replayed in order as soon as the device is back online.
 //
-// The queue lives for the app session (the app has no persistent key/value
-// store wired up); the local survey features themselves stay in the store, so
-// nothing is lost while the app is running.
+// The queue and the local survey features are persisted (localStorage on web,
+// a JSON file on native) and rehydrated at startup, so an app kill or reload
+// cannot discard work that has not reached the server yet.
 export type PendingSurveyEdit =
   | { kind: 'create'; localId: string; layerId: string; body: Parameters<typeof surveyApi.createSurveyFeature>[0] }
   | { kind: 'upsert'; localId: string; layerId: string; body: Parameters<typeof surveyApi.upsertSurveyFeature>[0] }
@@ -573,3 +574,39 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
     return null;
   },
 }));
+
+// ── Durable offline queue ─────────────────────────────────────────────────
+// Hydration is explicit (called from the root layout after auth restore) so a
+// persisted queue is never replayed before the access token is loaded.
+
+let offlineReady = false;
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleOfflinePersist(): void {
+  if (!offlineReady) return;
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    const { surveyFeatures, pendingEdits } = useSurveyFeaturesStore.getState();
+    void saveOfflineState({ surveyFeatures, pendingEdits });
+  }, 250);
+}
+
+useSurveyFeaturesStore.subscribe(scheduleOfflinePersist);
+
+/** Load the queue + local features saved by the previous run, then replay. */
+export async function hydrateOfflineQueue(): Promise<void> {
+  if (offlineReady) return;
+  const saved = await loadOfflineState();
+  if (saved) {
+    useSurveyFeaturesStore.setState({
+      surveyFeatures: saved.surveyFeatures as SurveyFeaturesState['surveyFeatures'],
+      pendingEdits: saved.pendingEdits as PendingSurveyEdit[],
+    });
+  }
+  offlineReady = true;
+  const pending = useSurveyFeaturesStore.getState().pendingEdits.length;
+  useOfflineStore.getState().setPendingCount(pending);
+  if (pending > 0 && useOfflineStore.getState().isOnline) {
+    void useSurveyFeaturesStore.getState().flushPendingEdits();
+  }
+}

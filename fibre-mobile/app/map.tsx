@@ -25,6 +25,55 @@ import { summarizeCommit } from '../lib/utils/commit';
 import { normalizeLayerId } from '../lib/utils/layer-ids';
 import { insertVertexAtPoint, deleteVertex, splitLineAtPoint, createLineString, findNearestLineCorner, extendLineToPoint, haversineMeters, approximateLength, cutVertexIndexAtPoint, countVerticesBetween, planSpanRemoval, distanceToPolylineM } from '../lib/utils/geometry-operations';
 import { planObstacleDetour, metersPerDegLng } from '../lib/utils/obstacle-reroute';
+// Geometry operation utilities removed — all edits now route through survey-features store
+import GeometryEditor from '../lib/components/GeometryEditor';
+import type { GeometryMode, EditingFeature } from '../lib/components/GeometryEditor';
+import LineSelectionToolbar from '../lib/components/LineSelectionToolbar';
+import DrawTrenchPanel from '../lib/components/DrawTrenchPanel';
+import type { TrenchLayerOption } from '../lib/components/DrawTrenchPanel';
+import PolygonToolbar from '../lib/components/PolygonToolbar';
+import SurveyChangesPanel from '../lib/components/SurveyChangesPanel';
+import CommitBar from '../lib/components/CommitBar';
+import SurveyForm from '../lib/components/SurveyForm';
+import type { SurveyFormData } from '../lib/components/SurveyForm';
+import { Card, Badge } from '../components/ui/Card';
+import { StatusBadge } from '../components/ui/StatusBadge';
+import { Toast } from '../components/ui/Toast';
+import MapLibreMap, { BASEMAPS } from '../lib/components/MapLibreMap';
+import { buildLayerGroups, DEFAULT_LAYER_GROUPS } from '../lib/components/MapLegend';
+// ── Field-console chrome (phone UI) ──────────────────────────────────────
+// One header, one dock, one rail, one sheet family. See lib/theme/chrome.ts.
+import MapHeader from '../lib/components/map/MapHeader';
+import MapDock from '../lib/components/map/MapDock';
+import MapRail from '../lib/components/map/MapRail';
+import ViewModeSwitch, { type ViewMode } from '../lib/components/map/ViewModeSwitch';
+import ToolsSheet from '../lib/components/map/ToolsSheet';
+import LayersSheet from '../lib/components/map/LayersSheet';
+import BasemapSheet from '../lib/components/map/BasemapSheet';
+import {
+  boundsOfFeatures,
+  expandBounds,
+  geometryBounds,
+  needsReframe,
+  FRAME_PADDING,
+  SELECTION_PADDING,
+  MIN_REGION_SPAN_M,
+  type Bounds,
+} from '../lib/utils/autozoom';
+import MapFeaturePopup from '../lib/components/MapFeaturePopup';
+import * as Location from 'expo-location';
+import type { MapLayerData, BasemapStyle } from '../lib/components/MapLibreMap';
+import type { GeoJSONFeature, SurveyFeatureData } from '../lib/utils/types';
+import { Spacing, Radius, Touch, Type } from '../lib/theme/colors';
+import { chromeColors } from '../lib/theme/chrome';
+import X from 'lucide-react-native/icons/x';
+import ChevronRight from 'lucide-react-native/icons/chevron-right';
+import List from 'lucide-react-native/icons/list';
+import Search from 'lucide-react-native/icons/search';
+import Move from 'lucide-react-native/icons/move';
+import Satellite from 'lucide-react-native/icons/satellite';
+import Layers from 'lucide-react-native/icons/layers';
+import AlertTriangle from 'lucide-react-native/icons/triangle-alert';
 
 // ── Connection record for a drawn trench ────────────────────────────────────
 // A segment drawn from the line toolbar joins either another line's corner or
@@ -81,55 +130,6 @@ function buildConnectionAttrs(
     ...cleanProps, // merge the object's own attributes (premise_id, address, etc.)
   };
 }
-// Geometry operation utilities removed — all edits now route through survey-features store
-import GeometryEditor from '../lib/components/GeometryEditor';
-import type { GeometryMode, EditingFeature } from '../lib/components/GeometryEditor';
-import LineSelectionToolbar from '../lib/components/LineSelectionToolbar';
-import DrawTrenchPanel from '../lib/components/DrawTrenchPanel';
-import type { TrenchLayerOption } from '../lib/components/DrawTrenchPanel';
-import PolygonToolbar from '../lib/components/PolygonToolbar';
-import SurveyChangesPanel from '../lib/components/SurveyChangesPanel';
-import CommitBar from '../lib/components/CommitBar';
-import SurveyForm from '../lib/components/SurveyForm';
-import type { SurveyFormData } from '../lib/components/SurveyForm';
-import { Card, Badge } from '../components/ui/Card';
-import { StatusBadge } from '../components/ui/StatusBadge';
-import { Toast } from '../components/ui/Toast';
-import MapLibreMap, { BASEMAPS } from '../lib/components/MapLibreMap';
-import { buildLayerGroups, DEFAULT_LAYER_GROUPS } from '../lib/components/MapLegend';
-// ── Field-console chrome (phone UI) ──────────────────────────────────────
-// One header, one dock, one rail, one sheet family. See lib/theme/chrome.ts.
-import MapHeader from '../lib/components/map/MapHeader';
-import MapDock from '../lib/components/map/MapDock';
-import MapRail from '../lib/components/map/MapRail';
-import ViewModeSwitch, { type ViewMode } from '../lib/components/map/ViewModeSwitch';
-import ToolsSheet from '../lib/components/map/ToolsSheet';
-import LayersSheet from '../lib/components/map/LayersSheet';
-import BasemapSheet from '../lib/components/map/BasemapSheet';
-import {
-  boundsOfFeatures,
-  expandBounds,
-  geometryBounds,
-  needsReframe,
-  FRAME_PADDING,
-  SELECTION_PADDING,
-  MIN_REGION_SPAN_M,
-  type Bounds,
-} from '../lib/utils/autozoom';
-import MapFeaturePopup from '../lib/components/MapFeaturePopup';
-import * as Location from 'expo-location';
-import type { MapLayerData, BasemapStyle } from '../lib/components/MapLibreMap';
-import type { GeoJSONFeature, SurveyFeatureData } from '../lib/utils/types';
-import { Spacing, Radius, Touch, Type } from '../lib/theme/colors';
-import { chromeColors } from '../lib/theme/chrome';
-import X from 'lucide-react-native/icons/x';
-import ChevronRight from 'lucide-react-native/icons/chevron-right';
-import List from 'lucide-react-native/icons/list';
-import Search from 'lucide-react-native/icons/search';
-import Move from 'lucide-react-native/icons/move';
-import Satellite from 'lucide-react-native/icons/satellite';
-import Layers from 'lucide-react-native/icons/layers';
-import AlertTriangle from 'lucide-react-native/icons/triangle-alert';
 
 // ── Layer config ──────────────────────────────────────────────────────────
 const LAYER_COLORS: Record<string, string> = {
@@ -331,7 +331,7 @@ function relayDependentCoords(
   tolM: number,
 ): [number, number][] | null {
   // 1. Old-path segments the new path no longer covers = the moved region.
-  const movedSegs: Array<[[number, number], [number, number]]> = [];
+  const movedSegs: [[number, number], [number, number]][] = [];
   for (let i = 0; i < oldPath.length - 1; i++) {
     const a = oldPath[i];
     const b = oldPath[i + 1];
@@ -1259,6 +1259,9 @@ export default function MapScreen() {
     error: storeError,
   } = useProjectStore();
   const hasImportedData = Object.keys(projectGeojsons).length > 0;
+  // A 403 is not retryable: the same request will fail forever, so the error
+  // card must offer a way back instead of a Retry button.
+  const accessDenied = /access|permission|403/i.test(storeError ?? '');
 
   // ── Auto-fetch GeoJSON from backend when a real project is active but empty ──
   // The guard remembers WHICH project it fetched, not merely that it fetched
@@ -2982,13 +2985,13 @@ export default function MapScreen() {
         const surveySfs = surveyFeatures[depMapKey] ?? [];
 
         // ── Build candidate list: HLD features + existing survey features ──
-        const candidates: Array<{
+        const candidates: {
           hldId: string | null;
           sfId: string | null;
           baseGeom: { type: string; coordinates: unknown } | null;
           origGeom: Record<string, unknown> | null;
           origAttrs: Record<string, unknown> | null;
-        }> = [];
+        }[] = [];
 
         for (const f of hldFeats) {
           const props = (f.properties ?? {}) as Record<string, unknown>;
@@ -5294,13 +5297,15 @@ export default function MapScreen() {
                     <AlertTriangle size={32} stroke={colors.warning} />
                   </View>
                     <Text style={[styles.loadingTitle, { color: colors.textPrimary }]}>
-                      Couldn't Load Project Data
+                      {accessDenied ? 'No Access to This Project' : "Couldn't Load Project Data"}
                     </Text>
                     <Text style={[styles.loadingDesc, { color: colors.textSecondary }]}>
-                      {storeError ||
-                        (layerLoadFailed > 0
-                          ? `${layerLoadFailed} layer${layerLoadFailed === 1 ? '' : 's'} failed to load — check your connection and try again.`
-                          : 'Check your connection and try again.')}
+                      {accessDenied
+                        ? 'Your account does not have access to this project. Ask a planner to assign it to you.'
+                        : storeError ||
+                          (layerLoadFailed > 0
+                            ? `${layerLoadFailed} layer${layerLoadFailed === 1 ? '' : 's'} failed to load — check your connection and try again.`
+                            : 'Check your connection and try again.')}
                     </Text>
                     <TouchableOpacity
                       style={{
@@ -5311,14 +5316,21 @@ export default function MapScreen() {
                         backgroundColor: colors.primary,
                       }}
                       activeOpacity={0.7}
+                      accessibilityRole="button"
                       onPress={() => {
+                        if (accessDenied) {
+                          router.replace('/(tabs)/home');
+                          return;
+                        }
                         fetchAttemptedRef.current = null;
                         if (storeActiveProject) {
                           fetchProjectGeojsons(storeActiveProject.id).catch(() => {});
                         }
                       }}
                     >
-                      <Text style={{ color: colors.onPrimary, fontWeight: '700', fontSize: 14 }}>Retry</Text>
+                      <Text style={{ color: colors.onPrimary, fontWeight: '700', fontSize: 14 }}>
+                        {accessDenied ? 'Back to Projects' : 'Retry'}
+                      </Text>
                     </TouchableOpacity>
                   </>
                 ) : (

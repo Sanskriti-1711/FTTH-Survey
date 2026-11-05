@@ -322,7 +322,7 @@ const styles = StyleSheet.create({
     gap: 1,
   },
   headerTitle: {
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: '700',
   },
   headerSubtitle: {

@@ -1095,7 +1095,7 @@ function NativeMapView({
 
   // ── Vertex screen positions (pre-projected for touch-down arming) ──
   // Ref so the PanResponder (created once) always sees fresh positions.
-  const vertexScreenRef = useRef<Array<{ x: number; y: number; coords: [number, number]; idx: number }> | null>(null);
+  const vertexScreenRef = useRef<{ x: number; y: number; coords: [number, number]; idx: number }[] | null>(null);
   const vertexScreenVersionRef = useRef(0);
 
   // ── Vertex PanResponder — captures vertex drags at TOUCH-DOWN ─────────
@@ -1341,7 +1341,7 @@ function NativeMapView({
   } | null>(null);
 
   /** Ray-cast point-in-polygon test on projected screen points. */
-  const pointInRing = useCallback((px: number, py: number, ring: Array<{ x: number; y: number }>): boolean => {
+  const pointInRing = useCallback((px: number, py: number, ring: { x: number; y: number }[]): boolean => {
     let inside = false;
     for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
       const xi = ring[i].x, yi = ring[i].y;
@@ -1711,7 +1711,7 @@ function NativeMapView({
     const projectAll = async () => {
       const map = mapRef.current;
       if (!map || typeof map.project !== 'function') return;
-      const results: Array<{ x: number; y: number; coords: [number, number]; idx: number }> = [];
+      const results: { x: number; y: number; coords: [number, number]; idx: number }[] = [];
       for (let i = 0; i < eh.coords.length; i++) {
         try {
           const [lng, lat] = eh.coords[i];
@@ -2682,6 +2682,12 @@ function WebMapView({
           } catch {}
         });
         mapRef.current = map;
+        // Test-only handle: the gesture E2E spec projects GeoJSON coordinates
+        // to screen pixels through the live map. Absent unless the web export
+        // was built with EXPO_PUBLIC_E2E_MAP_HOOK=1.
+        if (process.env.EXPO_PUBLIC_E2E_MAP_HOOK === '1') {
+          (window as any).__fiber360Map = map;
+        }
         setLoadProgress(0.7);
 
         // Listen for style load errors
@@ -2730,6 +2736,7 @@ function WebMapView({
     return () => {
       cancelled = true;
       if (map) {
+        if ((window as any).__fiber360Map === map) delete (window as any).__fiber360Map;
         try { map.remove(); } catch {}
         mapRef.current = null;
       }
@@ -2880,11 +2887,21 @@ function WebMapView({
     }
   }, [userLocation, status]);
 
+  // Latest click callbacks in refs. The map is created once; a tap that
+  // arrives after a tool is armed must see that tool's state, not the state
+  // captured when the listener was first attached.
+  const onFeatureClickRef = useRef(onFeatureClick);
+  const onFeatureCandidatesRef = useRef(onFeatureCandidates);
+  const onEmptyAreaClickRef = useRef(onEmptyAreaClick);
+  onFeatureClickRef.current = onFeatureClick;
+  onFeatureCandidatesRef.current = onFeatureCandidates;
+  onEmptyAreaClickRef.current = onEmptyAreaClick;
+
   // ── Click handler — fires onFeatureClick if a feature is hit,
   //     otherwise fires onEmptyAreaClick (if provided) ───────────────────
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !onFeatureClick) return;
+    if (!map || !onFeatureClickRef.current) return;
 
     const handleClick = (e: any) => {
       const features = map.queryRenderedFeatures(e.point);
@@ -2926,17 +2943,17 @@ function WebMapView({
           const fid = props._id as string | undefined;
           const lid = props._layer_id as string | undefined;
           if (fid && lid) {
-            if (onFeatureCandidates) {
+            if (onFeatureCandidatesRef.current) {
               const stack = tapCandidates(paddedTargets);
-              if (stack.length > 1) onFeatureCandidates(stack, tapLngLat, screenPt);
+              if (stack.length > 1) onFeatureCandidatesRef.current(stack, tapLngLat, screenPt);
             }
-            onFeatureClick(fid, lid, tapLngLat, screenPt, mpp);
+            onFeatureClickRef.current?.(fid, lid, tapLngLat, screenPt, mpp);
             return;
           }
         }
         // No custom feature at click point — fire empty-area click for draw/geometry modes
-        if (onEmptyAreaClick) {
-          onEmptyAreaClick(e.lngLat.lng, e.lngLat.lat, screenPt, mpp);
+        if (onEmptyAreaClickRef.current) {
+          onEmptyAreaClickRef.current(e.lngLat.lng, e.lngLat.lat, screenPt, mpp);
         }
         return;
       }
@@ -2949,15 +2966,15 @@ function WebMapView({
 
       if (!hasOurFeature) {
         // No custom feature at click point — fire empty-area click for draw/geometry modes
-        if (onEmptyAreaClick) {
-          onEmptyAreaClick(e.lngLat.lng, e.lngLat.lat, screenPt, mpp);
+        if (onEmptyAreaClickRef.current) {
+          onEmptyAreaClickRef.current(e.lngLat.lng, e.lngLat.lat, screenPt, mpp);
         }
         return;
       }
 
-      if (onFeatureCandidates) {
+      if (onFeatureCandidatesRef.current) {
         const stack = tapCandidates(nonUserFeatures);
-        if (stack.length > 1) onFeatureCandidates(stack, tapLngLat, screenPt);
+        if (stack.length > 1) onFeatureCandidatesRef.current(stack, tapLngLat, screenPt);
       }
 
       // Point beating line / top-most first — see pickTappedFeature.
@@ -2966,12 +2983,12 @@ function WebMapView({
       if (!props) return;
       const fid = props._id as string | undefined;
       const lid = props._layer_id as string | undefined;
-      if (fid && lid) onFeatureClick(fid, lid, tapLngLat, screenPt, mpp);
+      if (fid && lid) onFeatureClickRef.current?.(fid, lid, tapLngLat, screenPt, mpp);
     };
 
     map.on('click', handleClick);
     return () => { try { map.off('click', handleClick); } catch {} };
-  }, [status, onFeatureClick, onFeatureCandidates, onEmptyAreaClick]);
+  }, [status]);
 
   // ── Hover cursor ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -4018,7 +4035,7 @@ const styles = StyleSheet.create({
     borderRadius: 2,
   },
   progressText: {
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: '600',
     color: '#6B7280',
     minWidth: 32,
@@ -4139,7 +4156,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  emptyBadgeText: { fontSize: 11, fontWeight: '700', color: '#FFFFFF' },
+  emptyBadgeText: { fontSize: 13, fontWeight: '700', color: '#FFFFFF' },
   // ── Drag Distance Overlay ────────────────────────────────────────────
   dragDistanceOverlay: {
     position: 'absolute',
