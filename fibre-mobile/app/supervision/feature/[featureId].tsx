@@ -10,12 +10,22 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
-import { ArrowLeft } from 'lucide-react-native';
+import { AlertTriangle, ArrowLeft, CheckCircle, Ruler, Send } from 'lucide-react-native';
 import { StatusBadge } from '../../../components/ui/StatusBadge';
 import { Button } from '../../../components/ui/Button';
-import { getFeaturePhotos, type FeaturePhotoData } from '../../../lib/api/features';
+import { Toast } from '../../../components/ui/Toast';
+import MeasurementEntrySheet, {
+  entryFields,
+  type SavedMeasurements,
+} from '../../../lib/components/MeasurementEntrySheet';
+import {
+  getFeaturePhotos,
+  submitFeatures,
+  type FeaturePhotoData,
+} from '../../../lib/api/features';
 import { displayValue, getSupervisionFeature, measurementValue } from '../../../lib/api/supervision';
 import type { Feature } from '../../../lib/utils/types';
+import { useAuthStore } from '../../../lib/stores/auth';
 import { useThemeStore } from '../../../lib/stores/theme';
 import { Radius, Spacing, Type } from '../../../lib/theme/colors';
 
@@ -49,17 +59,31 @@ function buildRows(feature: Feature): PlannedRow[] {
   return rows;
 }
 
+/** Trim float noise from the deviation payload (0.15000000000000013 → 0.15). */
+function formatNumber(value: number): string {
+  return Number(value.toFixed(3)).toString();
+}
+
 export default function SupervisionFeatureScreen() {
   const params = useLocalSearchParams<{ featureId?: string; projectId?: string }>();
   const featureId = String(params.featureId ?? '');
   const projectId = String(params.projectId ?? '');
   const colors = useThemeStore((s) => s.colors);
+  const { user } = useAuthStore();
 
   const [feature, setFeature] = useState<Feature | null>(null);
   const [layerName, setLayerName] = useState('');
   const [photos, setPhotos] = useState<FeaturePhotoData[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [entryOpen, setEntryOpen] = useState(false);
+  const [toast, setToast] = useState<{
+    visible: boolean;
+    message: string;
+    type: 'success' | 'error';
+  }>({ visible: false, message: '', type: 'success' });
+  const [confirmingSubmit, setConfirmingSubmit] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
 
   const load = useCallback(async () => {
     if (!projectId || !featureId) return;
@@ -88,6 +112,67 @@ export default function SupervisionFeatureScreen() {
 
   const rows = feature ? buildRows(feature) : [];
   const measuredCount = rows.filter((row) => row.asBuilt).length;
+  const canRecord = entryFields(feature).length > 0;
+
+  // The backend compares readings against the plan and the layer's tolerance;
+  // the app only renders its verdict, so the rule cannot drift between clients.
+  const deviation = feature?.deviation ?? null;
+  const deviationFields = deviation?.fields ?? [];
+  const deviationByKey = new Map(deviationFields.map((field) => [field.key, field]));
+  const outsideCount = deviationFields.filter((field) => !field.within_tolerance).length;
+  const hasDeviation = deviationFields.length > 0;
+
+  // Submit accepts assigned/redo work; supervision features arrive pending and
+  // only become submittable once there is something to review.
+  const canSubmit =
+    feature?.status === 'pending' ||
+    feature?.status === 'assigned' ||
+    feature?.status === 'redo';
+
+  // Patch the loaded feature instead of re-fetching: a save is a local edit,
+  // and bouncing the whole screen through its spinner loses scroll position.
+  const handleSaved = async (saved: SavedMeasurements) => {
+    setFeature((prev) =>
+      prev
+        ? {
+            ...prev,
+            field_measurements: saved.field_measurements,
+            comparison_notes: saved.comparison_notes,
+          }
+        : prev,
+    );
+    setEntryOpen(false);
+    setToast({ visible: true, message: 'Measurements saved', type: 'success' });
+
+    // Deviation is computed server-side from the new readings, so re-read it
+    // quietly. A failure keeps the patched feature; badges stay one save behind
+    // rather than the screen falling back to an error state.
+    try {
+      const data = await getSupervisionFeature(projectId, featureId);
+      setFeature(data.feature);
+    } catch {
+      // ignore — the readings themselves did save
+    }
+  };
+
+  const handleSubmit = async () => {
+    if (!feature || !user || submitting) return;
+    setSubmitting(true);
+    try {
+      await submitFeatures([feature.id], user.id);
+      setFeature((prev) => (prev ? { ...prev, status: 'under_review' } : prev));
+      setConfirmingSubmit(false);
+      setToast({ visible: true, message: 'Feature submitted for review', type: 'success' });
+    } catch (err) {
+      setToast({
+        visible: true,
+        message: err instanceof Error ? err.message : 'Submit failed — try again',
+        type: 'error',
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]}>
@@ -132,11 +217,42 @@ export default function SupervisionFeatureScreen() {
       ) : (
         <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
           <View style={[styles.card, { backgroundColor: colors.surface }]}>
-            <Text style={[styles.cardTitle, { color: colors.textPrimary }]}>
-              Planned vs as-built
-            </Text>
+            <View style={styles.cardTitleRow}>
+              <Text style={[styles.cardTitle, { color: colors.textPrimary }]}>
+                Planned vs as-built
+              </Text>
+              {hasDeviation && (
+                <View
+                  style={[
+                    styles.summaryPill,
+                    {
+                      backgroundColor:
+                        (outsideCount > 0 ? colors.warning : colors.success) + '16',
+                    },
+                  ]}
+                  accessible
+                  accessibilityLabel={
+                    outsideCount > 0
+                      ? `${outsideCount} reading${outsideCount === 1 ? '' : 's'} outside tolerance`
+                      : 'All readings within tolerance'
+                  }
+                >
+                  <Text
+                    style={[
+                      styles.summaryPillText,
+                      { color: outsideCount > 0 ? colors.warning : colors.success },
+                    ]}
+                  >
+                    {outsideCount > 0
+                      ? `${outsideCount} outside tolerance`
+                      : 'All within tolerance'}
+                  </Text>
+                </View>
+              )}
+            </View>
             <Text style={[styles.cardHint, { color: colors.textSecondary }]}>
               {measuredCount} of {rows.length} readings recorded
+              {deviation ? ` · tolerance ±${formatNumber(deviation.tolerance)}` : ''}
             </Text>
             {rows.length === 0 ? (
               <Text style={[styles.muted, { color: colors.textSecondary }]}>
@@ -144,25 +260,58 @@ export default function SupervisionFeatureScreen() {
               </Text>
             ) : (
               rows.map((row) => {
+                const dev = deviationByKey.get(row.key);
                 const changed = row.planned && row.asBuilt && row.planned !== row.asBuilt;
+                const badgeColor = dev
+                  ? dev.within_tolerance
+                    ? colors.success
+                    : colors.warning
+                  : null;
                 return (
                   <View key={row.key} style={styles.row}>
                     <Text style={[styles.key, { color: colors.textSecondary }]} numberOfLines={2}>
                       {row.label}
                     </Text>
-                    <View style={styles.values}>
-                      <Text style={[styles.planned, { color: colors.textPrimary }]} numberOfLines={1}>
-                        {row.planned ?? '—'}
-                      </Text>
-                      <Text
-                        style={[
-                          styles.asBuilt,
-                          { color: changed ? colors.warning : colors.textPrimary },
-                        ]}
-                        numberOfLines={1}
-                      >
-                        {row.asBuilt ?? '—'}
-                      </Text>
+                    <View style={styles.rowRight}>
+                      <View style={styles.values}>
+                        <Text
+                          style={[styles.planned, { color: colors.textPrimary }]}
+                          numberOfLines={1}
+                        >
+                          {row.planned ?? '—'}
+                        </Text>
+                        <Text
+                          style={[
+                            styles.asBuilt,
+                            { color: !dev && changed ? colors.warning : colors.textPrimary },
+                          ]}
+                          numberOfLines={1}
+                        >
+                          {row.asBuilt ?? '—'}
+                        </Text>
+                      </View>
+                      {dev && badgeColor ? (
+                        <View
+                          style={[styles.deviationBadge, { backgroundColor: badgeColor + '16' }]}
+                          accessible
+                          accessibilityLabel={`${row.label}: ${
+                            dev.within_tolerance ? 'within' : 'outside'
+                          } tolerance, planned ${formatNumber(dev.planned)}${
+                            dev.unit ? ` ${dev.unit}` : ''
+                          }, as built ${formatNumber(dev.as_built)}${
+                            dev.unit ? ` ${dev.unit}` : ''
+                          }, difference ${formatNumber(dev.delta)}`}
+                        >
+                          {dev.within_tolerance ? (
+                            <CheckCircle size={11} stroke={badgeColor} />
+                          ) : (
+                            <AlertTriangle size={11} stroke={badgeColor} />
+                          )}
+                          <Text style={[styles.deviationText, { color: badgeColor }]}>
+                            {dev.within_tolerance ? 'within tolerance' : 'outside tolerance'}
+                          </Text>
+                        </View>
+                      ) : null}
                     </View>
                   </View>
                 );
@@ -174,6 +323,70 @@ export default function SupervisionFeatureScreen() {
                 <Text style={[styles.legend, { color: colors.textTertiary }]}>as-built</Text>
               </View>
             )}
+            {canRecord && (
+              <Button
+                title="Record measurements"
+                variant="primary"
+                size="sm"
+                icon={<Ruler size={16} stroke={colors.onPrimary} />}
+                onPress={() => setEntryOpen(true)}
+                style={{ marginTop: Spacing.md }}
+              />
+            )}
+
+            {feature.status === 'under_review' ? (
+              <Text style={[styles.submitNote, { color: colors.textSecondary }]}>
+                Submitted — waiting for the planner&apos;s review.
+              </Text>
+            ) : canSubmit ? (
+              confirmingSubmit ? (
+                <View
+                  style={[
+                    styles.confirmBox,
+                    { backgroundColor: colors.background, borderColor: colors.outline },
+                  ]}
+                >
+                  <Text style={[styles.confirmText, { color: colors.textPrimary }]}>
+                    Submit this feature for review? It leaves your queue and goes to the
+                    planner.
+                  </Text>
+                  <View style={styles.confirmRow}>
+                    <Button
+                      title="Keep editing"
+                      variant="tertiary"
+                      fullWidth={false}
+                      style={styles.confirmBtn}
+                      onPress={() => setConfirmingSubmit(false)}
+                      disabled={submitting}
+                    />
+                    <Button
+                      title="Yes, submit"
+                      fullWidth={false}
+                      style={styles.confirmBtn}
+                      loading={submitting}
+                      onPress={handleSubmit}
+                    />
+                  </View>
+                </View>
+              ) : (
+                <>
+                  <Button
+                    title="Submit for review"
+                    variant="secondary"
+                    size="sm"
+                    icon={<Send size={16} stroke={colors.primary} />}
+                    disabled={measuredCount === 0}
+                    onPress={() => setConfirmingSubmit(true)}
+                    style={{ marginTop: Spacing.sm }}
+                  />
+                  {measuredCount === 0 && (
+                    <Text style={[styles.submitHint, { color: colors.textTertiary }]}>
+                      Record at least one reading before submitting.
+                    </Text>
+                  )}
+                </>
+              )
+            ) : null}
           </View>
 
           {feature.comparison_notes ? (
@@ -215,6 +428,22 @@ export default function SupervisionFeatureScreen() {
           </Text>
         </ScrollView>
       )}
+
+      {feature ? (
+        <MeasurementEntrySheet
+          visible={entryOpen}
+          feature={feature}
+          onClose={() => setEntryOpen(false)}
+          onSaved={handleSaved}
+        />
+      ) : null}
+
+      <Toast
+        visible={toast.visible}
+        message={toast.message}
+        type={toast.type}
+        onDismiss={() => setToast((prev) => ({ ...prev, visible: false }))}
+      />
     </SafeAreaView>
   );
 }
@@ -234,6 +463,14 @@ const styles = StyleSheet.create({
   scroll: { padding: Spacing.md, paddingBottom: Spacing.xxl, gap: Spacing.md },
   card: { borderRadius: Radius.lg, padding: Spacing.lg },
   cardTitle: { fontSize: 15, fontWeight: '700' },
+  cardTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.sm,
+  },
+  summaryPill: { borderRadius: Radius.full, paddingHorizontal: Spacing.sm, paddingVertical: 2 },
+  summaryPillText: { fontSize: 11, fontWeight: '700' },
   cardHint: { ...Type.meta, marginTop: 2, marginBottom: Spacing.sm },
   muted: { ...Type.body, marginTop: Spacing.sm },
   row: {
@@ -246,9 +483,31 @@ const styles = StyleSheet.create({
     borderBottomColor: '#00000012',
   },
   key: { ...Type.meta, flex: 1.2 },
-  values: { flex: 1, flexDirection: 'row', gap: Spacing.md, justifyContent: 'flex-end' },
+  rowRight: { flex: 1, alignItems: 'flex-end', gap: 4 },
+  values: { flexDirection: 'row', gap: Spacing.md, justifyContent: 'flex-end' },
   planned: { fontSize: 13, fontWeight: '600', textAlign: 'right' },
   asBuilt: { fontSize: 13, fontWeight: '700', textAlign: 'right' },
+  deviationBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    borderRadius: Radius.full,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  deviationText: { fontSize: 10, fontWeight: '700' },
+  submitNote: { ...Type.meta, marginTop: Spacing.md },
+  submitHint: { ...Type.meta, marginTop: 6, textAlign: 'center' },
+  confirmBox: {
+    borderWidth: 1,
+    borderRadius: Radius.md,
+    padding: Spacing.md,
+    marginTop: Spacing.md,
+    gap: Spacing.sm,
+  },
+  confirmText: { ...Type.body },
+  confirmRow: { flexDirection: 'row', gap: Spacing.sm },
+  confirmBtn: { flex: 1 },
   legendRow: {
     flexDirection: 'row',
     justifyContent: 'flex-end',

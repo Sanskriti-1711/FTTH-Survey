@@ -42,6 +42,26 @@ export interface Project {
   last_activity_at: string | null;
 }
 
+/** One planned-vs-as-built comparison, computed by the backend. */
+export interface FeatureDeviationField {
+  key: string;
+  planned: number;
+  as_built: number;
+  /** planned − as_built */
+  delta: number;
+  unit: string;
+  within_tolerance: boolean;
+}
+
+/** The layer's tolerance verdict for a feature's recorded readings. */
+export interface FeatureDeviation {
+  tolerance: number;
+  measured: number;
+  outside_tolerance: number;
+  has_deviation: boolean;
+  fields: FeatureDeviationField[];
+}
+
 export interface Feature {
   id: string;
   layer_name: string;
@@ -52,6 +72,8 @@ export interface Feature {
   field_schema: FieldSchemaField[] | null;
   field_measurements: Record<string, unknown> | null;
   comparison_notes: string;
+  /** Present on the feature-detail endpoint; absent from list payloads. */
+  deviation?: FeatureDeviation | null;
   status: 'pending' | 'assigned' | 'under_review' | 'approved' | 'redo';
   photo_url: string | null;
   /** UUID of the user who last edited this feature */
