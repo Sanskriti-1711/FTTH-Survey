@@ -16,7 +16,7 @@ import { StatCard } from '../../components/ui/Card';
 import { StatusBadge } from '../../components/ui/StatusBadge';
 import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
-import { Spacing, Radius } from '../../lib/theme/colors';
+import { Spacing, Radius, StatusColors, type StatusKey } from '../../lib/theme/colors';
 import { ClipboardList, ChevronRight } from 'lucide-react-native';
 import type { Project, AssignmentJob } from '../../lib/utils/types';
 import { getJobsForEngineer } from '../../lib/api/assignments';
@@ -33,6 +33,7 @@ export default function SupervisionScreen() {
   const { projects, fetchProjects, error: projectsError } = useProjectStore();
   const [jobs, setJobs] = useState<AssignmentJob[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<Project['status'] | 'all'>('all');
 
   const loadData = useCallback(async () => {
     await Promise.all([
@@ -70,6 +71,23 @@ export default function SupervisionScreen() {
     }
     return map;
   }, [jobs]);
+
+  // Same workflow chips as the Survey tab: engineers filter by task status.
+  const filterChips: { key: Project['status'] | 'all'; label: string }[] = [
+    { key: 'all', label: 'All' },
+    { key: 'assigned', label: 'Assigned' },
+    { key: 'active', label: 'Active' },
+    { key: 'submitted', label: 'Submitted' },
+    { key: 'redo', label: 'Redo' },
+  ];
+
+  const filteredProjects =
+    statusFilter === 'all'
+      ? supervisionProjects
+      : supervisionProjects.filter((p) => p.status === statusFilter);
+
+  const activeFilterLabel =
+    filterChips.find((c) => c.key === statusFilter)?.label ?? 'matching';
 
   const stats = {
     assigned: supervisionProjects.filter((p) => p.status === 'assigned').length,
@@ -114,6 +132,57 @@ export default function SupervisionScreen() {
           </View>
         </View>
 
+        {count > 0 && (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.filterRow}
+            style={{ marginBottom: Spacing.md }}
+          >
+            {filterChips.map((chip) => {
+              const isActive = statusFilter === chip.key;
+              const chipCount =
+                chip.key === 'all'
+                  ? count
+                  : supervisionProjects.filter((p) => p.status === chip.key).length;
+              const chipColor =
+                chip.key === 'all'
+                  ? colors.primary
+                  : (StatusColors[chip.key as StatusKey]?.dot ?? colors.primary);
+              const isEmpty = chip.key !== 'all' && chipCount === 0;
+              return (
+                <TouchableOpacity
+                  key={chip.key}
+                  onPress={() => setStatusFilter(chip.key)}
+                  disabled={isEmpty}
+                  style={[
+                    styles.filterChip,
+                    {
+                      borderColor: isActive ? chipColor : colors.textTertiary + '55',
+                      backgroundColor: isActive ? chipColor : 'transparent',
+                      opacity: isEmpty ? 0.45 : 1,
+                    },
+                  ]}
+                  activeOpacity={0.7}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Show ${chip.label} supervision tasks, ${chipCount}`}
+                  accessibilityState={{ selected: isActive, disabled: isEmpty }}
+                >
+                  <Text
+                    style={[
+                      styles.filterChipText,
+                      { color: isActive ? colors.onPrimary : colors.textSecondary },
+                    ]}
+                  >
+                    {chip.label}
+                    {chipCount > 0 ? ` (${chipCount})` : ''}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        )}
+
         {projectsError && projects.length === 0 ? (
           <View style={[styles.loadingCard, { backgroundColor: colors.surface }]}>
             <Text style={[styles.errorTitle, { color: colors.textPrimary }]}>
@@ -136,8 +205,21 @@ export default function SupervisionScreen() {
             description="Supervision projects assigned to you from a completed LLD run will appear here."
             action={<Button title="Refresh" variant="secondary" size="sm" onPress={loadData} />}
           />
+        ) : filteredProjects.length === 0 ? (
+          <EmptyState
+            title={`No ${activeFilterLabel} Supervision Tasks`}
+            description="Nothing matches this status filter yet"
+            action={
+              <Button
+                title="Show All Tasks"
+                variant="secondary"
+                size="sm"
+                onPress={() => setStatusFilter('all')}
+              />
+            }
+          />
         ) : (
-          supervisionProjects.map((project) => (
+          filteredProjects.map((project) => (
             <SupervisionCard
               key={project.id}
               project={project}
@@ -223,6 +305,18 @@ const styles = StyleSheet.create({
   sectionTitle: { fontSize: 17, fontWeight: '600' },
   count: { fontSize: 14, fontWeight: '500' },
   loadingCard: { borderRadius: Radius.lg, padding: Spacing.lg, gap: Spacing.sm },
+  filterRow: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingVertical: 2,
+  },
+  filterChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: Radius.full,
+    borderWidth: 1.5,
+  },
+  filterChipText: { fontSize: 13, fontWeight: '600' },
   loadingText: { fontSize: 15, lineHeight: 21 },
   errorTitle: { fontSize: 16, fontWeight: '600' },
   jobCard: {
