@@ -18,6 +18,8 @@ import { useProjectStore } from '../lib/stores/project';
 import { useSurveyStore } from '../lib/stores/survey';
 import { useSurveyFeaturesStore, SURVEY_COLOR } from '../lib/stores/survey-features';
 import { useOfflineStore } from '../lib/stores/offline';
+import { getAssignmentPolygons } from '../lib/api/projects';
+import type { AssignmentPolygon } from '../lib/utils/types';
 import { recalculateDependentProperties } from '../lib/utils/spatial';
 import { getLayerSchema } from '../lib/stores/layer-schemas';
 import { gradeGpsAccuracy } from '../lib/utils/gps-quality';
@@ -1436,6 +1438,29 @@ export default function MapScreen() {
   const activeProject = storeActiveProject ?? projects[0] ?? null;
   const mapProjectName = activeProject?.name ?? 'Survey Map';
 
+  // ── Assigned areas ────────────────────────────────────────────────────
+  // The backend only returns polygons for an engineer's polygon-scope jobs;
+  // a planner sees an empty list and keeps full edit access.
+  const [assignmentPolygons, setAssignmentPolygons] = useState<AssignmentPolygon[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const projectId = activeProject?.id;
+    if (!projectId || projectId.startsWith('imported-')) {
+      setAssignmentPolygons([]);
+      return;
+    }
+    getAssignmentPolygons(projectId)
+      .then((data) => {
+        if (!cancelled) setAssignmentPolygons(data.polygons ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setAssignmentPolygons([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProject?.id]);
+
   // ── Survey progress summary (shown under the title in the header) ──────
   const surveyChangeCount = useMemo(() => {
     let total = 0;
@@ -1533,6 +1558,36 @@ export default function MapScreen() {
     return activeLayerColors;
   }, [activeLayerColors, displayMode]);
 
+  // Feature ids outside the engineer's assigned polygon. The server marks each
+  // feature with `editable: false`; featuresToGeoJSON copies that to `_editable`.
+  const lockedFeatureIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const features of Object.values(activeGeojson)) {
+      for (const f of features) {
+        const props = (f.properties ?? {}) as Record<string, unknown>;
+        if (props._editable === false || props.editable === false) {
+          const id = String(props.id ?? props._feature_id ?? '');
+          if (id) ids.add(id);
+        }
+      }
+    }
+    return ids;
+  }, [activeGeojson]);
+
+  const isFeatureLocked = useCallback(
+    (featureId: string, layerId?: string) => {
+      if (!featureId) return false;
+      if (layerId?.startsWith('survey-')) {
+        const base = layerId.slice('survey-'.length);
+        const sf = (surveyFeatures[base] ?? []).find((s) => String(s.id) === String(featureId));
+        const hldId = sf?.original_hld_feature ?? sf?.hld_feature_id;
+        if (hldId) return lockedFeatureIds.has(String(hldId));
+      }
+      return lockedFeatureIds.has(String(featureId));
+    },
+    [lockedFeatureIds, surveyFeatures]
+  );
+
   const mapLayerData = useMemo(() => {
     // ── Isolated review mode: show ONLY the target survey feature ──────
     // plus its original HLD counterpart (dimmed blue). Everything else is
@@ -1600,6 +1655,7 @@ export default function MapScreen() {
               _is_survey: true,
               _hld_feature_id: targetSf.original_hld_feature,
               _survey_status: targetSf.survey_status,
+              _editable: !(targetSf.original_hld_feature && lockedFeatureIds.has(String(targetSf.original_hld_feature))),
             },
           }],
           visible: true,
@@ -1615,6 +1671,33 @@ export default function MapScreen() {
       ? [] // In survey-only mode, hide HLD layers
       : buildMapLayerData(activeGeojson, layerVisibility, activeLayerNames,
           importFeatureIdMap, effectiveLayerColors);
+
+    // ── Assigned area outline (green) ──
+    // Draws the polygon an engineer was assigned over the site. Everything
+    // outside it is grey and read-only, so the boundary answers "what am I
+    // allowed to touch?" without opening a panel.
+    const assignmentAreaLayers: any[] = assignmentPolygons
+      .filter((polygon) => polygon.geometry)
+      .map((polygon) => {
+        const id = `assignment-area-${polygon.id}`;
+        return {
+          id,
+          name: `Assigned area: ${polygon.name}`,
+          features: [{
+            type: 'Feature' as const,
+            geometry: polygon.geometry,
+            properties: {
+              id,
+              _id: id,
+              _layer_id: id,
+              _assignment_area: true,
+            },
+          }],
+          visible: true,
+          color: '#22C55E',
+          geometryType: 'Polygon' as const,
+        };
+      });
 
     // ── Survey layers (orange) — only when survey features exist ──
 
@@ -1635,6 +1718,7 @@ export default function MapScreen() {
             _is_survey: true,
             _hld_feature_id: sf.original_hld_feature,
             _survey_status: sf.survey_status,
+            _editable: !(sf.original_hld_feature && lockedFeatureIds.has(String(sf.original_hld_feature))),
           },
         }));
 
@@ -1693,7 +1777,7 @@ export default function MapScreen() {
 
     // HLD view shows the HLD layers plus every survey edit in orange, so
     // reroutes, spans, work-arounds and splits are visible without Overlay.
-    if (displayMode === 'hld') return [...hldLayers, ...surveyLayers, ...stagedLayers];
+    if (displayMode === 'hld') return [...hldLayers, ...assignmentAreaLayers, ...surveyLayers, ...stagedLayers];
 
     // ── Temp Move Preview layer (orange) — shown during line move mode ──
     // Provides an orange preview of the line being edited, independent of
@@ -1854,8 +1938,8 @@ export default function MapScreen() {
       });
     }
 
-    return [...hldLayers, ...previewLayers, ...surveyLayers, ...stagedLayers];
-  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, lineToolMode, continueLinePoints, tempLineCoords, selectedLineFeature, selectedPolygonFeature, polygonEditCoords, isolateFeatureId, drawTrenchActive, drawTrenchPoints, continueNewTrench, newTrenchCoords, obstacleCentre, obstacleRadiusM, deleteSectionRange]);
+    return [...hldLayers, ...assignmentAreaLayers, ...previewLayers, ...surveyLayers, ...stagedLayers];
+  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, lineToolMode, continueLinePoints, tempLineCoords, selectedLineFeature, selectedPolygonFeature, polygonEditCoords, isolateFeatureId, drawTrenchActive, drawTrenchPoints, continueNewTrench, newTrenchCoords, obstacleCentre, obstacleRadiusM, deleteSectionRange, assignmentPolygons, lockedFeatureIds]);
 
   // Build visible layers from the active project's layers
   const visibleLayers = useMemo(() => {
@@ -2303,6 +2387,10 @@ export default function MapScreen() {
   // In both cases, the HLD GeoJSON is NEVER mutated.
   const handleFeatureDragEnd = useCallback(
     (featureId: string, layerId: string, newLng: number, newLat: number) => {
+      if (isFeatureLocked(featureId, layerId)) {
+        showToast('This feature is outside your assigned area', 'info');
+        return;
+      }
       // ════════════════════════════════════════════════════════════════════
       // CASE B: Dragging an orange SURVEY point (layerId starts with 'survey-')
       // The featureId IS the SurveyFeature ID — update it directly.
@@ -2525,6 +2613,10 @@ export default function MapScreen() {
   // ── Start editing a feature (viewing → GeometryEditor editing mode) ─
   // For Points and Polygons (non-LineString features).
   const handlePointSurveyForm = useCallback((feature: EditingFeature) => {
+    if (isFeatureLocked(feature.id, feature.layerId)) {
+      showToast('This feature is outside your assigned area', 'info');
+      return;
+    }
     // ── Popup Edit on a POINT feature opens the SurveyForm ────────────────
     // The form is pre-filled with any existing survey attributes, falling
     // back to the HLD feature's original attributes. Saving creates/updates
@@ -2562,17 +2654,21 @@ export default function MapScreen() {
     // Auto-switch to overlay so a newly created orange survey point is visible
     autoOverlayOnEdit();
     console.log(`[SurveyForm] Opened form for point ${feature.id.slice(-8)} on ${feature.layerId}`);
-  }, [surveyFeatures, getSurveyFeatureForHld, findHldFeatureOriginal, selectFeature, autoOverlayOnEdit]);
+  }, [surveyFeatures, getSurveyFeatureForHld, findHldFeatureOriginal, selectFeature, autoOverlayOnEdit, isFeatureLocked, showToast]);
 
   // ── Start editing a LINE feature from the popup (viewing → toolbar) ─
   // Closes the popup and opens the LineSelectionToolbar.
   const handleLineEditFromPopup = useCallback((feature: EditingFeature) => {
+    if (isFeatureLocked(feature.id, feature.layerId)) {
+      showToast('This feature is outside your assigned area', 'info');
+      return;
+    }
     setSelectedLineFeature(feature);
     selectFeature(null);
     setSelectedMapFeatureId(null);
     setPopupScreenCoords(null);
     console.log(`[LineEdit] Opening toolbar for "${feature.name}"`);
-  }, [selectFeature]);
+  }, [selectFeature, isFeatureLocked, showToast]);
 
   // ── Done editing (editing → viewing mode) ───────────────────────────
   const handleDoneEditing = useCallback(() => {
@@ -4580,6 +4676,10 @@ export default function MapScreen() {
 
   // ── Polygon edit handlers ───────────────────────────────────────────
   const handlePolygonEditStart = useCallback((feature: EditingFeature) => {
+    if (isFeatureLocked(feature.id, feature.layerId)) {
+      showToast('This feature is outside your assigned area', 'info');
+      return;
+    }
     console.log(`[PolygonEdit] Starting edit for feature ${feature.id.slice(-8)} on layer ${feature.layerId}`);
     // ── Search the RENDERED map layers first ──
     // The click handler resolves feature IDs from the RENDERED layers (injected
@@ -4656,7 +4756,7 @@ export default function MapScreen() {
     setPolygonEditOrigGeom(hldFeature.geometry as Record<string, unknown>);
     setPolygonEditOrigAttrs({ ...(hldFeature.properties as Record<string, unknown>) });
     autoOverlayOnEdit();
-  }, [autoOverlayOnEdit, mapLayerData]);
+  }, [autoOverlayOnEdit, mapLayerData, isFeatureLocked, showToast]);
 
   const handlePolygonVertexDragEnd = useCallback(
     (featureId: string, layerId: string, vertexIdx: number, newLng: number, newLat: number) => {
@@ -5072,6 +5172,10 @@ export default function MapScreen() {
   // Replaces the complex IIFE pattern that caused stale closure issues.
   const handlePopupEdit = useCallback(() => {
     if (!selectedFeaturePopup) return;
+    if (isFeatureLocked(selectedFeaturePopup.id, selectedFeaturePopup.layerId)) {
+      showToast('This feature is outside your assigned area', 'info');
+      return;
+    }
     const geomType = resolveGeometryType(selectedFeaturePopup.layerId ?? '') as 'Point' | 'LineString' | 'Polygon';
     const feature: EditingFeature = {
       id: selectedFeaturePopup.id,
@@ -5087,7 +5191,7 @@ export default function MapScreen() {
     } else {
       handlePointSurveyForm(feature);
     }
-  }, [selectedFeaturePopup, handleLineEditFromPopup, handlePolygonEditStart, handlePointSurveyForm]);
+  }, [selectedFeaturePopup, handleLineEditFromPopup, handlePolygonEditStart, handlePointSurveyForm, isFeatureLocked, showToast]);
 
   // ── View features for a specific layer — opens overlay on map ─────────────
   const handleViewLayerFeatures = useCallback((layerId: string) => {
@@ -5711,6 +5815,7 @@ export default function MapScreen() {
               // in all display modes — all line features get Reroute, Del Section,
               // Delete (logical), Draw Segment, and Undo via the LineSelectionToolbar.
               onStartEdit={handlePopupEdit}
+              readOnly={isFeatureLocked(selectedFeaturePopup.id, selectedFeaturePopup.layerId)}
               // Move (→ point drag mode): enables the map's point-drag mode and
               // closes the popup so the engineer can drag the tapped feature.
               onQuickMove={() => {

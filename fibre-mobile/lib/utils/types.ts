@@ -75,6 +75,8 @@ export interface Feature {
   /** Present on the feature-detail endpoint; absent from list payloads. */
   deviation?: FeatureDeviation | null;
   status: 'pending' | 'assigned' | 'under_review' | 'approved' | 'redo';
+  /** False when the feature is outside the engineer's assigned polygon. */
+  editable?: boolean;
   photo_url: string | null;
   /** UUID of the user who last edited this feature */
   edited_by?: string | null;
@@ -222,10 +224,20 @@ export interface Layer {
   last_feature_update: string | null;
 }
 
+export interface AssignmentPolygon {
+  id: string;
+  polygon_id: string;
+  name: string;
+  geometry: { type: 'Polygon' | 'MultiPolygon'; coordinates: unknown[] };
+  feature_count?: number;
+}
+
 export interface AssignmentJob {
   id: string;
   project: { id: string; name: string; status?: string };
-  scope: 'project' | 'layer' | 'feature';
+  scope: 'project' | 'layer' | 'feature' | 'polygon';
+  /** Present on polygon-scope jobs: the assigned area. */
+  polygon?: { id: string; name: string; geometry: unknown; feature_count?: number };
   scope_display: string;
   assignee: { id: string; email: string; full_name: string };
   feature_count: number;

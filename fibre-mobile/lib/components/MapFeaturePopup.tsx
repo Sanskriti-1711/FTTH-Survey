@@ -54,6 +54,8 @@ export interface FeaturePopupProps {
   featureGeometryType?: 'Point' | 'LineString' | 'Polygon';
   /** Called when user taps Edit to enter editing mode */
   onStartEdit?: () => void;
+  /** Feature is outside the engineer's assigned area: edit/move are hidden. */
+  readOnly?: boolean;
   /** Called when user taps the Move button (enables map drag to relocate the feature) */
   onQuickMove?: () => void;
   /** Notes */
@@ -101,6 +103,7 @@ export default function MapFeaturePopup({
   onOpenDetails,
   onDismiss,
   onStartEdit,
+  readOnly = false,
   onQuickMove,
   featureGeometryType,
   notesDraft,
@@ -387,7 +390,7 @@ export default function MapFeaturePopup({
 
         {/* Action buttons */}
         <View style={[styles.actions, isCard && styles.actionsPhone]}>
-          {onStartEdit && (
+          {onStartEdit && !readOnly && (
             <TouchableOpacity
               style={[styles.actionBtn, isCard && styles.actionBtnPhone, { backgroundColor: colors.primary }]}
               onPress={onStartEdit}
@@ -402,7 +405,7 @@ export default function MapFeaturePopup({
               <ChevronRight size={13} stroke={colors.onPrimary} />
             </TouchableOpacity>
           )}
-          {onQuickMove && (
+          {onQuickMove && !readOnly && (
             <TouchableOpacity
               style={[styles.actionBtn, isCard && styles.actionBtnPhone, { backgroundColor: '#FF8C00' }]}
               onPress={onQuickMove}

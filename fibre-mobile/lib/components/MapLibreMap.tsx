@@ -1849,7 +1849,7 @@ function NativeMapView({
                       source={sourceId}
                       style={{
                         circleRadius: isDragging && dragRef.current?.layerId === layerData.id ? 10 : 7,
-                        circleColor: layerData.color,
+                        circleColor: ['case', ['==', ['get', '_editable'], false], '#9CA3AF', layerData.color] as any,
                         circleStrokeWidth: isDragging && dragRef.current?.layerId === layerData.id ? 3 : 2,
                         circleStrokeColor: isDragging && dragRef.current?.layerId === layerData.id ? '#0D5CFF' : '#ffffff',
                       }}
@@ -1862,7 +1862,7 @@ function NativeMapView({
                     id={`lyr-${layerData.id}`}
                     source={sourceId}
                     style={{
-                      lineColor: layerData.color,
+                      lineColor: ['case', ['==', ['get', '_editable'], false], '#9CA3AF', layerData.color] as any,
                       lineWidth: 3,
                       lineOpacity: 0.85,
                     }}
@@ -1874,13 +1874,13 @@ function NativeMapView({
                       type="fill"
                       id={`fill-${layerData.id}`}
                       source={sourceId}
-                      style={{ fillColor: layerData.color, fillOpacity: 0.25 }}
+                      style={{ fillColor: ['case', ['==', ['get', '_editable'], false], '#9CA3AF', layerData.color] as any, fillOpacity: 0.25 }}
                     />
                     <MapLibreGL.Layer
                       type="line"
                       id={`out-${layerData.id}`}
                       source={sourceId}
-                      style={{ lineColor: layerData.color, lineWidth: 2 }}
+                      style={{ lineColor: ['case', ['==', ['get', '_editable'], false], '#9CA3AF', layerData.color] as any, lineWidth: 2 }}
                     />
                   </>
                 )}
@@ -2530,6 +2530,10 @@ function addGeoJSONLayers(map: any, layers: MapLayerData[]): void {
     const outlineId = `ml-out-${layerData.id}`;
     const dragLayerId = `ml-drag-${layerData.id}`;
     const geomType = layerData.geometryType ?? detectGeometryType(layerData.features);
+    // Features outside the engineer's assigned polygon carry `_editable: false`.
+    // Paint them grey in place of the layer colour; geometry and attributes stay
+    // visible so the engineer can still see the rest of the project.
+    const paintedColor = ['case', ['==', ['get', '_editable'], false], '#9CA3AF', layerData.color];
 
     const features = layerData.features.map((f, i) => ({
       ...f,
@@ -2549,7 +2553,7 @@ function addGeoJSONLayers(map: any, layers: MapLayerData[]): void {
       if (geomType === 'Point') {
         map.addLayer({
           id: layerId, type: 'circle', source: sourceId,
-          paint: { 'circle-radius': 7, 'circle-color': layerData.color, 'circle-stroke-width': 2, 'circle-stroke-color': '#fff' },
+          paint: { 'circle-radius': 7, 'circle-color': paintedColor, 'circle-stroke-width': 2, 'circle-stroke-color': '#fff' },
         });
         // Add a larger invisible drag handle layer for easier grabbing
         map.addLayer({
@@ -2559,16 +2563,16 @@ function addGeoJSONLayers(map: any, layers: MapLayerData[]): void {
       } else if (geomType === 'LineString') {
         map.addLayer({
           id: layerId, type: 'line', source: sourceId,
-          paint: { 'line-color': layerData.color, 'line-width': 3, 'line-opacity': 0.85 },
+          paint: { 'line-color': paintedColor, 'line-width': 3, 'line-opacity': 0.85 },
         });
       } else if (geomType === 'Polygon') {
         map.addLayer({
           id: layerId, type: 'fill', source: sourceId,
-          paint: { 'fill-color': layerData.color, 'fill-opacity': 0.25 },
+          paint: { 'fill-color': paintedColor, 'fill-opacity': 0.25 },
         });
         map.addLayer({
           id: outlineId, type: 'line', source: sourceId,
-          paint: { 'line-color': layerData.color, 'line-width': 2 },
+          paint: { 'line-color': paintedColor, 'line-width': 2 },
         });
       }
     } catch {}

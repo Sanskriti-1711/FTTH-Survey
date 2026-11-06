@@ -111,7 +111,15 @@ export const useProjectStore = create<ProjectState>((set, get) => {
         type: 'Point',
         coordinates: [0, 0],
       },
-      properties: { ...f.properties, id: f.id, _feature_id: f.id },
+      properties: {
+        ...f.properties,
+        id: f.id,
+        _feature_id: f.id,
+        // Carries the server's edit decision through to the map, which greys
+        // rows outside the engineer's assigned polygon and refuses to open an
+        // editor on them. Older servers omit `editable`; treat that as editable.
+        _editable: f.editable !== false,
+      },
     }));
   },
 

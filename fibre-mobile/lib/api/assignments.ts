@@ -56,6 +56,7 @@ export async function getAssignmentSummary(params: {
     project: AssignmentJob[];
     layer: AssignmentJob[];
     feature: AssignmentJob[];
+    polygon: AssignmentJob[];
   };
 }> {
   const query = new URLSearchParams();

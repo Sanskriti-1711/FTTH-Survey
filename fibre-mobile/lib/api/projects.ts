@@ -76,6 +76,13 @@ export async function getProjectLayers(projectId: string): Promise<{
   return apiFetch(`/api/projects/${projectId}/layers/`);
 }
 
+export async function getAssignmentPolygons(projectId: string): Promise<{
+  project_id: string;
+  polygons: import('../utils/types').AssignmentPolygon[];
+}> {
+  return apiFetch(`/api/projects/${projectId}/assignment-polygons/`);
+}
+
 export async function getLayerDetail(
   projectId: string,
   layerId: string
