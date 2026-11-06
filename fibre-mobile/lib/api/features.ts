@@ -1,3 +1,4 @@
+import { Platform } from 'react-native';
 import { apiFetch } from './client';
 import type { Feature } from '../utils/types';
 
@@ -129,11 +130,19 @@ export async function uploadFeaturePhotoToGallery(
   uploaded: FeaturePhotoData[];
 }> {
   const form = new FormData();
-  form.append('photos', {
-    uri: photo.uri,
-    name: photo.name,
-    type: photo.type,
-  } as unknown as Blob);
+  if (Platform.OS === 'web') {
+    // On web the picker gives a blob:/data: URI. Appending the native
+    // {uri, name, type} shape sends "[object Object]" and the server rejects
+    // the upload with "No photos provided". Send the actual bytes instead.
+    const blob = await (await fetch(photo.uri)).blob();
+    form.append('photos', blob, photo.name);
+  } else {
+    form.append('photos', {
+      uri: photo.uri,
+      name: photo.name,
+      type: photo.type,
+    } as unknown as Blob);
+  }
 
   return apiFetch(`/api/features/${featureId}/photos/`, {
     method: 'POST',

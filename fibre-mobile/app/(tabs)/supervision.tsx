@@ -23,8 +23,11 @@ import { getJobsForEngineer } from '../../lib/api/assignments';
 import { isSupervisionProject, lldVersionLabel } from '../../lib/api/supervision';
 
 // ── Supervision Tab ───────────────────────────────────────────────────────
-// Supervision is its own workspace in the tab bar: a supervision project is a
-// project opened from a completed LLD run, and its tasks are assignment jobs.
+// Supervision is its own workspace in the tab bar. A task is one assigned
+// span — a feature-scope job — so opening it shows only that geometry, never
+// the whole project. Project and layer jobs keep the project view.
+
+type SpanStatus = 'assigned' | 'active' | 'submitted' | 'redo' | 'approved';
 
 export default function SupervisionScreen() {
   const colors = useThemeStore((s) => s.colors);
@@ -33,7 +36,7 @@ export default function SupervisionScreen() {
   const { projects, fetchProjects, error: projectsError } = useProjectStore();
   const [jobs, setJobs] = useState<AssignmentJob[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [statusFilter, setStatusFilter] = useState<Project['status'] | 'all'>('all');
+  const [statusFilter, setStatusFilter] = useState<SpanStatus | 'all'>('all');
 
   const loadData = useCallback(async () => {
     await Promise.all([
@@ -64,16 +67,50 @@ export default function SupervisionScreen() {
     return all.filter((project) => assigned.has(project.id));
   }, [projects, jobs, isAdmin]);
 
-  const jobsByProject = useMemo(() => {
-    const map: Record<string, AssignmentJob[]> = {};
-    for (const job of jobs ?? []) {
-      (map[job.project.id] ??= []).push(job);
-    }
-    return map;
-  }, [jobs]);
+  const supervisionProjectIds = useMemo(
+    () => new Set(projects.filter(isSupervisionProject).map((project) => project.id)),
+    [projects],
+  );
 
-  // Same workflow chips as the Survey tab: engineers filter by task status.
-  const filterChips: { key: Project['status'] | 'all'; label: string }[] = [
+  // A span task is a feature-scope job on a supervision project. Project/layer
+  // jobs still appear below because they cover more than one span.
+  const spanTasks = useMemo(
+    () =>
+      (jobs ?? []).filter(
+        (job) =>
+          job.scope === 'feature' &&
+          job.feature &&
+          supervisionProjectIds.has(job.project.id),
+      ),
+    [jobs, supervisionProjectIds],
+  );
+
+  const projectAssignments = useMemo(() => {
+    const projectIds = new Set(
+      (jobs ?? [])
+        .filter((job) => job.scope !== 'feature')
+        .map((job) => job.project.id),
+    );
+    return supervisionProjects.filter((project) => projectIds.has(project.id));
+  }, [jobs, supervisionProjects]);
+
+  const projectById = useMemo(() => {
+    const map: Record<string, Project> = {};
+    for (const project of projects) map[project.id] = project;
+    return map;
+  }, [projects]);
+
+  const spanStatus = (job: AssignmentJob): SpanStatus => {
+    const status = job.feature?.status ?? job.status;
+    if (status === 'pending') return 'assigned';
+    if (status === 'under_review') return 'submitted';
+    if (status === 'redo') return 'redo';
+    if (status === 'approved') return 'approved';
+    return 'active';
+  };
+
+  // Same workflow chips as the Survey tab: engineers filter their span queue.
+  const filterChips: { key: SpanStatus | 'all'; label: string }[] = [
     { key: 'all', label: 'All' },
     { key: 'assigned', label: 'Assigned' },
     { key: 'active', label: 'Active' },
@@ -81,22 +118,20 @@ export default function SupervisionScreen() {
     { key: 'redo', label: 'Redo' },
   ];
 
-  const filteredProjects =
+  const filteredSpanTasks =
     statusFilter === 'all'
-      ? supervisionProjects
-      : supervisionProjects.filter((p) => p.status === statusFilter);
+      ? spanTasks
+      : spanTasks.filter((job) => spanStatus(job) === statusFilter);
 
   const activeFilterLabel =
     filterChips.find((c) => c.key === statusFilter)?.label ?? 'matching';
 
   const stats = {
-    assigned: supervisionProjects.filter((p) => p.status === 'assigned').length,
-    active: supervisionProjects.filter((p) => p.status === 'active' || p.status === 'in_progress')
-      .length,
-    done: supervisionProjects.filter((p) => p.status === 'accepted' || p.status === 'completed')
-      .length,
+    assigned: spanTasks.filter((job) => spanStatus(job) === 'assigned').length,
+    active: spanTasks.filter((job) => spanStatus(job) === 'active').length,
+    done: spanTasks.filter((job) => spanStatus(job) === 'approved').length,
   };
-  const count = supervisionProjects.length;
+  const count = spanTasks.length;
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]}>
@@ -124,7 +159,7 @@ export default function SupervisionScreen() {
 
         <View style={styles.sectionHeader}>
           <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>
-            Supervision Tasks
+            Span Tasks
           </Text>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
             <ClipboardList size={15} stroke={colors.textTertiary} />
@@ -144,7 +179,7 @@ export default function SupervisionScreen() {
               const chipCount =
                 chip.key === 'all'
                   ? count
-                  : supervisionProjects.filter((p) => p.status === chip.key).length;
+                  : spanTasks.filter((job) => spanStatus(job) === chip.key).length;
               const chipColor =
                 chip.key === 'all'
                   ? colors.primary
@@ -183,7 +218,7 @@ export default function SupervisionScreen() {
           </ScrollView>
         )}
 
-        {projectsError && projects.length === 0 ? (
+        {projectsError && projects.length === 0 && count === 0 ? (
           <View style={[styles.loadingCard, { backgroundColor: colors.surface }]}>
             <Text style={[styles.errorTitle, { color: colors.textPrimary }]}>
               {"Couldn't Load Supervision Tasks"}
@@ -199,42 +234,130 @@ export default function SupervisionScreen() {
               Loading your supervision tasks…
             </Text>
           </View>
-        ) : count === 0 ? (
+        ) : count === 0 && projectAssignments.length === 0 ? (
           <EmptyState
             title="No Supervision Tasks Yet"
-            description="Supervision projects assigned to you from a completed LLD run will appear here."
+            description="Spans assigned to you from a completed LLD run will appear here."
             action={<Button title="Refresh" variant="secondary" size="sm" onPress={loadData} />}
           />
-        ) : filteredProjects.length === 0 ? (
-          <EmptyState
-            title={`No ${activeFilterLabel} Supervision Tasks`}
-            description="Nothing matches this status filter yet"
-            action={
-              <Button
-                title="Show All Tasks"
-                variant="secondary"
-                size="sm"
-                onPress={() => setStatusFilter('all')}
-              />
-            }
-          />
         ) : (
-          filteredProjects.map((project) => (
-            <SupervisionCard
-              key={project.id}
-              project={project}
-              jobs={jobsByProject[project.id] ?? []}
-              onPress={() =>
-                router.push({
-                  pathname: '/supervision/[projectId]',
-                  params: { projectId: project.id },
-                })
-              }
-            />
-          ))
+          <>
+            {count > 0 && filteredSpanTasks.length === 0 ? (
+              <EmptyState
+                title={`No ${activeFilterLabel} Span Tasks`}
+                description="Nothing matches this status filter yet"
+                action={
+                  <Button
+                    title="Show All Tasks"
+                    variant="secondary"
+                    size="sm"
+                    onPress={() => setStatusFilter('all')}
+                  />
+                }
+              />
+            ) : (
+              filteredSpanTasks.map((job) => (
+                <SpanTaskCard
+                  key={job.id}
+                  job={job}
+                  project={projectById[job.project.id]}
+                  status={spanStatus(job)}
+                  onPress={() =>
+                    router.push({
+                      pathname: '/supervision/feature/[featureId]',
+                      params: { featureId: job.feature?.id ?? '', projectId: job.project.id },
+                    })
+                  }
+                />
+              ))
+            )}
+
+            {projectAssignments.length > 0 && (
+              <>
+                <View style={styles.sectionHeader}>
+                  <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>
+                    Project & layer assignments
+                  </Text>
+                  <Text style={[styles.count, { color: colors.textTertiary }]}>
+                    {projectAssignments.length}
+                  </Text>
+                </View>
+                {projectAssignments.map((project) => (
+                  <SupervisionCard
+                    key={project.id}
+                    project={project}
+                    jobs={(jobs ?? []).filter(
+                      (job) => job.project.id === project.id && job.scope !== 'feature',
+                    )}
+                    onPress={() =>
+                      router.push({
+                        pathname: '/supervision/[projectId]',
+                        params: { projectId: project.id },
+                      })
+                    }
+                  />
+                ))}
+              </>
+            )}
+          </>
         )}
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+// ── Span Task Card ────────────────────────────────────────────────────────
+
+function SpanTaskCard({
+  job,
+  project,
+  status,
+  onPress,
+}: {
+  job: AssignmentJob;
+  project?: Project;
+  status: SpanStatus;
+  onPress: () => void;
+}) {
+  const colors = useThemeStore((s) => s.colors);
+  const feature = job.feature;
+  if (!feature) return null;
+  const shortId = feature.id.slice(-8);
+
+  return (
+    <TouchableOpacity
+      style={[styles.jobCard, { backgroundColor: colors.surface }]}
+      onPress={onPress}
+      activeOpacity={0.7}
+      accessibilityRole="button"
+      accessibilityLabel={`${feature.layer_name} span ${shortId}, ${job.project.name}, status ${status}`}
+    >
+      <View style={styles.jobHeader}>
+        <View style={styles.jobInfo}>
+          <Text style={[styles.jobName, { color: colors.textPrimary }]} numberOfLines={1}>
+            {feature.layer_name} span
+          </Text>
+          <Text style={[styles.jobMeta, { color: colors.textSecondary }]} numberOfLines={1}>
+            {job.project.name}
+          </Text>
+          <Text style={[styles.jobDate, { color: colors.textTertiary }]} numberOfLines={1}>
+            {project ? `${lldVersionLabel(project)} · ` : ''}span {shortId}
+          </Text>
+        </View>
+        <View style={{ alignItems: 'flex-end', gap: 6 }}>
+          <StatusBadge status={feature.status} />
+          <ChevronRight size={16} stroke={colors.textTertiary} />
+        </View>
+      </View>
+      <View style={styles.jobFooter}>
+        <Text style={[styles.jobDate, { color: colors.textTertiary }]}>
+          Assigned: {new Date(job.created_at).toLocaleDateString()}
+        </Text>
+        <Text style={[styles.jobDate, { color: colors.primary, fontWeight: '700' }]}>
+          Inspect span
+        </Text>
+      </View>
+    </TouchableOpacity>
   );
 }
 
