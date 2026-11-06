@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -18,11 +18,9 @@ import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
 import CommitBar from '../../lib/components/CommitBar';
 import { Spacing, Radius, StatusColors, Touch, Type, type StatusKey } from '../../lib/theme/colors';
-import { Camera, Upload, User, ChevronRight, ClipboardList } from 'lucide-react-native';
-import type { Project, AssignmentJob } from '../../lib/utils/types';
+import { Camera, Upload, User, ChevronRight } from 'lucide-react-native';
+import type { Project } from '../../lib/utils/types';
 import type { ReviewAction } from '../../lib/api/projects';
-import { getJobsForEngineer } from '../../lib/api/assignments';
-import { isSupervisionProject, lldVersionLabel } from '../../lib/api/supervision';
 
 // ── Home Screen ───────────────────────────────────────────────────────────
 
@@ -44,25 +42,14 @@ export default function HomeScreen() {
   // moment later, which reads as data loss.
   const [loadingProjects, setLoadingProjects] = useState(true);
   const [statusFilter, setStatusFilter] = useState<Project['status'] | 'all'>('all');
-  const [workspace, setWorkspace] = useState<'survey' | 'supervision'>('survey');
-  // Supervision work arrives as assignment jobs on the same project row, so the
-  // jobs feed decides which supervision projects belong to this engineer.
-  const [supervisionJobs, setSupervisionJobs] = useState<AssignmentJob[] | null>(null);
 
   const loadData = useCallback(async () => {
     try {
-      await Promise.all([
-        fetchProjects(),
-        user?.id
-          ? getJobsForEngineer(user.id, { page_size: 100 })
-              .then((data) => setSupervisionJobs(data.results))
-              .catch(() => setSupervisionJobs([]))
-          : Promise.resolve(),
-      ]);
+      await fetchProjects();
     } finally {
       setLoadingProjects(false);
     }
-  }, [fetchProjects, user?.id]);
+  }, [fetchProjects]);
 
   useEffect(() => {
     loadData();
@@ -132,31 +119,6 @@ export default function HomeScreen() {
   const activeFilterLabel =
     filterChips.find((c) => c.key === statusFilter)?.label ?? 'matching';
 
-  // ── Supervision workspace ───────────────────────────────────────────────
-  // A supervision project is a project opened from a completed LLD run. The
-  // engineer sees only the projects they hold a job on; an admin sees all.
-  const supervisionProjects = useMemo(() => {
-    const all = projects.filter(isSupervisionProject);
-    if (isAdmin) return all;
-    const assigned = new Set((supervisionJobs ?? []).map((job) => job.project.id));
-    return all.filter((project) => assigned.has(project.id));
-  }, [projects, supervisionJobs, isAdmin]);
-
-  const supervisionJobsByProject = useMemo(() => {
-    const map: Record<string, AssignmentJob[]> = {};
-    for (const job of supervisionJobs ?? []) {
-      (map[job.project.id] ??= []).push(job);
-    }
-    return map;
-  }, [supervisionJobs]);
-
-  const supervisionStats = {
-    assigned: supervisionProjects.filter((p) => p.status === 'assigned').length,
-    active: supervisionProjects.filter((p) => p.status === 'active' || p.status === 'in_progress').length,
-    done: supervisionProjects.filter((p) => p.status === 'accepted' || p.status === 'completed').length,
-  };
-  const supervisionCount = supervisionProjects.length;
-
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]}>
       <ScrollView
@@ -188,42 +150,6 @@ export default function HomeScreen() {
           </View>
         </View>
 
-        {/* Workspace switch — survey work and supervision work are different
-            stages of the same rollout, so they get separate lists rather than
-            one mixed queue. */}
-        <View style={[styles.workspaceRow, { backgroundColor: colors.surface }]}>
-          {([
-            { key: 'survey', label: `Survey (${projects.length})` },
-            { key: 'supervision', label: `Supervision (${supervisionCount})` },
-          ] as const).map((tab) => {
-            const active = workspace === tab.key;
-            return (
-              <TouchableOpacity
-                key={tab.key}
-                onPress={() => setWorkspace(tab.key)}
-                style={[
-                  styles.workspaceTab,
-                  active && { backgroundColor: colors.primary },
-                ]}
-                accessibilityRole="tab"
-                accessibilityState={{ selected: active }}
-                accessibilityLabel={`Show ${tab.key} projects`}
-              >
-                <Text
-                  style={[
-                    styles.workspaceText,
-                    { color: active ? colors.onPrimary : colors.textSecondary },
-                  ]}
-                >
-                  {tab.label}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-
-        {workspace === 'survey' ? (
-          <>
         {/* Quick stats — three numbers, one row, no cards competing with the
             project list for attention. */}
         <View style={styles.statsRow}>
@@ -396,61 +322,6 @@ export default function HomeScreen() {
             <Text style={[styles.quickHint, { color: colors.textTertiary }]}>ZIP or GeoPackage</Text>
           </TouchableOpacity>
         </View>
-          </>
-        ) : (
-          <>
-            <View style={styles.statsRow}>
-              <StatCard title="Assigned" value={supervisionStats.assigned} color={colors.primary} />
-              <View style={styles.statsGap} />
-              <StatCard title="Active" value={supervisionStats.active} color={colors.success} />
-              <View style={styles.statsGap} />
-              <StatCard title="Done" value={supervisionStats.done} color={colors.warning} />
-            </View>
-
-            <View style={styles.sectionHeader}>
-              <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>
-                Supervision Tasks
-              </Text>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                <ClipboardList size={15} stroke={colors.textTertiary} />
-                <Text style={[styles.seeAll, { color: colors.textTertiary }]}>
-                  {supervisionCount}
-                </Text>
-              </View>
-            </View>
-
-            {supervisionJobs === null && supervisionCount === 0 ? (
-              <View style={[styles.loadingCard, { backgroundColor: colors.surface }]}>
-                <Text style={[styles.loadingText, { color: colors.textSecondary }]}>
-                  Loading your supervision tasks…
-                </Text>
-              </View>
-            ) : supervisionCount === 0 ? (
-              <EmptyState
-                title="No Supervision Tasks Yet"
-                description="Supervision projects assigned to you from a completed LLD run will appear here."
-                action={
-                  <Button title="Refresh" variant="secondary" size="sm" onPress={loadData} />
-                }
-              />
-            ) : (
-              supervisionProjects.map((project) => (
-                <SupervisionCard
-                  key={project.id}
-                  project={project}
-                  jobs={supervisionJobsByProject[project.id] ?? []}
-                  onPress={() =>
-                    router.push({
-                      pathname: '/supervision/[projectId]',
-                      params: { projectId: project.id },
-                    })
-                  }
-                />
-              ))
-            )}
-          </>
-        )}
-
       </ScrollView>
     </SafeAreaView>
   );
@@ -609,70 +480,8 @@ function ProjectCard({
     </TouchableOpacity>
   );
 }
-
-function SupervisionCard({
-  project,
-  jobs,
-  onPress,
-}: {
-  project: Project;
-  jobs: AssignmentJob[];
-  onPress: () => void;
-}) {
-  const colors = useThemeStore((s) => s.colors);
-  const featureTotal = jobs.reduce((sum, job) => sum + (job.feature_count || 0), 0);
-
-  return (
-    <TouchableOpacity
-      style={[styles.jobCard, { backgroundColor: colors.surface }]}
-      onPress={onPress}
-      activeOpacity={0.7}
-      accessibilityRole="button"
-      accessibilityLabel={`${project.name}, supervision, ${lldVersionLabel(project)}, status ${project.status.replace(/_/g, ' ')}`}
-    >
-      <View style={styles.jobHeader}>
-        <View style={styles.jobInfo}>
-          <Text style={[styles.jobName, { color: colors.textPrimary }]} numberOfLines={1}>
-            {project.name}
-          </Text>
-          <Text style={[styles.jobMeta, { color: colors.textSecondary }]} numberOfLines={1}>
-            {lldVersionLabel(project)} · {jobs.length} {jobs.length === 1 ? 'task' : 'tasks'} ·{' '}
-            {featureTotal} features
-          </Text>
-        </View>
-        <View style={{ alignItems: 'flex-end', gap: 6 }}>
-          <StatusBadge status={project.status} />
-          <ChevronRight size={16} stroke={colors.textTertiary} />
-        </View>
-      </View>
-      <View style={styles.jobFooter}>
-        <Text style={[styles.jobDate, { color: colors.textTertiary }]}>
-          Assigned: {jobs[0] ? new Date(jobs[0].created_at).toLocaleDateString() : '—'}
-        </Text>
-        <Text style={[styles.jobDate, { color: colors.primary, fontWeight: '700' }]}>
-          Inspect in field
-        </Text>
-      </View>
-    </TouchableOpacity>
-  );
-}
-
 const styles = StyleSheet.create({
   safe: { flex: 1 },
-  workspaceRow: {
-    flexDirection: 'row',
-    borderRadius: Radius.full,
-    padding: 4,
-    marginBottom: Spacing.lg,
-  },
-  workspaceTab: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: 36,
-    borderRadius: Radius.full,
-  },
-  workspaceText: { fontSize: 13, fontWeight: '700' },
   scroll: { padding: Spacing.lg, paddingBottom: Spacing.xxl * 2 },
   header: {
     flexDirection: 'row',
