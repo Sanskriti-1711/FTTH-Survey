@@ -15,6 +15,7 @@
 
 import React, { useMemo, useState } from 'react';
 import {
+  Image,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -26,9 +27,14 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { X } from 'lucide-react-native';
+import * as ImagePicker from 'expo-image-picker';
+import { Camera, Image as ImageIcon, X } from 'lucide-react-native';
 import { Button } from '../../components/ui/Button';
-import { updateFieldMeasurements } from '../api/features';
+import {
+  updateFieldMeasurements,
+  uploadFeaturePhotoToGallery,
+  type FeaturePhotoData,
+} from '../api/features';
 import { displayValue } from '../api/supervision';
 import { useThemeStore } from '../stores/theme';
 import { Radius, Spacing, Touch, Type } from '../theme/colors';
@@ -92,11 +98,23 @@ export interface SavedMeasurements {
 interface Props {
   visible: boolean;
   feature: Feature;
+  /** The feature's existing gallery, and the backend's cap on its size. */
+  photos: FeaturePhotoData[];
+  photoLimit: number;
+  onPhotosChanged: (photos: FeaturePhotoData[]) => void;
   onClose: () => void;
   onSaved: (saved: SavedMeasurements) => void;
 }
 
-export default function MeasurementEntrySheet({ visible, feature, onClose, onSaved }: Props) {
+export default function MeasurementEntrySheet({
+  visible,
+  feature,
+  photos,
+  photoLimit,
+  onPhotosChanged,
+  onClose,
+  onSaved,
+}: Props) {
   const colors = useThemeStore((s) => s.colors);
   const fields = useMemo(() => entryFields(feature), [feature]);
   const planned = useMemo(
@@ -108,6 +126,9 @@ export default function MeasurementEntrySheet({ visible, feature, onClose, onSav
   const [notes, setNotes] = useState(feature.comparison_notes ?? '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [photoError, setPhotoError] = useState<string | null>(null);
+  const atPhotoLimit = photoLimit > 0 && photos.length >= photoLimit;
   // Reset the draft whenever the sheet is opened for a feature, so a previous
   // visit's typing can never leak into this one.
   const [seededFor, setSeededFor] = useState<string | null>(visible ? feature.id : null);
@@ -117,6 +138,7 @@ export default function MeasurementEntrySheet({ visible, feature, onClose, onSav
     setValues(seedValues(feature));
     setNotes(feature.comparison_notes ?? '');
     setError(null);
+    setPhotoError(null);
   }
   if (!visible && seededFor !== null) {
     setSeededFor(null);
@@ -125,6 +147,49 @@ export default function MeasurementEntrySheet({ visible, feature, onClose, onSav
   const setValue = (key: string, value: string | boolean) => {
     setError(null);
     setValues((prev) => ({ ...prev, [key]: value }));
+  };
+
+  // Photos are evidence for the readings, so they upload immediately instead of
+  // waiting for Save: an engineer can capture the open trench and keep typing.
+  // A failed upload leaves the readings draft untouched and can simply be retried.
+  const addPhoto = async (source: 'camera' | 'library') => {
+    if (uploadingPhoto) return;
+    setPhotoError(null);
+    try {
+      let asset: ImagePicker.ImagePickerAsset | undefined;
+      if (source === 'camera') {
+        const permission = await ImagePicker.requestCameraPermissionsAsync();
+        if (permission.status !== 'granted') {
+          setPhotoError('Camera permission is needed to photograph this feature.');
+          return;
+        }
+        const result = await ImagePicker.launchCameraAsync({
+          quality: 0.7,
+          allowsEditing: false,
+        });
+        asset = result.canceled ? undefined : result.assets?.[0];
+      } else {
+        const result = await ImagePicker.launchImageLibraryAsync({
+          quality: 0.7,
+          allowsEditing: false,
+          mediaTypes: ['images'],
+        });
+        asset = result.canceled ? undefined : result.assets?.[0];
+      }
+      if (!asset) return;
+
+      setUploadingPhoto(true);
+      const uploaded = await uploadFeaturePhotoToGallery(feature.id, {
+        uri: asset.uri,
+        name: asset.fileName ?? `site-${Date.now()}.jpg`,
+        type: asset.mimeType ?? 'image/jpeg',
+      });
+      onPhotosChanged([...photos, ...(uploaded.uploaded ?? [])]);
+    } catch (err) {
+      setPhotoError(err instanceof Error ? err.message : 'Could not upload this photo.');
+    } finally {
+      setUploadingPhoto(false);
+    }
   };
 
   const handleSave = async () => {
@@ -380,6 +445,74 @@ export default function MeasurementEntrySheet({ visible, feature, onClose, onSav
                 />
               </View>
 
+              <View style={styles.field}>
+                <View style={styles.photoHeader}>
+                  <Text style={[styles.fieldLabel, { color: colors.textPrimary }]}>
+                    Site photos
+                  </Text>
+                  <Text style={[styles.planned, { color: colors.textTertiary }]}>
+                    {photos.length}
+                    {photoLimit > 0 ? ` / ${photoLimit}` : ''}
+                  </Text>
+                </View>
+
+                {photos.length > 0 ? (
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                    <View style={styles.photoRow}>
+                      {photos.map((photo) => (
+                        <Image
+                          key={photo.id}
+                          source={{ uri: photo.url }}
+                          style={styles.photo}
+                          accessibilityLabel={photo.description || 'Site photo'}
+                        />
+                      ))}
+                    </View>
+                  </ScrollView>
+                ) : (
+                  <Text style={[styles.photoHint, { color: colors.textTertiary }]}>
+                    No photos yet. Capture the installed asset as evidence for these readings.
+                  </Text>
+                )}
+
+                {atPhotoLimit ? (
+                  <Text style={[styles.photoHint, { color: colors.textTertiary }]}>
+                    This feature already has the maximum of {photoLimit} photos.
+                  </Text>
+                ) : (
+                  <View style={styles.photoActions}>
+                    {Platform.OS !== 'web' && (
+                      <Button
+                        title="Take photo"
+                        variant="secondary"
+                        size="sm"
+                        fullWidth={false}
+                        style={styles.photoBtn}
+                        icon={<Camera size={16} stroke={colors.primary} />}
+                        loading={uploadingPhoto}
+                        onPress={() => addPhoto('camera')}
+                      />
+                    )}
+                    <Button
+                      title={Platform.OS === 'web' ? 'Choose photo' : 'Gallery'}
+                      variant="secondary"
+                      size="sm"
+                      fullWidth={false}
+                      style={styles.photoBtn}
+                      icon={<ImageIcon size={16} stroke={colors.primary} />}
+                      loading={uploadingPhoto}
+                      onPress={() => addPhoto('library')}
+                    />
+                  </View>
+                )}
+
+                {photoError ? (
+                  <View style={[styles.error, { backgroundColor: colors.error + '14' }]}>
+                    <Text style={[styles.errorText, { color: colors.error }]}>{photoError}</Text>
+                  </View>
+                ) : null}
+              </View>
+
               {error ? (
                 <View style={[styles.error, { backgroundColor: colors.error + '14' }]}>
                   <Text style={[styles.errorText, { color: colors.error }]}>{error}</Text>
@@ -481,6 +614,17 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   empty: { ...Type.body, paddingVertical: Spacing.lg },
+  photoHeader: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    gap: Spacing.sm,
+  },
+  photoRow: { flexDirection: 'row', gap: Spacing.sm, paddingTop: Spacing.xs },
+  photo: { width: 96, height: 72, borderRadius: Radius.md, backgroundColor: '#00000010' },
+  photoHint: { ...Type.meta },
+  photoActions: { flexDirection: 'row', gap: Spacing.sm },
+  photoBtn: { flex: 1 },
   error: { borderRadius: Radius.md, padding: Spacing.md },
   errorText: { ...Type.body, fontWeight: '500' },
   footer: { paddingHorizontal: Spacing.lg, paddingVertical: Spacing.md, borderTopWidth: StyleSheet.hairlineWidth },

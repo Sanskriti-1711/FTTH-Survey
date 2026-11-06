@@ -74,6 +74,7 @@ export default function SupervisionFeatureScreen() {
   const [feature, setFeature] = useState<Feature | null>(null);
   const [layerName, setLayerName] = useState('');
   const [photos, setPhotos] = useState<FeaturePhotoData[]>([]);
+  const [photoLimit, setPhotoLimit] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [entryOpen, setEntryOpen] = useState(false);
@@ -96,6 +97,7 @@ export default function SupervisionFeatureScreen() {
       try {
         const gallery = await getFeaturePhotos(featureId);
         setPhotos(gallery.results ?? []);
+        setPhotoLimit(gallery.max_photos ?? 0);
       } catch {
         setPhotos([]);
       }
@@ -433,6 +435,9 @@ export default function SupervisionFeatureScreen() {
         <MeasurementEntrySheet
           visible={entryOpen}
           feature={feature}
+          photos={photos}
+          photoLimit={photoLimit}
+          onPhotosChanged={setPhotos}
           onClose={() => setEntryOpen(false)}
           onSaved={handleSaved}
         />
