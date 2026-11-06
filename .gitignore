@@ -62,6 +62,12 @@ fibre-mobile/ios/
 .env
 .env.local
 .env.production
+.env.*
+!.env.example
+
+# ── Vercel CLI ────────────────────────────────────────────
+# Written by a manual `npx vercel` / deploy-web.sh run; local link only.
+.vercel/
 
 # ── OS files ──────────────────────────────────────────────
 .DS_Store
