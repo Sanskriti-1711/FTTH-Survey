@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -21,6 +21,7 @@ import { Spacing, Radius, StatusColors, Touch, Type, type StatusKey } from '../.
 import { Camera, Upload, User, ChevronRight } from 'lucide-react-native';
 import type { Project } from '../../lib/utils/types';
 import type { ReviewAction } from '../../lib/api/projects';
+import { isSupervisionProject } from '../../lib/api/supervision';
 
 // ── Home Screen ───────────────────────────────────────────────────────────
 
@@ -29,13 +30,18 @@ export default function HomeScreen() {
   const { user } = useAuthStore();
   const isAdmin = user?.role === 'SUBADMIN';
   const {
-    projects,
+    projects: allProjects,
     fetchProjects,
     acceptSurveyCopy,
     submitSurveyCopy,
     reviewSurveyProject,
     error: projectsError,
   } = useProjectStore();
+  // Supervision projects are their own tab; Home is the survey queue only.
+  const projects = useMemo(
+    () => allProjects.filter((project) => !isSupervisionProject(project)),
+    [allProjects]
+  );
   const [refreshing, setRefreshing] = useState(false);
   // The first fetch decides between "no projects" and "not loaded yet". A
   // 390 px phone showed "No Projects Yet" over a project list that arrived a
