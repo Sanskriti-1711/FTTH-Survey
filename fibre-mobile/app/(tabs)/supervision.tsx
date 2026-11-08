@@ -6,6 +6,7 @@ import {
   ScrollView,
   TouchableOpacity,
   RefreshControl,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -19,7 +20,7 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { Spacing, Radius, StatusColors, type StatusKey } from '../../lib/theme/colors';
 import { ClipboardList, ChevronRight } from 'lucide-react-native';
 import type { Project, AssignmentJob } from '../../lib/utils/types';
-import { getJobsForEngineer } from '../../lib/api/assignments';
+import { getAssignmentJob, getJobsForEngineer } from '../../lib/api/assignments';
 import { isSupervisionProject, lldVersionLabel } from '../../lib/api/supervision';
 
 // ── Supervision Tab ───────────────────────────────────────────────────────
@@ -36,6 +37,7 @@ export default function SupervisionScreen() {
   const { projects, fetchProjects, error: projectsError } = useProjectStore();
   const [jobs, setJobs] = useState<AssignmentJob[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [openingSpanId, setOpeningSpanId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<SpanStatus | 'all'>('all');
 
   const loadData = useCallback(async () => {
@@ -72,23 +74,23 @@ export default function SupervisionScreen() {
     [projects],
   );
 
-  // A span task is a feature-scope job on a supervision project. Project/layer
-  // jobs still appear below because they cover more than one span.
+  // A span task is either the backend's span-scope job (one row per
+  // chamber-to-chamber span) or a legacy feature-scope job. Project/layer jobs
+  // still appear below because they cover more than one span.
   const spanTasks = useMemo(
     () =>
-      (jobs ?? []).filter(
-        (job) =>
-          job.scope === 'feature' &&
-          job.feature &&
-          supervisionProjectIds.has(job.project.id),
-      ),
+      (jobs ?? []).filter((job) => {
+        if (!supervisionProjectIds.has(job.project.id)) return false;
+        if (job.scope === 'span') return true;
+        return job.scope === 'feature' && Boolean(job.feature);
+      }),
     [jobs, supervisionProjectIds],
   );
 
   const projectAssignments = useMemo(() => {
     const projectIds = new Set(
       (jobs ?? [])
-        .filter((job) => job.scope !== 'feature')
+        .filter((job) => job.scope !== 'feature' && job.scope !== 'span')
         .map((job) => job.project.id),
     );
     return supervisionProjects.filter((project) => projectIds.has(project.id));
@@ -101,13 +103,43 @@ export default function SupervisionScreen() {
   }, [projects]);
 
   const spanStatus = (job: AssignmentJob): SpanStatus => {
-    const status = job.feature?.status ?? job.status;
+    const status = job.scope === 'span' ? job.status : job.feature?.status ?? job.status;
     if (status === 'pending') return 'assigned';
     if (status === 'under_review') return 'submitted';
     if (status === 'redo') return 'redo';
     if (status === 'approved') return 'approved';
     return 'active';
   };
+
+  const openSpanJob = useCallback(
+    async (job: AssignmentJob) => {
+      if (openingSpanId) return;
+      setOpeningSpanId(job.id);
+      try {
+        const detail = await getAssignmentJob(job.id);
+        const featureIds = detail.covered_feature_ids ?? [];
+        const firstFeatureId = featureIds[0];
+        if (!firstFeatureId) throw new Error('This span has no components to inspect.');
+        router.push({
+          pathname: '/supervision/feature/[featureId]',
+          params: {
+            featureId: firstFeatureId,
+            projectId: job.project.id,
+            spanId: detail.span_id ?? job.span?.id ?? '',
+            spanFeatureCount: String(featureIds.length),
+          },
+        });
+      } catch (err) {
+        Alert.alert(
+          'Could not open span',
+          err instanceof Error ? err.message : 'Try refreshing your supervision tasks.',
+        );
+      } finally {
+        setOpeningSpanId(null);
+      }
+    },
+    [openingSpanId],
+  );
 
   // Same workflow chips as the Survey tab: engineers filter their span queue.
   const filterChips: { key: SpanStatus | 'all'; label: string }[] = [
@@ -262,12 +294,17 @@ export default function SupervisionScreen() {
                   job={job}
                   project={projectById[job.project.id]}
                   status={spanStatus(job)}
-                  onPress={() =>
+                  opening={openingSpanId === job.id}
+                  onPress={() => {
+                    if (job.scope === 'span') {
+                      void openSpanJob(job);
+                      return;
+                    }
                     router.push({
                       pathname: '/supervision/feature/[featureId]',
                       params: { featureId: job.feature?.id ?? '', projectId: job.project.id },
-                    })
-                  }
+                    });
+                  }}
                 />
               ))
             )}
@@ -312,17 +349,27 @@ function SpanTaskCard({
   job,
   project,
   status,
+  opening,
   onPress,
 }: {
   job: AssignmentJob;
   project?: Project;
   status: SpanStatus;
+  opening: boolean;
   onPress: () => void;
 }) {
   const colors = useThemeStore((s) => s.colors);
   const feature = job.feature;
-  if (!feature) return null;
-  const shortId = feature.id.slice(-8);
+  const isSpan = job.scope === 'span';
+  if (!isSpan && !feature) return null;
+
+  const spanId = isSpan ? job.span?.id ?? job.span_id ?? '' : '';
+  const shortId = (isSpan ? spanId : feature?.id ?? '').slice(-8);
+  const title = isSpan
+    ? `Span ${spanId || shortId}`
+    : `${feature?.layer_name ?? 'Assigned'} span`;
+  const componentCount = job.span?.feature_count ?? job.feature_count ?? 0;
+  const badgeStatus = isSpan ? job.status : feature?.status ?? job.status;
 
   return (
     <TouchableOpacity
@@ -330,22 +377,23 @@ function SpanTaskCard({
       onPress={onPress}
       activeOpacity={0.7}
       accessibilityRole="button"
-      accessibilityLabel={`${feature.layer_name} span ${shortId}, ${job.project.name}, status ${status}`}
+      accessibilityLabel={`${title}, ${job.project.name}, status ${status}`}
     >
       <View style={styles.jobHeader}>
         <View style={styles.jobInfo}>
           <Text style={[styles.jobName, { color: colors.textPrimary }]} numberOfLines={1}>
-            {feature.layer_name} span
+            {title}
           </Text>
           <Text style={[styles.jobMeta, { color: colors.textSecondary }]} numberOfLines={1}>
             {job.project.name}
           </Text>
           <Text style={[styles.jobDate, { color: colors.textTertiary }]} numberOfLines={1}>
-            {project ? `${lldVersionLabel(project)} · ` : ''}span {shortId}
+            {project ? `${lldVersionLabel(project)} · ` : ''}
+            {isSpan ? `${componentCount} components · span ${shortId}` : `span ${shortId}`}
           </Text>
         </View>
         <View style={{ alignItems: 'flex-end', gap: 6 }}>
-          <StatusBadge status={feature.status} />
+          <StatusBadge status={badgeStatus} />
           <ChevronRight size={16} stroke={colors.textTertiary} />
         </View>
       </View>
@@ -354,7 +402,7 @@ function SpanTaskCard({
           Assigned: {new Date(job.created_at).toLocaleDateString()}
         </Text>
         <Text style={[styles.jobDate, { color: colors.primary, fontWeight: '700' }]}>
-          Inspect span
+          {opening ? 'Opening…' : 'Inspect span'}
         </Text>
       </View>
     </TouchableOpacity>

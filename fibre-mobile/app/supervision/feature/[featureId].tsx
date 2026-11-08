@@ -29,6 +29,7 @@ import { StatusBadge } from '../../../components/ui/StatusBadge';
 import { Button } from '../../../components/ui/Button';
 import { Toast } from '../../../components/ui/Toast';
 import { entryFields } from '../../../lib/components/MeasurementEntrySheet';
+import SpanInspectionForm from '../../../lib/components/SpanInspectionForm';
 import {
   getFeaturePhotos,
   submitFeatures,
@@ -37,6 +38,13 @@ import {
   type FeaturePhotoData,
 } from '../../../lib/api/features';
 import { displayValue, getSupervisionFeature, lldVersionLabel } from '../../../lib/api/supervision';
+import {
+  applySpanInspection,
+  inspectionProgress,
+  NUMERIC_INSPECTION_KEYS,
+  seedSpanInspection,
+  type CheckValue,
+} from '../../../lib/utils/spanInspection';
 import { getProject } from '../../../lib/api/projects';
 import type { Feature, FieldSchemaField, Project } from '../../../lib/utils/types';
 import { useAuthStore } from '../../../lib/stores/auth';
@@ -133,9 +141,16 @@ function formatNumber(value: number): string {
 }
 
 export default function SupervisionFeatureScreen() {
-  const params = useLocalSearchParams<{ featureId?: string; projectId?: string }>();
+  const params = useLocalSearchParams<{
+    featureId?: string;
+    projectId?: string;
+    spanId?: string;
+    spanFeatureCount?: string;
+  }>();
   const featureId = String(params.featureId ?? '');
   const projectId = String(params.projectId ?? '');
+  const spanId = String(params.spanId ?? '');
+  const spanFeatureCount = Number(params.spanFeatureCount ?? 0) || 0;
   const colors = useThemeStore((s) => s.colors);
   const { user } = useAuthStore();
 
@@ -145,6 +160,8 @@ export default function SupervisionFeatureScreen() {
   const [photos, setPhotos] = useState<FeaturePhotoData[]>([]);
   const [photoLimit, setPhotoLimit] = useState(0);
   const [values, setValues] = useState<Record<string, string | boolean>>({});
+  const [inspectionValues, setInspectionValues] = useState<Record<string, string>>({});
+  const [inspectionChecks, setInspectionChecks] = useState<Record<string, CheckValue>>({});
   const [customFields, setCustomFields] = useState<CustomField[]>([]);
   const [notes, setNotes] = useState('');
   const [loading, setLoading] = useState(true);
@@ -172,6 +189,14 @@ export default function SupervisionFeatureScreen() {
       setProject(proj);
       setLayerName(data.layer_name || data.feature.layer_name || data.feature.layer_id);
       setValues(seedValues(data.feature));
+      const inspection = seedSpanInspection({
+        feature: data.feature,
+        projectId,
+        inspectorName: user?.full_name ?? '',
+        spanId,
+      });
+      setInspectionValues(inspection.values);
+      setInspectionChecks(inspection.checks);
       setNotes(data.feature.comparison_notes ?? '');
       setCustomFields(
         readCustomFields(data.feature.field_measurements as Record<string, unknown> | null),
@@ -188,13 +213,22 @@ export default function SupervisionFeatureScreen() {
     } finally {
       setLoading(false);
     }
-  }, [featureId, projectId]);
+  }, [featureId, projectId, spanId, user?.full_name]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  const fields = useMemo(() => entryFields(feature), [feature]);
+  const fields = useMemo(
+    () =>
+      entryFields(feature).filter(
+        (field) =>
+          !/(depth|width|length|trench|surface|utilit|gps|joint|span|inspection|sub.?span)/i.test(
+            `${field.key} ${field.label}`,
+          ),
+      ),
+    [feature],
+  );
   const planned = useMemo(
     () => (feature?.properties ?? {}) as Record<string, unknown>,
     [feature?.properties],
@@ -234,10 +268,11 @@ export default function SupervisionFeatureScreen() {
     };
   }, [feature?.geometry]);
 
-  const measuredCount = fields.filter((field) => {
-    const value = values[field.key];
-    return typeof value === 'boolean' ? true : String(value ?? '').trim() !== '';
-  }).length;
+  const measuredCount =
+    fields.filter((field) => {
+      const value = values[field.key];
+      return typeof value === 'boolean' ? true : String(value ?? '').trim() !== '';
+    }).length + inspectionProgress(inspectionValues, inspectionChecks);
 
   const deviation = feature?.deviation ?? null;
   const outsideCount = deviation?.fields.filter((field) => !field.within_tolerance).length ?? 0;
@@ -249,6 +284,12 @@ export default function SupervisionFeatureScreen() {
 
   const setValue = (key: string, value: string | boolean) =>
     setValues((prev) => ({ ...prev, [key]: value }));
+
+  const setInspectionValue = (key: string, value: string) =>
+    setInspectionValues((prev) => ({ ...prev, [key]: value }));
+
+  const setInspectionCheck = (key: string, value: CheckValue) =>
+    setInspectionChecks((prev) => ({ ...prev, [key]: value }));
 
   const updateCustom = (key: string, patch: Partial<CustomField>) =>
     setCustomFields((prev) => prev.map((field) => (field.key === key ? { ...field, ...patch } : field)));
@@ -334,6 +375,19 @@ export default function SupervisionFeatureScreen() {
       return;
     }
 
+    const invalidInspection = NUMERIC_INSPECTION_KEYS.filter((key) => {
+      const value = String(inspectionValues[key] ?? '').trim();
+      return value !== '' && Number.isNaN(Number(value));
+    });
+    if (invalidInspection.length > 0) {
+      setToast({
+        visible: true,
+        message: 'Measured length, depth and width must be numbers.',
+        type: 'error',
+      });
+      return;
+    }
+
     const incompleteCustom = customFields.find(
       (field) => field.label.trim() !== '' && field.value.trim() === '',
     );
@@ -378,9 +432,19 @@ export default function SupervisionFeatureScreen() {
       };
     }
 
+    const savedWithInspection = applySpanInspection(
+      saved,
+      inspectionValues,
+      inspectionChecks,
+    );
+
     setSaving(true);
     try {
-      const result = await updateFieldMeasurements(feature.id, saved, notes.trim());
+      const result = await updateFieldMeasurements(
+        feature.id,
+        savedWithInspection,
+        notes.trim(),
+      );
       setFeature((prev) =>
         prev
           ? {
@@ -468,7 +532,9 @@ export default function SupervisionFeatureScreen() {
             {layerName || 'Assigned span'}
           </Text>
           <Text style={[styles.subtitle, { color: colors.textSecondary }]} numberOfLines={1}>
-            {project ? `${project.name} · ${lldVersionLabel(project)}` : 'Supervision span'}
+            {project
+              ? `${project.name} · ${lldVersionLabel(project)}${spanId ? ` · Span ${spanId}` : ''}`
+              : 'Supervision span'}
           </Text>
         </View>
         <StatusBadge status={feature.status} />
@@ -563,7 +629,7 @@ export default function SupervisionFeatureScreen() {
         {/* The inspection form */}
         <View style={[styles.card, { backgroundColor: colors.surface }]}>
           <View style={styles.cardTitleRow}>
-            <Text style={[styles.cardTitle, { color: colors.textPrimary }]}>Inspection form</Text>
+            <Text style={[styles.cardTitle, { color: colors.textPrimary }]}>Trench inspection</Text>
             {deviation && deviation.fields.length > 0 ? (
               <View
                 style={[
@@ -593,12 +659,24 @@ export default function SupervisionFeatureScreen() {
             ) : null}
           </View>
           <Text style={[styles.cardHint, { color: colors.textSecondary }]}>
-            {measuredCount} of {fields.length} readings recorded · planned values stay read-only
+            {measuredCount} inspection fields recorded · planned values stay read-only
+          </Text>
+
+          <SpanInspectionForm
+            values={inspectionValues}
+            checks={inspectionChecks}
+            spanFeatureCount={spanFeatureCount}
+            onValueChange={setInspectionValue}
+            onCheckChange={setInspectionCheck}
+          />
+
+          <Text style={[styles.sectionLabel, { color: colors.textTertiary }]}>
+            Other layer readings
           </Text>
 
           {fields.length === 0 ? (
             <Text style={[styles.muted, { color: colors.textSecondary }]}>
-              This span has no configured measurement fields. Add your own below.
+              No additional layer readings.
             </Text>
           ) : (
             fields.map((field) => {
@@ -810,7 +888,7 @@ export default function SupervisionFeatureScreen() {
 
           <View style={styles.field}>
             <Text style={[styles.fieldLabel, { color: colors.textPrimary }]}>
-              Comparison notes
+              Remarks
             </Text>
             <TextInput
               style={[
@@ -823,11 +901,11 @@ export default function SupervisionFeatureScreen() {
               ]}
               value={notes}
               onChangeText={setNotes}
-              placeholder="Anything that differs from the plan — access, extra depth, a changed route…"
+              placeholder="Anything the planner should know — access, extra depth, a changed route…"
               placeholderTextColor={colors.textTertiary}
               multiline
               numberOfLines={3}
-              accessibilityLabel="Comparison notes"
+              accessibilityLabel="Remarks"
             />
           </View>
 
@@ -965,6 +1043,13 @@ const styles = StyleSheet.create({
   cardTitle: { fontSize: 15, fontWeight: '700' },
   countLabel: { ...Type.meta, fontWeight: '600' },
   cardHint: { ...Type.meta, marginTop: 2 },
+  sectionLabel: {
+    ...Type.meta,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+    marginTop: Spacing.md,
+  },
   muted: { ...Type.body, marginTop: Spacing.sm },
   summaryPill: {
     flexDirection: 'row',

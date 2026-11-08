@@ -235,9 +235,14 @@ export interface AssignmentPolygon {
 export interface AssignmentJob {
   id: string;
   project: { id: string; name: string; status?: string };
-  scope: 'project' | 'layer' | 'feature' | 'polygon';
+  scope: 'project' | 'layer' | 'feature' | 'polygon' | 'span';
   /** Present on polygon-scope jobs: the assigned area. */
   polygon?: { id: string; name: string; geometry: unknown; feature_count?: number };
+  /** Present on span-scope jobs: one chamber-to-chamber supervision unit. */
+  span?: { id: string; feature_count: number };
+  span_id?: string | null;
+  /** A span job's components, returned by the job-detail endpoint. */
+  covered_feature_ids?: string[];
   scope_display: string;
   assignee: { id: string; email: string; full_name: string };
   feature_count: number;

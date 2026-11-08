@@ -21,6 +21,10 @@ export async function listAssignments(params?: {
   return apiFetch<AssignmentJob[]>(`/api/assignments/${qs ? `?${qs}` : ''}`);
 }
 
+export async function getAssignmentJob(jobId: string): Promise<AssignmentJob> {
+  return apiFetch<AssignmentJob>(`/api/assignments/${jobId}/`);
+}
+
 export async function getJobsForEngineer(
   engineerId: string,
   params?: {
