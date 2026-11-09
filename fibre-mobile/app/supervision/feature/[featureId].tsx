@@ -600,18 +600,16 @@ export default function SupervisionFeatureScreen() {
             </Text>
           ) : (
             <View style={styles.photoActions}>
-              {Platform.OS !== 'web' && (
-                <Button
-                  title="Take photo"
-                  variant="secondary"
-                  size="sm"
-                  fullWidth={false}
-                  style={styles.photoBtn}
-                  icon={<Camera size={16} stroke={colors.primary} />}
-                  loading={uploadingPhoto}
-                  onPress={() => addPhoto('camera')}
-                />
-              )}
+              <Button
+                title="Take photo"
+                variant="secondary"
+                size="sm"
+                fullWidth={false}
+                style={styles.photoBtn}
+                icon={<Camera size={16} stroke={colors.primary} />}
+                loading={uploadingPhoto}
+                onPress={() => addPhoto('camera')}
+              />
               <Button
                 title={Platform.OS === 'web' ? 'Choose photo' : 'Gallery'}
                 variant="secondary"

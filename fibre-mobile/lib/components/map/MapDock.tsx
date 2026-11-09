@@ -5,6 +5,9 @@
 //
 //   Locate · Draw trench · Add point · Undo · More
 //
+// Each action carries a one-line hint under its label, so the icon-only
+// controls say what they are for without opening the tools sheet.
+//
 // This replaces a "+" FAB that unfolded into eight labelled rows (Undo, Add
 // Point, Draw Trench, Survey Changes, View, Basemap, Move, My Location)
 // stacked up the right edge of the map. Opening it covered the map; closing
@@ -68,6 +71,7 @@ export default function MapDock({
     >
       <DockItem
         label="Locate"
+        hint="My GPS"
         icon={<Crosshair size={22} stroke={following ? colors.primary : colors.textSecondary} />}
         active={following}
         tint={colors.primary}
@@ -80,6 +84,7 @@ export default function MapDock({
 
       <DockItem
         label="Draw"
+        hint="New trench"
         icon={
           <Spline
             size={22}
@@ -97,6 +102,7 @@ export default function MapDock({
 
       <DockItem
         label="Add"
+        hint="New point"
         icon={
           <MapPin
             size={22}
@@ -113,6 +119,7 @@ export default function MapDock({
 
       <DockItem
         label="Undo"
+        hint="Last change"
         icon={
           <Undo2
             size={22}
@@ -130,6 +137,7 @@ export default function MapDock({
 
       <DockItem
         label="More"
+        hint="All tools"
         icon={
           <SlidersHorizontal
             size={22}
@@ -148,6 +156,7 @@ export default function MapDock({
 
 function DockItem({
   label,
+  hint,
   icon,
   onPress,
   active = false,
@@ -159,6 +168,7 @@ function DockItem({
   accessibilityState,
 }: {
   label: string;
+  hint: string;
   icon: React.ReactNode;
   onPress: () => void;
   active?: boolean;
@@ -173,6 +183,7 @@ function DockItem({
   const resolved = useThemeStore((s) => s.resolved);
   const chrome = chromeColors(colors, resolved);
   const ink = disabled ? chrome.muted : active ? tintInk ?? tint : colors.textSecondary;
+  const hintInk = disabled ? chrome.muted : active ? tintInk ?? tint : colors.textTertiary;
 
   return (
     <Pressable
@@ -199,6 +210,9 @@ function DockItem({
       <Text style={[styles.label, { color: ink }]} numberOfLines={1}>
         {label}
       </Text>
+      <Text style={[styles.hint, { color: hintInk }]} numberOfLines={1}>
+        {hint}
+      </Text>
     </Pressable>
   );
 }
@@ -222,8 +236,9 @@ const styles = StyleSheet.create({
     gap: 2,
     minWidth: Touch.minWidth,
   },
-  iconWrap: { width: 26, height: 26, alignItems: 'center', justifyContent: 'center' },
+  iconWrap: { width: 24, height: 24, alignItems: 'center', justifyContent: 'center' },
   label: { ...Type.meta, fontSize: 13, fontWeight: '600' },
+  hint: { ...Type.meta, fontSize: 9, lineHeight: 10, fontWeight: '500' },
   badge: {
     position: 'absolute',
     top: -4,
