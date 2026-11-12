@@ -22,6 +22,9 @@ web-prod/
 # watcher cannot start (no Watchman); regenerated, never committed.
 fibre-mobile/web-verify/
 
+# Local Expo web export produced by dev-web.mjs; regenerated, never committed.
+fibre-mobile/.web-dev/
+
 # ── Machine-specific local APK dev scripts (hardcoded paths & creds) ──
 # Local build helpers only; never commit — they embed the dev machine's
 # D:/C: paths, LAN IP and PGPASSWORD, and would break or leak on any other
