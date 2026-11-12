@@ -238,9 +238,12 @@ export interface AssignmentJob {
   scope: 'project' | 'layer' | 'feature' | 'polygon' | 'span';
   /** Present on polygon-scope jobs: the assigned area. */
   polygon?: { id: string; name: string; geometry: unknown; feature_count?: number };
-  /** Present on span-scope jobs: one chamber-to-chamber supervision unit. */
-  span?: { id: string; feature_count: number };
+  /** Present on span-scope jobs: one layer's supervision unit. */
+  span?: { id: string; layer_id?: string; feature_count: number };
   span_id?: string | null;
+  /** The layer a span job covers; layer jobs use `layer` instead. */
+  layer_id?: string | null;
+  layer?: { id: string; name?: string };
   /** A span job's components, returned by the job-detail endpoint. */
   covered_feature_ids?: string[];
   scope_display: string;

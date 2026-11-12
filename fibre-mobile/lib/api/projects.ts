@@ -109,6 +109,20 @@ export async function getFeatureDetail(
   );
 }
 
+/**
+ * GET /api/projects/{id}/map-data/ — every served feature with geometry in
+ * one payload. Used by the span inspector to draw all of a span's components
+ * without one request per component.
+ */
+export async function getProjectMapData(projectId: string): Promise<{
+  project_id: string;
+  layers: { name: string; type: string }[];
+  features: GeoJSONFeature[];
+  geojson: Record<string, { type: string; features: GeoJSONFeature[] }>;
+}> {
+  return apiFetch(`/api/projects/${projectId}/map-data/`);
+}
+
 // ── Import ────────────────────────────────────────────────────────────────
 
 export async function uploadGpkg(

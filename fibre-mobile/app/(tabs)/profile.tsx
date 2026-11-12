@@ -13,6 +13,7 @@ import { useThemeStore } from '../../lib/stores/theme';
 import { useAuthStore } from '../../lib/stores/auth';
 import { useOfflineStore } from '../../lib/stores/offline';
 import { useSurveyStore } from '../../lib/stores/survey';
+import { useSurveyFeaturesStore } from '../../lib/stores/survey-features';
 import { Card } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
 import { StatusBadge } from '../../components/ui/StatusBadge';
@@ -35,7 +36,16 @@ export default function ProfileScreen() {
   const resolvedTheme = useThemeStore((s) => s.resolved);
   const toggleTheme = useThemeStore((s) => s.toggleTheme);
   const { user, logout } = useAuthStore();
-  const { isOnline, lastSyncAt, isSyncing, pendingSyncCount, setSyncing, setLastSync } = useOfflineStore();
+  const {
+    isOnline,
+    lastSyncAt,
+    isSyncing,
+    pendingSyncCount,
+    failedSyncCount,
+    syncError,
+    setSyncing,
+    setLastSync,
+  } = useOfflineStore();
 
   const handleLogout = async () => {
     const confirmed = await confirmAction(
@@ -49,12 +59,25 @@ export default function ProfileScreen() {
   };
 
   const handleManualSync = async () => {
+    if (!isOnline || isSyncing) return;
     setSyncing(true);
+    useOfflineStore.getState().setSyncStatus({ failedSyncCount: 0, syncError: null });
     try {
+      // The local edit queue is the work the engineer can see on the map. It
+      // must be replayed too; the old button only drained the server queue,
+      // so a manual Sync Now could leave local changes behind.
+      const local = await useSurveyFeaturesStore.getState().flushPendingEdits();
       await useSurveyStore.getState().processSyncQueue();
-      setLastSync(new Date().toISOString());
-    } catch {
-      // processSyncQueue records its own error state; nothing else to do here
+      if (local.failed === 0) {
+        setLastSync(new Date().toISOString());
+      }
+    } catch (err) {
+      useOfflineStore.getState().setSyncStatus({
+        syncError:
+          err instanceof Error
+            ? err.message
+            : 'Sync failed — your queued edits are still on this device.',
+      });
     } finally {
       setSyncing(false);
     }
@@ -97,20 +120,36 @@ export default function ProfileScreen() {
             </View>
             <Text style={[styles.syncLast, { color: colors.textTertiary }]}>
               {lastSyncAt
-                ? `Last sync: ${new Date(lastSyncAt).toLocaleTimeString()}`
+                ? `Last successful sync: ${new Date(lastSyncAt).toLocaleTimeString()}`
                 : 'Never synced'}
             </Text>
           </View>
           {pendingSyncCount > 0 && (
             <Text style={[styles.pendingText, { color: colors.warning }]}>
-              {pendingSyncCount} item{pendingSyncCount !== 1 ? 's' : ''} pending sync
+              {pendingSyncCount} item{pendingSyncCount !== 1 ? 's' : ''} queued for sync
             </Text>
           )}
+          {failedSyncCount > 0 && (
+            <Text style={[styles.pendingText, { color: colors.error }]}>
+              {failedSyncCount} item{failedSyncCount !== 1 ? 's' : ''} failed on the last attempt
+            </Text>
+          )}
+          {syncError ? (
+            <Text style={[styles.syncError, { color: colors.error }]} numberOfLines={3}>
+              {syncError}
+            </Text>
+          ) : null}
+          {!isOnline && pendingSyncCount > 0 ? (
+            <Text style={[styles.syncError, { color: colors.warning }]}>
+              Connect to the network to replay them.
+            </Text>
+          ) : null}
           <Button
-            title={isSyncing ? 'Syncing...' : 'Sync Now'}
+            title={isSyncing ? 'Syncing...' : isOnline ? 'Sync Now' : 'Offline'}
             variant="secondary"
             size="sm"
             loading={isSyncing}
+            disabled={!isOnline}
             onPress={handleManualSync}
             style={styles.syncBtn}
           />
@@ -195,7 +234,8 @@ const styles = StyleSheet.create({
   },
   syncText: { fontSize: 14, fontWeight: '500' },
   syncLast: { fontSize: 13 },
-  pendingText: { fontSize: 13, fontWeight: '500', marginBottom: Spacing.md },
+  pendingText: { fontSize: 13, fontWeight: '500', marginBottom: Spacing.xs },
+  syncError: { fontSize: 13, lineHeight: 18, marginBottom: Spacing.sm },
   syncBtn: { marginTop: Spacing.sm },
   settingRow: {
     flexDirection: 'row',

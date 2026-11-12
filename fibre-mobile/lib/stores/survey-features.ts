@@ -178,10 +178,22 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
   flushPendingEdits: async () => {
     const queue = get().pendingEdits;
     if (queue.length === 0 || get().isFlushing) return { synced: 0, failed: 0 };
-    if (!useOfflineStore.getState().isOnline) return { synced: 0, failed: queue.length };
+    if (!useOfflineStore.getState().isOnline) {
+      useOfflineStore.getState().setSyncStatus({
+        pendingSyncCount: queue.length,
+        syncError: 'Offline — queued edits will sync when the connection returns.',
+      });
+      return { synced: 0, failed: queue.length };
+    }
     set({ isFlushing: true });
+    useOfflineStore.getState().setSyncStatus({
+      pendingSyncCount: queue.length,
+      failedSyncCount: 0,
+      syncError: null,
+    });
     let synced = 0;
     let failed = 0;
+    let lastError = '';
     const remaining: PendingSurveyEdit[] = [];
 
     // Replace the local placeholder with the server record so the map/list stop
@@ -232,12 +244,26 @@ export const useSurveyFeaturesStore = create<SurveyFeaturesState>((set, get) => 
       } catch (err) {
         failed++;
         remaining.push(edit);
-        console.warn('[SurveyFeatures] Replay failed, edit stays queued:', err instanceof Error ? err.message : err);
+        lastError = err instanceof Error ? err.message : String(err);
+        console.warn('[SurveyFeatures] Replay failed, edit stays queued:', lastError);
       }
     }
 
     set({ pendingEdits: remaining, isFlushing: false });
-    if (synced > 0) useOfflineStore.getState().setLastSync(new Date().toISOString());
+    useOfflineStore.getState().setSyncStatus({
+      pendingSyncCount: remaining.length,
+      failedSyncCount: failed,
+      syncError: failed
+        ? `${failed} queued ${failed === 1 ? 'edit' : 'edits'} failed to sync${
+            lastError ? `: ${lastError}` : '.'
+          }`
+        : null,
+    });
+    // Only a completed replay is a successful sync. A failure stays visible in
+    // the queue and must never advance the last-success timestamp.
+    if (failed === 0 && synced > 0) {
+      useOfflineStore.getState().setLastSync(new Date().toISOString());
+    }
     console.log(`[SurveyFeatures] Offline replay: ${synced} synced, ${failed} still queued`);
     return { synced, failed };
   },
@@ -605,7 +631,11 @@ export async function hydrateOfflineQueue(): Promise<void> {
   }
   offlineReady = true;
   const pending = useSurveyFeaturesStore.getState().pendingEdits.length;
-  useOfflineStore.getState().setPendingCount(pending);
+  useOfflineStore.getState().setSyncStatus({
+    pendingSyncCount: pending,
+    failedSyncCount: 0,
+    syncError: null,
+  });
   if (pending > 0 && useOfflineStore.getState().isOnline) {
     void useSurveyFeaturesStore.getState().flushPendingEdits();
   }

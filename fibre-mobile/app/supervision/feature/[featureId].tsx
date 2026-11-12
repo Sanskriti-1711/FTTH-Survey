@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
@@ -45,7 +45,8 @@ import {
   seedSpanInspection,
   type CheckValue,
 } from '../../../lib/utils/spanInspection';
-import { getProject } from '../../../lib/api/projects';
+import { getAssignmentJob } from '../../../lib/api/assignments';
+import { getProject, getProjectMapData } from '../../../lib/api/projects';
 import type { Feature, FieldSchemaField, Project } from '../../../lib/utils/types';
 import { useAuthStore } from '../../../lib/stores/auth';
 import { useThemeStore } from '../../../lib/stores/theme';
@@ -59,12 +60,41 @@ import { Radius, Spacing, Type } from '../../../lib/theme/colors';
 // the rest of the project is shown, and nothing here edits the LLD baseline.
 
 type GeoFeature = MapLayerData['features'][number];
+type SpanGeometryType = 'Point' | 'LineString' | 'Polygon';
+
+// One colour per layer/geometry source keeps the whole span readable even when
+// its components come from several layers.
+const SPAN_LAYER_COLORS = [
+  '#2563EB',
+  '#F97316',
+  '#10B981',
+  '#8B5CF6',
+  '#EF4444',
+  '#0891B2',
+  '#CA8A04',
+  '#DB2777',
+  '#4D7C0F',
+  '#7C3AED',
+];
+
+function geometryKind(type: unknown): SpanGeometryType | null {
+  if (type === 'Point' || type === 'MultiPoint') return 'Point';
+  if (type === 'LineString' || type === 'MultiLineString') return 'LineString';
+  if (type === 'Polygon' || type === 'MultiPolygon') return 'Polygon';
+  return null;
+}
 
 function toGeoFeature(feature: Feature): GeoFeature {
   return {
     type: 'Feature',
     geometry: feature.geometry as GeoFeature['geometry'],
-    properties: { ...feature.properties, id: feature.id, _feature_id: feature.id },
+    properties: {
+      ...feature.properties,
+      id: feature.id,
+      _feature_id: feature.id,
+      layer_id: feature.layer_id,
+      layer_name: feature.layer_name,
+    },
   };
 }
 
@@ -81,6 +111,50 @@ function collectCoords(geometry: unknown, out: [number, number][]): void {
     for (const child of node) walk(child);
   };
   walk(g.coordinates);
+}
+
+// A span's cable and drop layers do not carry SPAN_ID / PARENT_TRENCH. They
+// attach to the civil span through the LLD's own keys:
+//   distribution duct (PDP_ID + duct_uid)
+//     -> coupler (DIST_DUCT_ID)
+//       -> drop duct (DROP_DUCT_UID + ADDR_ID)
+//         -> drop cable (ADDR_ID)
+// Chambers often carry only the neighbouring trench, so a point sitting on a
+// span trench endpoint is the reliable link for them. Every match stays scoped
+// to this span; do not add whole layers.
+function idOfSpanFeature(feature: GeoFeature): string {
+  const props = feature.properties ?? {};
+  return String(props.id ?? props.feature_id ?? '').trim();
+}
+
+function normalizeLayer(value: unknown): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function featureMatchesLayer(feature: GeoFeature, layerId: string): boolean {
+  const target = normalizeLayer(layerId);
+  if (!target) return true;
+  const props = feature.properties ?? {};
+  return [props.layer, props.layer_name, props.layer_id].some(
+    (value) => normalizeLayer(value) === target,
+  );
+}
+
+// A span is one layer's work. Keep only the covered components that belong to
+// the job's layer; never pull in a chamber, duct or cable from another layer.
+function selectLayerSpanFeatures(
+  mapFeatures: GeoFeature[],
+  coveredIds: string[],
+  layerId: string,
+): GeoFeature[] {
+  const covered = new Set(coveredIds.map(String));
+  return mapFeatures.filter((feature) => {
+    const id = idOfSpanFeature(feature);
+    return Boolean(id) && covered.has(id) && featureMatchesLayer(feature, layerId);
+  });
 }
 
 function readingText(entry: unknown): string {
@@ -144,11 +218,13 @@ export default function SupervisionFeatureScreen() {
   const params = useLocalSearchParams<{
     featureId?: string;
     projectId?: string;
+    jobId?: string;
     spanId?: string;
     spanFeatureCount?: string;
   }>();
   const featureId = String(params.featureId ?? '');
   const projectId = String(params.projectId ?? '');
+  const jobId = String(params.jobId ?? '');
   const spanId = String(params.spanId ?? '');
   const spanFeatureCount = Number(params.spanFeatureCount ?? 0) || 0;
   const colors = useThemeStore((s) => s.colors);
@@ -157,6 +233,10 @@ export default function SupervisionFeatureScreen() {
   const [project, setProject] = useState<Project | null>(null);
   const [feature, setFeature] = useState<Feature | null>(null);
   const [layerName, setLayerName] = useState('');
+  const [spanMapFeatures, setSpanMapFeatures] = useState<GeoFeature[]>([]);
+  const [spanMapLoading, setSpanMapLoading] = useState(false);
+  const [spanMapError, setSpanMapError] = useState<string | null>(null);
+  const loadSeqRef = useRef(0);
   const [photos, setPhotos] = useState<FeaturePhotoData[]>([]);
   const [photoLimit, setPhotoLimit] = useState(0);
   const [values, setValues] = useState<Record<string, string | boolean>>({});
@@ -178,6 +258,7 @@ export default function SupervisionFeatureScreen() {
 
   const load = useCallback(async () => {
     if (!projectId || !featureId) return;
+    const seq = ++loadSeqRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -188,6 +269,11 @@ export default function SupervisionFeatureScreen() {
       setFeature(data.feature);
       setProject(proj);
       setLayerName(data.layer_name || data.feature.layer_name || data.feature.layer_id);
+      // Draw the opening feature immediately, then replace it with every
+      // component of the span once the job's component list has loaded.
+      setSpanMapFeatures(data.feature.geometry ? [toGeoFeature(data.feature)] : []);
+      setSpanMapError(null);
+      setSpanMapLoading(Boolean(jobId));
       setValues(seedValues(data.feature));
       const inspection = seedSpanInspection({
         feature: data.feature,
@@ -208,12 +294,58 @@ export default function SupervisionFeatureScreen() {
       } catch {
         setPhotos([]);
       }
+
+      // A span job covers components from exactly one layer. Take the covered
+      // ids from the job, keep only the ones on that layer, and draw that layer
+      // alone — never expand through chambers, ducts or cables on other layers.
+      if (jobId) {
+        void (async () => {
+          try {
+            const detail = await getAssignmentJob(jobId);
+            const coveredIds = detail.covered_feature_ids ?? [];
+            if (coveredIds.length === 0) return;
+
+            const jobLayerId = String(
+              detail.layer_id ??
+                detail.layer?.id ??
+                detail.span?.layer_id ??
+                data.feature.layer_id ??
+                '',
+            ).trim();
+            const mapData = await getProjectMapData(projectId);
+            const matched = selectLayerSpanFeatures(
+              mapData.features ?? [],
+              coveredIds,
+              jobLayerId,
+            );
+            const primary = toGeoFeature(data.feature);
+
+            if (
+              data.feature.geometry &&
+              featureMatchesLayer(primary, jobLayerId) &&
+              !matched.some((candidate) => idOfSpanFeature(candidate) === data.feature.id)
+            ) {
+              matched.unshift(primary);
+            }
+
+            if (seq === loadSeqRef.current && matched.length > 0) {
+              setSpanMapFeatures(matched);
+            }
+          } catch {
+            if (seq === loadSeqRef.current) {
+              setSpanMapError('Could not load this layer span.');
+            }
+          } finally {
+            if (seq === loadSeqRef.current) setSpanMapLoading(false);
+          }
+        })();
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load this span');
     } finally {
       setLoading(false);
     }
-  }, [featureId, projectId, spanId, user?.full_name]);
+  }, [featureId, jobId, projectId, spanId, user?.full_name]);
 
   useEffect(() => {
     void load();
@@ -234,25 +366,56 @@ export default function SupervisionFeatureScreen() {
     [feature?.properties],
   );
 
-  const mapLayers: MapLayerData[] = useMemo(
-    () =>
-      feature?.geometry
-        ? [
-            {
-              id: 'assigned-span',
-              name: layerName || 'Assigned span',
-              color: colors.primary,
-              visible: true,
-              features: [toGeoFeature(feature)],
-            },
-          ]
-        : [],
-    [feature, layerName, colors.primary],
-  );
+  const mapLayers: MapLayerData[] = useMemo(() => {
+    const sourceFeatures =
+      spanMapFeatures.length > 0
+        ? spanMapFeatures
+        : feature?.geometry
+          ? [toGeoFeature(feature)]
+          : [];
+
+    // A MapLibre source is painted as one geometry kind. Split the span by
+    // (layer, geometry) so a point that happens to share a layer with a duct
+    // or trench cannot hide the linework (and vice versa).
+    const groups = new Map<
+      string,
+      { name: string; geometryType: SpanGeometryType; features: GeoFeature[] }
+    >();
+    for (const item of sourceFeatures) {
+      const geometryType = geometryKind(item.geometry?.type);
+      if (!geometryType) continue;
+      const props = item.properties ?? {};
+      const name = String(props.layer ?? props.layer_name ?? layerName ?? 'Span components');
+      const key = `${name}::${geometryType}`;
+      const group = groups.get(key);
+      if (group) group.features.push(item);
+      else groups.set(key, { name, geometryType, features: [item] });
+    }
+
+    // Polygons first, then lines, then points so component points stay tappable
+    // above the linear work they sit on.
+    const drawOrder: Record<SpanGeometryType, number> = {
+      Polygon: 0,
+      LineString: 1,
+      Point: 2,
+    };
+    return [...groups.values()]
+      .sort((a, b) => drawOrder[a.geometryType] - drawOrder[b.geometryType])
+      .map((group, index) => ({
+        id: `span-${index}-${group.geometryType.toLowerCase()}`,
+        name: group.name,
+        color: SPAN_LAYER_COLORS[index % SPAN_LAYER_COLORS.length],
+        visible: true,
+        geometryType: group.geometryType,
+        features: group.features,
+      }));
+  }, [spanMapFeatures, feature, layerName]);
 
   const fitBounds = useMemo(() => {
     const coords: [number, number][] = [];
-    collectCoords(feature?.geometry ?? null, coords);
+    for (const layer of mapLayers) {
+      for (const item of layer.features) collectCoords(item.geometry, coords);
+    }
     if (coords.length === 0) return null;
     const lngs = coords.map((c) => c[0]);
     const lats = coords.map((c) => c[1]);
@@ -264,9 +427,24 @@ export default function SupervisionFeatureScreen() {
         Math.max(...lats),
       ] as [number, number, number, number],
       padding: { top: 40, right: 30, bottom: 40, left: 30 },
-      ts: 1,
+      ts: mapLayers.length * 1_000_000 + coords.length,
     };
-  }, [feature?.geometry]);
+  }, [mapLayers]);
+
+  const spanComponentCount = mapLayers.reduce(
+    (sum, layer) => sum + layer.features.length,
+    0,
+  );
+  const displaySpanCount = spanComponentCount > 0 ? spanComponentCount : spanFeatureCount;
+  const spanLayerLabel = layerName || 'Span layer';
+  const mapCaption = spanMapLoading
+    ? 'Loading layer span…'
+    : spanMapError ??
+      (feature?.geometry
+        ? spanComponentCount > 1
+          ? `${spanLayerLabel} · ${spanComponentCount} components · planned LLD geometry`
+          : `${spanLayerLabel} · planned LLD geometry`
+        : 'Span geometry unavailable');
 
   const measuredCount =
     fields.filter((field) => {
@@ -281,30 +459,43 @@ export default function SupervisionFeatureScreen() {
     feature?.status === 'pending' ||
     feature?.status === 'assigned' ||
     feature?.status === 'redo';
+  const locked = !canSubmit;
 
-  const setValue = (key: string, value: string | boolean) =>
+  const setValue = (key: string, value: string | boolean) => {
+    if (!canSubmit) return;
     setValues((prev) => ({ ...prev, [key]: value }));
+  };
 
-  const setInspectionValue = (key: string, value: string) =>
+  const setInspectionValue = (key: string, value: string) => {
+    if (!canSubmit) return;
     setInspectionValues((prev) => ({ ...prev, [key]: value }));
+  };
 
-  const setInspectionCheck = (key: string, value: CheckValue) =>
+  const setInspectionCheck = (key: string, value: CheckValue) => {
+    if (!canSubmit) return;
     setInspectionChecks((prev) => ({ ...prev, [key]: value }));
+  };
 
-  const updateCustom = (key: string, patch: Partial<CustomField>) =>
+  const updateCustom = (key: string, patch: Partial<CustomField>) => {
+    if (!canSubmit) return;
     setCustomFields((prev) => prev.map((field) => (field.key === key ? { ...field, ...patch } : field)));
+  };
 
-  const addCustomField = () =>
+  const addCustomField = () => {
+    if (!canSubmit) return;
     setCustomFields((prev) => [
       ...prev,
       { key: `custom_${Date.now().toString(36)}`, label: '', value: '', unit: '' },
     ]);
+  };
 
-  const removeCustomField = (key: string) =>
+  const removeCustomField = (key: string) => {
+    if (!canSubmit) return;
     setCustomFields((prev) => prev.filter((field) => field.key !== key));
+  };
 
   const addPhoto = async (source: 'camera' | 'library') => {
-    if (!feature || uploadingPhoto) return;
+    if (!feature || uploadingPhoto || !canSubmit) return;
     try {
       let asset: ImagePicker.ImagePickerAsset | undefined;
       if (source === 'camera') {
@@ -345,7 +536,7 @@ export default function SupervisionFeatureScreen() {
   };
 
   const handleSave = async () => {
-    if (!feature || saving) return;
+    if (!feature || saving || !canSubmit) return;
 
     const missing = fields.filter((field) => {
       if (!field.required) return false;
@@ -529,11 +720,13 @@ export default function SupervisionFeatureScreen() {
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
           <Text style={[styles.title, { color: colors.textPrimary }]} numberOfLines={1}>
-            {layerName || 'Assigned span'}
+            {spanId ? `Span ${spanId}` : layerName || 'Assigned span'}
           </Text>
           <Text style={[styles.subtitle, { color: colors.textSecondary }]} numberOfLines={1}>
             {project
-              ? `${project.name} · ${lldVersionLabel(project)}${spanId ? ` · Span ${spanId}` : ''}`
+              ? `${project.name} · ${lldVersionLabel(project)}${
+                  layerName ? ` · ${layerName}` : ''
+                }${displaySpanCount > 1 ? ` · ${displaySpanCount} components` : ''}`
               : 'Supervision span'}
           </Text>
         </View>
@@ -549,15 +742,18 @@ export default function SupervisionFeatureScreen() {
             fitBounds={fitBounds}
             emptyState={{
               title: 'No geometry on this span',
-              description: 'The LLD handoff did not carry a geometry for this feature.',
+              description: 'The LLD handoff did not carry geometry for the components in this span.',
             }}
           />
           <View style={styles.mapCaption}>
             <Ruler size={13} stroke={colors.textTertiary} />
-            <Text style={[styles.mapCaptionText, { color: colors.textTertiary }]}>
-              {feature.geometry
-                ? 'Assigned span only · planned LLD geometry'
-                : 'Span geometry unavailable'}
+            <Text
+              style={[
+                styles.mapCaptionText,
+                { color: spanMapError ? colors.warning : colors.textTertiary },
+              ]}
+            >
+              {mapCaption}
             </Text>
           </View>
         </View>
@@ -594,7 +790,11 @@ export default function SupervisionFeatureScreen() {
             </Text>
           )}
 
-          {atPhotoLimit ? (
+          {locked ? (
+            <Text style={[styles.muted, { color: colors.textTertiary }]}>
+              Evidence is locked while this span is under review.
+            </Text>
+          ) : atPhotoLimit ? (
             <Text style={[styles.muted, { color: colors.textTertiary }]}>
               This span already has the maximum of {photoLimit} photos.
             </Text>
@@ -608,6 +808,7 @@ export default function SupervisionFeatureScreen() {
                 style={styles.photoBtn}
                 icon={<Camera size={16} stroke={colors.primary} />}
                 loading={uploadingPhoto}
+                disabled={locked}
                 onPress={() => addPhoto('camera')}
               />
               <Button
@@ -618,6 +819,7 @@ export default function SupervisionFeatureScreen() {
                 style={styles.photoBtn}
                 icon={<ImageIcon size={16} stroke={colors.primary} />}
                 loading={uploadingPhoto}
+                disabled={locked}
                 onPress={() => addPhoto('library')}
               />
             </View>
@@ -627,7 +829,7 @@ export default function SupervisionFeatureScreen() {
         {/* The inspection form */}
         <View style={[styles.card, { backgroundColor: colors.surface }]}>
           <View style={styles.cardTitleRow}>
-            <Text style={[styles.cardTitle, { color: colors.textPrimary }]}>Trench inspection</Text>
+            <Text style={[styles.cardTitle, { color: colors.textPrimary }]}>Span inspection</Text>
             {deviation && deviation.fields.length > 0 ? (
               <View
                 style={[
@@ -663,7 +865,8 @@ export default function SupervisionFeatureScreen() {
           <SpanInspectionForm
             values={inspectionValues}
             checks={inspectionChecks}
-            spanFeatureCount={spanFeatureCount}
+            spanFeatureCount={displaySpanCount}
+            readOnly={locked}
             onValueChange={setInspectionValue}
             onCheckChange={setInspectionCheck}
           />
@@ -697,16 +900,18 @@ export default function SupervisionFeatureScreen() {
 
                   {field.type === 'boolean' ? (
                     <TouchableOpacity
+                      onPress={() => setValue(field.key, !value)}
+                      disabled={locked}
                       style={[
                         styles.toggle,
                         {
                           backgroundColor: value ? colors.success + '20' : colors.background,
                           borderColor: value ? colors.success : colors.outline,
+                          opacity: locked ? 0.6 : 1,
                         },
                       ]}
-                      onPress={() => setValue(field.key, !value)}
                       accessibilityRole="switch"
-                      accessibilityState={{ checked: Boolean(value) }}
+                      accessibilityState={{ checked: Boolean(value), disabled: locked }}
                       accessibilityLabel={field.label}
                     >
                       <Text
@@ -724,17 +929,18 @@ export default function SupervisionFeatureScreen() {
                         const selected = value === option.value;
                         return (
                           <TouchableOpacity
-                            key={option.value}
-                            style={[
-                              styles.chip,
-                              {
-                                backgroundColor: selected ? colors.primary : colors.background,
-                                borderColor: selected ? colors.primary : colors.outline,
-                              },
-                            ]}
+                            key={option.value}                              style={[
+                                styles.chip,
+                                {
+                                  backgroundColor: selected ? colors.primary : colors.background,
+                                  borderColor: selected ? colors.primary : colors.outline,
+                                  opacity: locked ? 0.6 : 1,
+                                },
+                              ]}
                             onPress={() => setValue(field.key, option.value)}
+                            disabled={locked}
                             accessibilityRole="button"
-                            accessibilityState={{ selected }}
+                            accessibilityState={{ selected, disabled: locked }}
                             accessibilityLabel={option.label}
                           >
                             <Text
@@ -762,11 +968,13 @@ export default function SupervisionFeatureScreen() {
                       ]}
                       value={String(value ?? '')}
                       onChangeText={(text) => setValue(field.key, text)}
+                      editable={!locked}
                       placeholder={field.placeholder ?? `Enter ${field.label.toLowerCase()}`}
                       placeholderTextColor={colors.textTertiary}
                       multiline
                       numberOfLines={3}
                       accessibilityLabel={field.label}
+                      accessibilityState={{ disabled: locked }}
                     />
                   ) : (
                     <View
@@ -779,6 +987,7 @@ export default function SupervisionFeatureScreen() {
                         style={[styles.input, { color: colors.textPrimary }]}
                         value={String(value ?? '')}
                         onChangeText={(text) => setValue(field.key, text)}
+                        editable={!locked}
                         placeholder={
                           field.placeholder ??
                           `Enter ${field.label.toLowerCase()}${plannedText ? ` (planned ${plannedText})` : ''}`
@@ -786,6 +995,7 @@ export default function SupervisionFeatureScreen() {
                         placeholderTextColor={colors.textTertiary}
                         keyboardType={field.type === 'number' ? 'decimal-pad' : 'default'}
                         accessibilityLabel={field.label}
+                        accessibilityState={{ disabled: locked }}
                       />
                       {fieldUnit(field) ? (
                         <Text style={[styles.unit, { color: colors.textTertiary }]}>
@@ -815,6 +1025,7 @@ export default function SupervisionFeatureScreen() {
               size="sm"
               fullWidth={false}
               icon={<Plus size={15} stroke={colors.primary} />}
+              disabled={locked}
               onPress={addCustomField}
             />
           </View>
@@ -836,14 +1047,17 @@ export default function SupervisionFeatureScreen() {
                   ]}
                   value={custom.label}
                   onChangeText={(text) => updateCustom(custom.key, { label: text })}
+                  editable={!locked}
                   placeholder="Field name (e.g. trench depth)"
                   placeholderTextColor={colors.textTertiary}
                   accessibilityLabel="Custom field name"
                 />
                 <TouchableOpacity
                   onPress={() => removeCustomField(custom.key)}
-                  style={styles.removeBtn}
+                  disabled={locked}
+                  style={[styles.removeBtn, { opacity: locked ? 0.6 : 1 }]}
                   accessibilityRole="button"
+                  accessibilityState={{ disabled: locked }}
                   accessibilityLabel={`Remove ${custom.label || 'custom field'}`}
                 >
                   <Trash2 size={17} stroke={colors.error} />
@@ -861,6 +1075,7 @@ export default function SupervisionFeatureScreen() {
                   ]}
                   value={custom.value}
                   onChangeText={(text) => updateCustom(custom.key, { value: text })}
+                  editable={!locked}
                   placeholder="Value"
                   placeholderTextColor={colors.textTertiary}
                   accessibilityLabel="Custom field value"
@@ -876,6 +1091,7 @@ export default function SupervisionFeatureScreen() {
                   ]}
                   value={custom.unit}
                   onChangeText={(text) => updateCustom(custom.key, { unit: text })}
+                  editable={!locked}
                   placeholder="Unit"
                   placeholderTextColor={colors.textTertiary}
                   accessibilityLabel="Custom field unit"
@@ -899,20 +1115,29 @@ export default function SupervisionFeatureScreen() {
               ]}
               value={notes}
               onChangeText={setNotes}
+              editable={!locked}
               placeholder="Anything the planner should know — access, extra depth, a changed route…"
               placeholderTextColor={colors.textTertiary}
               multiline
               numberOfLines={3}
               accessibilityLabel="Remarks"
+              accessibilityState={{ disabled: locked }}
             />
           </View>
 
-          <Button
-            title="Save inspection"
-            loading={saving}
-            onPress={handleSave}
-            style={{ marginTop: Spacing.sm }}
-          />
+          {canSubmit ? (
+            <Button
+              title="Save inspection"
+              loading={saving}
+              onPress={handleSave}
+              style={{ marginTop: Spacing.sm }}
+            />
+          ) : (
+            <Text style={[styles.muted, { color: colors.textTertiary }]}>
+              Submitted records are locked. The reviewer can send this span back to redo if it
+              needs changes.
+            </Text>
+          )}
         </View>
 
         {/* Planned vs as-built, computed by the backend */}

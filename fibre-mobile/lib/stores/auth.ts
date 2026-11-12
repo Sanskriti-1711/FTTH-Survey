@@ -42,6 +42,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         return;
       }
       const storedUser = await loadStoredUser<User>();
+      // A token without its user is a half-restored session: role-aware
+      // screens cannot decide what to show, and the Supervision tab would sit
+      // on "Loading..." forever because it never issues the jobs request.
+      // There is no /me endpoint, so require a fresh sign-in rather than
+      // guessing the role.
+      if (!storedUser) {
+        await clearTokens();
+        set({ user: null, token: null, isRestoring: false });
+        return;
+      }
       // Try to validate token by refreshing it (with 3s timeout).
       // refreshAccessToken reads the stored refresh token and sends it in the body,
       // which Django's SimpleJWT endpoint requires (an empty POST body always 400s).

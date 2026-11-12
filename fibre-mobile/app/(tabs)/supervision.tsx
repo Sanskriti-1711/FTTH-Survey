@@ -36,18 +36,29 @@ export default function SupervisionScreen() {
   const isAdmin = user?.role === 'SUBADMIN';
   const { projects, fetchProjects, error: projectsError } = useProjectStore();
   const [jobs, setJobs] = useState<AssignmentJob[] | null>(null);
+  const [jobsError, setJobsError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [openingSpanId, setOpeningSpanId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<SpanStatus | 'all'>('all');
 
   const loadData = useCallback(async () => {
+    setJobsError(null);
+    if (!user?.id) {
+      // Never leave `jobs` null: that is the infinite "Loading..." state.
+      setJobs([]);
+      await fetchProjects();
+      return;
+    }
     await Promise.all([
       fetchProjects(),
-      user?.id
-        ? getJobsForEngineer(user.id, { page_size: 100 })
-            .then((data) => setJobs(data.results))
-            .catch(() => setJobs([]))
-        : Promise.resolve(),
+      getJobsForEngineer(user.id, { page_size: 100 })
+        .then((data) => setJobs(data.results))
+        .catch((err) => {
+          setJobs([]);
+          setJobsError(
+            err instanceof Error ? err.message : 'Could not load supervision tasks.',
+          );
+        }),
     ]);
   }, [fetchProjects, user?.id]);
 
@@ -88,13 +99,16 @@ export default function SupervisionScreen() {
   );
 
   const projectAssignments = useMemo(() => {
+    // Admins are not field assignees. They still need every supervision
+    // project to be reachable from this tab, even when they hold no job.
+    if (isAdmin) return supervisionProjects;
     const projectIds = new Set(
       (jobs ?? [])
         .filter((job) => job.scope !== 'feature' && job.scope !== 'span')
         .map((job) => job.project.id),
     );
     return supervisionProjects.filter((project) => projectIds.has(project.id));
-  }, [jobs, supervisionProjects]);
+  }, [jobs, supervisionProjects, isAdmin]);
 
   const projectById = useMemo(() => {
     const map: Record<string, Project> = {};
@@ -125,6 +139,7 @@ export default function SupervisionScreen() {
           params: {
             featureId: firstFeatureId,
             projectId: job.project.id,
+            jobId: job.id,
             spanId: detail.span_id ?? job.span?.id ?? '',
             spanFeatureCount: String(featureIds.length),
           },
@@ -250,7 +265,17 @@ export default function SupervisionScreen() {
           </ScrollView>
         )}
 
-        {projectsError && projects.length === 0 && count === 0 ? (
+        {jobsError ? (
+          <View style={[styles.loadingCard, { backgroundColor: colors.surface }]}>
+            <Text style={[styles.errorTitle, { color: colors.textPrimary }]}>
+              {"Couldn't Load Supervision Tasks"}
+            </Text>
+            <Text style={[styles.loadingText, { color: colors.textSecondary }]}>
+              {jobsError}
+            </Text>
+            <Button title="Try Again" variant="secondary" size="sm" onPress={loadData} />
+          </View>
+        ) : projectsError && projects.length === 0 && count === 0 ? (
           <View style={[styles.loadingCard, { backgroundColor: colors.surface }]}>
             <Text style={[styles.errorTitle, { color: colors.textPrimary }]}>
               {"Couldn't Load Supervision Tasks"}
@@ -364,6 +389,7 @@ function SpanTaskCard({
   if (!isSpan && !feature) return null;
 
   const spanId = isSpan ? job.span?.id ?? job.span_id ?? '' : '';
+  const spanLayer = isSpan ? job.span?.layer_id ?? job.layer?.id ?? '' : '';
   const shortId = (isSpan ? spanId : feature?.id ?? '').slice(-8);
   const title = isSpan
     ? `Span ${spanId || shortId}`
@@ -386,6 +412,7 @@ function SpanTaskCard({
           </Text>
           <Text style={[styles.jobMeta, { color: colors.textSecondary }]} numberOfLines={1}>
             {job.project.name}
+            {spanLayer ? ` · ${spanLayer}` : ''}
           </Text>
           <Text style={[styles.jobDate, { color: colors.textTertiary }]} numberOfLines={1}>
             {project ? `${lldVersionLabel(project)} · ` : ''}
@@ -437,8 +464,10 @@ function SupervisionCard({
             {project.name}
           </Text>
           <Text style={[styles.jobMeta, { color: colors.textSecondary }]} numberOfLines={1}>
-            {lldVersionLabel(project)} · {jobs.length} {jobs.length === 1 ? 'task' : 'tasks'} ·{' '}
-            {featureTotal} features
+            {lldVersionLabel(project)} ·{' '}
+            {jobs.length > 0
+              ? `${jobs.length} ${jobs.length === 1 ? 'task' : 'tasks'} · ${featureTotal} features`
+              : 'No assignments yet'}
           </Text>
         </View>
         <View style={{ alignItems: 'flex-end', gap: 6 }}>
@@ -448,10 +477,10 @@ function SupervisionCard({
       </View>
       <View style={styles.jobFooter}>
         <Text style={[styles.jobDate, { color: colors.textTertiary }]}>
-          Assigned: {jobs[0] ? new Date(jobs[0].created_at).toLocaleDateString() : '—'}
+          Assigned: {jobs[0] ? new Date(jobs[0].created_at).toLocaleDateString() : 'Not assigned'}
         </Text>
         <Text style={[styles.jobDate, { color: colors.primary, fontWeight: '700' }]}>
-          Inspect in field
+          {jobs.length > 0 ? 'Inspect in field' : 'Open project'}
         </Text>
       </View>
     </TouchableOpacity>

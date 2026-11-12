@@ -87,7 +87,7 @@ interface SurveyState {
 
   fetchSyncQueue: () => Promise<void>;
   pushToSyncQueue: (items: Omit<BackendSyncQueueItem, 'id' | 'engineer' | 'engineer_name' | 'synced_at'>[]) => Promise<void>;
-  processSyncQueue: () => Promise<void>;
+  processSyncQueue: () => Promise<{ processed: number }>;
 }
 
 export const useSurveyStore = create<SurveyState>((set, get) => ({
@@ -372,10 +372,16 @@ export const useSurveyStore = create<SurveyState>((set, get) => ({
   processSyncQueue: async () => {
     set({ isLoading: true });
     try {
-      await surveyApi.processSyncQueue();
+      const result = await surveyApi.processSyncQueue();
       set({ syncQueue: [], isLoading: false });
+      return result;
     } catch (err: unknown) {
-      set({ error: (err instanceof Error ? err.message : 'Failed'), isLoading: false });
+      const message = err instanceof Error ? err.message : 'Failed';
+      set({ error: message, isLoading: false });
+      // Do not resolve a failed request. The Profile screen used to stamp a
+      // successful sync even when this call had failed, which made an offline
+      // device look safely synced.
+      throw err instanceof Error ? err : new Error(message);
     }
   },
 }));

@@ -11,7 +11,7 @@ import { useNetworkStatus } from '../lib/hooks/useNetworkStatus';
 
 export default function RootLayout() {
   const resolved = useThemeStore((s) => s.resolved);
-  const { isRestoring, restoreSession, token } = useAuthStore();
+  const { isRestoring, restoreSession, token, user } = useAuthStore();
   const restored = useRef(false);
   const router = useRouter();
   const segments = useSegments();
@@ -26,7 +26,7 @@ export default function RootLayout() {
   // the root index (it routes itself) stay reachable.
   const first = segments[0] as string | undefined;
   const isPublicRoute = first === undefined || first === '(auth)' || first === 'deeplink';
-  const needsLogin = !isRestoring && !token && !isPublicRoute;
+  const needsLogin = !isRestoring && (!token || !user) && !isPublicRoute;
 
   useEffect(() => {
     if (needsLogin) router.replace('/(auth)/login');

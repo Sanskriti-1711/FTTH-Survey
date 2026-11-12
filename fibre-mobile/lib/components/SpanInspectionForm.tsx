@@ -21,6 +21,7 @@ interface Props {
   values: Record<string, string>;
   checks: Record<string, CheckValue>;
   spanFeatureCount?: number;
+  readOnly?: boolean;
   onValueChange: (key: string, value: string) => void;
   onCheckChange: (key: string, value: CheckValue) => void;
 }
@@ -34,6 +35,7 @@ export default function SpanInspectionForm({
   values,
   checks,
   spanFeatureCount = 0,
+  readOnly = false,
   onValueChange,
   onCheckChange,
 }: Props) {
@@ -56,12 +58,14 @@ export default function SpanInspectionForm({
         <DetailRow label="Sub Span ID" value={value('inspection_sub_span_id')} />
         <DetailRow label="Trench ID" value={value('inspection_trench_id')} />
         <LabelledInput
+          readOnly={readOnly}
           label="Inspector Name"
           value={value('inspection_inspector_name')}
           onChangeText={(text) => onValueChange('inspection_inspector_name', text)}
           placeholder="Name of the inspector"
         />
         <LabelledInput
+          readOnly={readOnly}
           label="Inspection Date"
           value={value('inspection_date')}
           onChangeText={(text) => onValueChange('inspection_date', text)}
@@ -80,6 +84,7 @@ export default function SpanInspectionForm({
             key={check.key}
             check={check}
             value={checks[check.key] ?? ''}
+            readOnly={readOnly}
             onChange={onCheckChange}
           />
         ))}
@@ -98,15 +103,17 @@ export default function SpanInspectionForm({
               <TouchableOpacity
                 key={type}
                 onPress={() => onValueChange('trench_type', type)}
+                disabled={readOnly}
                 style={[
                   styles.chip,
                   {
                     backgroundColor: selected ? colors.primary : colors.background,
                     borderColor: selected ? colors.primary : colors.outline,
+                    opacity: readOnly ? 0.6 : 1,
                   },
                 ]}
                 accessibilityRole="button"
-                accessibilityState={{ selected }}
+                accessibilityState={{ selected, disabled: readOnly }}
                 accessibilityLabel={`Trench type ${type}`}
               >
                 <Text
@@ -123,18 +130,21 @@ export default function SpanInspectionForm({
         </View>
 
         <LabelledInput
+          readOnly={readOnly}
           label="Start GPS Coordinate"
           value={value('start_gps')}
           onChangeText={(text) => onValueChange('start_gps', text)}
           placeholder="longitude, latitude"
         />
         <LabelledInput
+          readOnly={readOnly}
           label="End GPS Coordinate"
           value={value('end_gps')}
           onChangeText={(text) => onValueChange('end_gps', text)}
           placeholder="longitude, latitude"
         />
         <LabelledInput
+          readOnly={readOnly}
           label="Measured Length (m)"
           value={value('measured_length_m')}
           onChangeText={(text) => onValueChange('measured_length_m', text)}
@@ -142,6 +152,7 @@ export default function SpanInspectionForm({
           placeholder="0.00"
         />
         <LabelledInput
+          readOnly={readOnly}
           label="Actual Depth (mm)"
           value={value('actual_depth_mm')}
           onChangeText={(text) => onValueChange('actual_depth_mm', text)}
@@ -149,6 +160,7 @@ export default function SpanInspectionForm({
           placeholder="0"
         />
         <LabelledInput
+          readOnly={readOnly}
           label="Actual Width (mm)"
           value={value('actual_width_mm')}
           onChangeText={(text) => onValueChange('actual_width_mm', text)}
@@ -156,12 +168,14 @@ export default function SpanInspectionForm({
           placeholder="0"
         />
         <LabelledInput
+          readOnly={readOnly}
           label="Surface Type"
           value={value('surface_type')}
           onChangeText={(text) => onValueChange('surface_type', text)}
           placeholder="Asphalt, paving, grass…"
         />
         <LabelledInput
+          readOnly={readOnly}
           label="Existing Utilities Encountered"
           value={value('existing_utilities')}
           onChangeText={(text) => onValueChange('existing_utilities', text)}
@@ -169,12 +183,14 @@ export default function SpanInspectionForm({
           multiline
         />
         <LabelledInput
+          readOnly={readOnly}
           label="Distance from Utility"
           value={value('utility_distance')}
           onChangeText={(text) => onValueChange('utility_distance', text)}
           placeholder="e.g. 1.2 m"
         />
         <LabelledInput
+          readOnly={readOnly}
           label="Joint / Pit Locations"
           value={value('joint_pit_locations')}
           onChangeText={(text) => onValueChange('joint_pit_locations', text)}
@@ -192,6 +208,7 @@ export default function SpanInspectionForm({
             key={check.key}
             check={check}
             value={checks[check.key] ?? ''}
+            readOnly={readOnly}
             onChange={onCheckChange}
           />
         ))}
@@ -215,10 +232,12 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 function CheckRow({
   check,
   value,
+  readOnly,
   onChange,
 }: {
   check: InspectionCheck;
   value: CheckValue;
+  readOnly: boolean;
   onChange: (key: string, value: CheckValue) => void;
 }) {
   const colors = useThemeStore((s) => s.colors);
@@ -233,15 +252,17 @@ function CheckRow({
             <TouchableOpacity
               key={option}
               onPress={() => onChange(check.key, selected ? '' : option)}
+              disabled={readOnly}
               style={[
                 styles.passBtn,
                 {
                   backgroundColor: selected ? `${tone}20` : colors.background,
                   borderColor: selected ? tone : colors.outline,
+                  opacity: readOnly ? 0.6 : 1,
                 },
               ]}
               accessibilityRole="button"
-              accessibilityState={{ selected }}
+              accessibilityState={{ selected, disabled: readOnly }}
               accessibilityLabel={`${check.label}: ${option}`}
             >
               <Text
@@ -267,6 +288,7 @@ function LabelledInput({
   placeholder,
   keyboardType,
   multiline = false,
+  readOnly = false,
 }: {
   label: string;
   value: string;
@@ -274,6 +296,7 @@ function LabelledInput({
   placeholder?: string;
   keyboardType?: TextInputProps['keyboardType'];
   multiline?: boolean;
+  readOnly?: boolean;
 }) {
   const colors = useThemeStore((s) => s.colors);
   return (
@@ -290,12 +313,14 @@ function LabelledInput({
         ]}
         value={value}
         onChangeText={onChangeText}
+        editable={!readOnly}
         placeholder={placeholder}
         placeholderTextColor={colors.textTertiary}
         keyboardType={keyboardType}
         multiline={multiline}
         numberOfLines={multiline ? 3 : 1}
         accessibilityLabel={label}
+        accessibilityState={{ disabled: readOnly }}
       />
     </View>
   );
