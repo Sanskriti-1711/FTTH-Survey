@@ -7,6 +7,7 @@ export async function login(email: string, password: string): Promise<LoginRespo
   return apiFetch<LoginResponse>('/api/users/login/', {
     method: 'POST',
     body: JSON.stringify({ email, password }),
+    skipAuth: true,
   });
 }
 
@@ -19,6 +20,7 @@ export async function register(
   return apiFetch<User>('/api/users/', {
     method: 'POST',
     body: JSON.stringify({ email, password, full_name, role }),
+    skipAuth: true,
   });
 }
 

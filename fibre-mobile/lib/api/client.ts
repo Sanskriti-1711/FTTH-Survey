@@ -154,9 +154,9 @@ export async function refreshAccessToken(signal?: AbortSignal): Promise<string |
 
 export async function apiFetch<T = unknown>(
   path: string,
-  options: RequestInit & { isFormData?: boolean } = {}
+  options: RequestInit & { isFormData?: boolean; skipAuth?: boolean } = {}
 ): Promise<T> {
-  const { isFormData, ...fetchOptions } = options;
+  const { isFormData, skipAuth, ...fetchOptions } = options;
 
   const headers: Record<string, string> = {};
 
@@ -164,7 +164,10 @@ export async function apiFetch<T = unknown>(
     headers['Content-Type'] = 'application/json';
   }
 
-  if (apiClientToken) {
+  // Login and registration must not carry an expired access token: DRF's JWT
+  // authentication rejects a bad Authorization header before it checks the
+  // submitted credentials, which makes a correct password look invalid.
+  if (apiClientToken && !skipAuth) {
     headers['Authorization'] = `Bearer ${apiClientToken}`;
   }
 
@@ -175,8 +178,9 @@ export async function apiFetch<T = unknown>(
 
   let res = await fetch(url, { ...fetchOptions, headers });
 
-  // Auto-refresh on 401
-  if (res.status === 401) {
+  // Auto-refresh on 401, except for auth endpoints that deliberately skip the
+  // stale token (there is nothing to refresh for those requests).
+  if (res.status === 401 && !skipAuth) {
     const newToken = await refreshAccessToken();
     if (newToken) {
       headers['Authorization'] = `Bearer ${newToken}`;
