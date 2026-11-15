@@ -117,12 +117,6 @@ interface LineSelectionToolbarProps {
   continueLineSegments?: number;
   /** Label of the object point the draw-segment path snapped to (e.g. 'Snapped to PREMISES #123') */
   continueSnapLabel?: string;
-  /** Continue mode is set to create independent trenches instead of extending */
-  continueNewTrench?: boolean;
-  /** Switch Continue between Extend (selected line) and New trench */
-  onContinueNewTrenchChange?: (newTrench: boolean) => void;
-  /** Vertices placed in the new trench being drawn (0 = nothing staged) */
-  continueVertexCount?: number;
 }
 
 // ── Action definitions ─────────────────────────────────────────────────────
@@ -192,9 +186,6 @@ export default function LineSelectionToolbar({
   continueLineStep = 0,
   continueLineSegments = 0,
   continueSnapLabel,
-  continueNewTrench = false,
-  onContinueNewTrenchChange,
-  continueVertexCount = 0,
 }: LineSelectionToolbarProps) {
   const colors = useThemeStore((s) => s.colors);
   const slideAnim = useRef(new Animated.Value(0)).current;
@@ -391,9 +382,7 @@ export default function LineSelectionToolbar({
           <Text style={[styles.soonLabel, { color: continueMode ? (continueSnapLabel ? colors.success : '#FF8C00') : colors.textTertiary }]} numberOfLines={1}>
             {!continueMode
               ? 'Tap to start'
-              : continueNewTrench
-                ? (continueLineStep === 0 ? 'Trench start' : continueLineStep === 1 ? 'Tap next point' : `${continueVertexCount} vertices`)
-                : (continueLineStep === 0 ? 'Tap start' : continueLineStep === 1 ? 'Tap destination' : continueSnapLabel ? 'Snapped' : 'Tap to extend')}
+              : continueLineStep === 0 ? 'Tap start' : continueLineStep === 1 ? 'Tap destination' : continueSnapLabel ? 'Snapped' : 'Tap to extend'}
           </Text>
         )}
         {isDeleteFeature && (
@@ -688,51 +677,6 @@ export default function LineSelectionToolbar({
         </View>
       )}
 
-      {/* ── Continue line: Extend the selected line, or create a new trench ──
-          The 15 m end-snap rule made a new drop that STARTS at the line's end
-          impossible to draw — it always extended instead. This makes the
-          intent explicit instead of guessing it from the tap position. */}
-      {continueMode && (
-        <View style={[styles.bundleRow, { borderTopColor: colors.outlineLight }]}>
-          <Text style={[styles.bundleTitle, { color: colors.textTertiary }]} numberOfLines={1}>
-            Continue:
-          </Text>
-          {([
-            { id: false, label: 'Extend line' },
-            { id: true, label: 'New trench' },
-          ] as const).map((m) => {
-            const active = m.id === continueNewTrench;
-            return (
-              <TouchableOpacity
-                key={String(m.id)}
-                style={[
-                  styles.bundleChip,
-                  {
-                    backgroundColor: active ? '#FF8C00' + '20' : colors.background,
-                    borderColor: active ? '#FF8C00' : colors.outlineLight,
-                  },
-                ]}
-                onPress={() => {
-                  if (m.id !== continueNewTrench) onContinueNewTrenchChange?.(m.id);
-                }}
-                activeOpacity={0.7}
-                accessibilityRole="button"
-                accessibilityLabel={
-                  m.id
-                    ? 'New trench. Each save creates its own feature and keeps the tool open'
-                    : 'Extend the selected line. Saves change this line'
-                }
-                accessibilityState={{ selected: active }}
-              >
-                <Text style={[styles.bundleChipText, { color: active ? '#FF8C00' : colors.textTertiary }]}>
-                  {m.label}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-      )}
-
       {/* ── Hint text ──────────────────────────────────────────────────── */}
       <Text style={[styles.hintText, { color: colors.textTertiary }]}>
         {splitStagedLabel
@@ -748,14 +692,7 @@ export default function LineSelectionToolbar({
           : deleteSectionMode
             ? 'Cut out span applies straight away when you confirm — Undo sits in the map dock'
           : continueMode
-            ? continueNewTrench
-              /* New trench: an independent feature per Save, tool stays armed */
-              ? continueLineStep === 0
-                ? 'Tap where the new trench starts — it snaps to points and to the selected line'
-                : continueLineStep === 1
-                  ? 'Now tap the next point — one vertex placed'
-                  : `${continueVertexCount} vertices · keep tapping for bends, or Save to create this trench and start the next`
-              : continueLineStep === 0 ? 'Tap the map to place the segment start (snaps to nearest point)'
+            ? continueLineStep === 0 ? 'Tap the map to place the segment start (snaps to nearest point)'
               : continueLineStep === 1 ? 'Tap the destination point; it will snap to the nearest point'
               : continueSnapLabel
                 ? `${continueSnapLabel} · Save to finish the segment`

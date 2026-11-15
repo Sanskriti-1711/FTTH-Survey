@@ -1083,3 +1083,93 @@ export function approximateLength(coords: [number, number][]): number {
   }
   return total;
 }
+
+// ── Junction: generate a point ON a line, between two vertices ────────────
+// Snapping to corners alone could not build a T-branch: a trench tapped onto
+// the middle of an existing run landed a few decimetres off, so nothing
+// actually connected. A junction is the projected point on the segment
+// interior plus that segment's direction — the direction is what a
+// perpendicular branch needs to leave the run at 90°.
+export interface LineJunctionSnap {
+  featureId: string;
+  layerId: string;
+  layerName: string;
+  coord: [number, number];
+  /** Unit direction of the segment the junction sits on (metre space). */
+  dir: [number, number];
+  segmentIndex: number;
+  distanceM: number;
+}
+
+export function findNearestLineJunction(
+  layers: MapLineLayer[],
+  lng: number,
+  lat: number,
+  radiusM = 8,
+): LineJunctionSnap | null {
+  let best: LineJunctionSnap | null = null;
+  for (const layer of layers) {
+    if (layer.id.startsWith('temp-preview-')) continue;
+    const mLng = 111320 * Math.cos((lat * Math.PI) / 180);
+    for (const feat of layer.features) {
+      const geom = feat.geometry;
+      if (!geom || (geom.type !== 'LineString' && geom.type !== 'MultiLineString')) continue;
+      const coords =
+        geom.type === 'LineString'
+          ? (geom.coordinates as [number, number][])
+          : ((geom.coordinates as [number, number][][])[0] ?? []);
+      if (coords.length < 2) continue;
+      const props = (feat.properties ?? {}) as Record<string, unknown>;
+      const fid = String(props._id ?? props.id ?? '');
+      if (!fid) continue;
+      for (let i = 0; i < coords.length - 1; i++) {
+        const [x1, y1] = coords[i];
+        const [x2, y2] = coords[i + 1];
+        const dx = (x2 - x1) * mLng;
+        const dy = (y2 - y1) * 110540;
+        const len2 = dx * dx + dy * dy;
+        if (len2 <= 0.01) continue;
+        const ax = (lng - x1) * mLng;
+        const ay = (lat - y1) * 110540;
+        const t = Math.max(0, Math.min(1, (ax * dx + ay * dy) / len2));
+        // Interior only: a projection that lands on a vertex is a corner snap,
+        // which findNearestLineCorner already owns.
+        if (t <= 0.001 || t >= 0.999) continue;
+        const px = x1 + (x2 - x1) * t;
+        const py = y1 + (y2 - y1) * t;
+        const d = haversineMeters(lng, lat, px, py);
+        if (d > radiusM) continue;
+        if (!best || d < best.distanceM) {
+          const len = Math.sqrt(len2);
+          best = {
+            featureId: fid,
+            layerId: layer.id,
+            layerName: layer.name ?? layer.id,
+            coord: [px, py],
+            dir: [dx / len, dy / len],
+            segmentIndex: i,
+            distanceM: d,
+          };
+        }
+      }
+    }
+  }
+  return best;
+}
+
+// ── Lock a vertex onto the perpendicular through an anchor ────────────────
+// Used right after a junction: the trench leaves the existing run at exactly
+// 90° instead of at whatever angle the finger landed on.
+export function projectPerpendicular(
+  anchor: [number, number],
+  dir: [number, number],
+  p: [number, number],
+): [number, number] {
+  const mLng = 111320 * Math.cos((anchor[1] * Math.PI) / 180);
+  const px = -dir[1];
+  const py = dir[0];
+  const ax = (p[0] - anchor[0]) * mLng;
+  const ay = (p[1] - anchor[1]) * 110540;
+  const t = ax * px + ay * py;
+  return [anchor[0] + (px * t) / mLng, anchor[1] + (py * t) / 110540];
+}

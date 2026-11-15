@@ -104,7 +104,7 @@ export default function ToolsSheet({
       <Row
         icon={<Satellite size={20} stroke="#0D5CFF" />}
         label="Basemap"
-        hint="Satellite, streets, terrain"
+        hint="Satellite, streets, light"
         value={basemapName}
         onPress={onOpenBasemap}
       />

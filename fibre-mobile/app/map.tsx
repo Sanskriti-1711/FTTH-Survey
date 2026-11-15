@@ -25,7 +25,7 @@ import { getLayerSchema } from '../lib/stores/layer-schemas';
 import { gradeGpsAccuracy } from '../lib/utils/gps-quality';
 import { summarizeCommit } from '../lib/utils/commit';
 import { normalizeLayerId } from '../lib/utils/layer-ids';
-import { insertVertexAtPoint, deleteVertex, splitLineAtPoint, createLineString, findNearestLineCorner, extendLineToPoint, haversineMeters, approximateLength, cutVertexIndexAtPoint, countVerticesBetween, planSpanRemoval, distanceToPolylineM } from '../lib/utils/geometry-operations';
+import { insertVertexAtPoint, deleteVertex, splitLineAtPoint, createLineString, findNearestLineCorner, findNearestLineJunction, projectPerpendicular, extendLineToPoint, haversineMeters, approximateLength, cutVertexIndexAtPoint, countVerticesBetween, planSpanRemoval, distanceToPolylineM } from '../lib/utils/geometry-operations';
 import { planObstacleDetour, metersPerDegLng } from '../lib/utils/obstacle-reroute';
 // Geometry operation utilities removed — all edits now route through survey-features store
 import GeometryEditor from '../lib/components/GeometryEditor';
@@ -96,6 +96,10 @@ type ContinueSnapTargetShape = {
   vertexIdx?: number;
   /** Whether the snapped corner is a line endpoint (kind === 'line' only) */
   isEndpoint?: boolean;
+  /** True when the joint is a point GENERATED on the line, between vertices */
+  isJunction?: boolean;
+  /** Direction of the line at the joint (unit vector, metre space) */
+  lineDir?: [number, number];
 };
 
 function buildConnectionAttrs(
@@ -115,6 +119,14 @@ function buildConnectionAttrs(
       connected_line_name: target.name,
       connected_line_vertex: target.vertexIdx ?? null,
       connected_line_endpoint: target.isEndpoint ?? false,
+      // A junction is generated ON the line between two vertices — that is what
+      // makes a T-branch (perpendicular drop off a run) traceable by the LLD.
+      connected_line_junction: target.isJunction ?? false,
+      // Compass bearing 0-360: atan2 returns -180..180, so a run heading
+      // south-west stored -135 instead of 225.
+      connected_line_bearing_deg: target.lineDir
+        ? ((Math.round((Math.atan2(target.lineDir[0], target.lineDir[1]) * 180) / Math.PI) % 360) + 360) % 360
+        : null,
       connected_line_lng: target.lng,
       connected_line_lat: target.lat,
     };
@@ -881,6 +893,28 @@ export default function MapScreen() {
   const [drawTrenchBuildState, setDrawTrenchBuildState] = useState<'to_build' | 'existing'>('to_build');
   const [drawTrenchSnapLabel, setDrawTrenchSnapLabel] = useState<string | null>(null);
   const [drawTrenchBusy, setDrawTrenchBusy] = useState(false);
+  // ── Perpendicular branch off an existing run ──────────────────────────
+  // drawTrenchConnection keeps what the FIRST vertex joined. Its lineDir is the
+  // 90° axis for the second vertex, and the joint is written to the saved
+  // feature's attributes.
+  const [drawTrenchPerpendicular, setDrawTrenchPerpendicular] = useState(false);
+  const [drawTrenchPerpUsed, setDrawTrenchPerpUsed] = useState(false);
+  const [drawTrenchConnection, setDrawTrenchConnection] = useState<ContinueSnapTargetShape | null>(null);
+  // The start vertex plus what it joined fully describe the 90° axis, so it is
+  // derived instead of stored a second time and cannot fall out of step.
+  const drawTrenchAnchor = useMemo(
+    () => (drawTrenchPoints.length === 1 && drawTrenchConnection?.lineDir
+      ? { point: drawTrenchPoints[0], dir: drawTrenchConnection.lineDir }
+      : null),
+    [drawTrenchPoints, drawTrenchConnection],
+  );
+  // Native MapLibre fires BOTH the Map onPress and the GeoJSONSource onPress for
+  // a single tap, so handleTrenchTap runs twice with the same lngLat. Empty
+  // ground only reaches the map path (one vertex), but a tap ON a feature — a
+  // duct corner, a chamber, a trench — placed the vertex TWICE at 0.0 m, which
+  // also meant the "exactly one vertex" state the ⊥ branch needs never existed.
+  // Same 300 ms / same-spot guard the Continue line tap uses.
+  const lastTrenchTapRef = useRef<{ lng: number; lat: number; t: number } | null>(null);
 
   // Layers opted OUT of the bundle reroute relay (pre-Save explanation row).
   const [bundleSkipLayers, setBundleSkipLayers] = useState<string[]>([]);
@@ -910,18 +944,9 @@ export default function MapScreen() {
   // new trench feature so a segment drawn away from the line can never
   // overwrite (destroy) the selected line's geometry on Save.
   const [continueIsSpur, setContinueIsSpur] = useState(false);
-  // What a finished segment becomes. false = Extend: grow the selected line
-  // (multi-step, HLD-linked save). true = New trench: each trench is drawn as
-  // its own polyline that saves as an independent feature and leaves the tool
-  // armed for the next one. Without this the 15 m end-snap rule decided for the
-  // engineer, so a new drop starting AT the line's end always extended it
-  // instead — the new trench could not be drawn from the line toolbar at all.
-  const [continueNewTrench, setContinueNewTrench] = useState(false);
-  // The new trench being drawn in that mode, kept SEPARATE from tempLineCoords:
-  // the working copy must stay the selected line, otherwise the map would drop
-  // the corridor out from under the engineer and show the drop in its place.
-  // null = nothing staged yet; the start point lives in continueStartPt.
-  const [newTrenchCoords, setNewTrenchCoords] = useState<[number, number][] | null>(null);
+  // Creating a trench is the Draw trench dock tool: it branches off any line,
+  // junction and 90-degree lock included. Continue here only extends the
+  // selected line, so there is exactly one way to create a trench.
   // Dedupe guard: the native map fires BOTH the Map onPress AND the
   // GeoJSONSource onPress for a single tap, so handleContinueLineTap can
   // fire twice with the same lngLat. Without this guard every tap would
@@ -1786,11 +1811,9 @@ export default function MapScreen() {
     const previewLayers: any[] = [];
     // In Draw Segment (continue-line) mode the preview only appears once
     // the two-point segment has actually been drawn — never the whole line.
-    // New-trench mode is excluded: there the working copy is still the selected
-    // line (unchanged) and the trench under construction is its own preview.
     const showLinePreview =
       lineMoveMode ||
-      (lineToolMode === 'continue-line' && !continueNewTrench && continueLinePoints >= 1) ||
+      (lineToolMode === 'continue-line' && continueLinePoints >= 1) ||
       lineToolMode === 'route-around';
     if (showLinePreview && tempLineCoords && selectedLineFeature) {
       const previewFeature = {
@@ -1912,34 +1935,8 @@ export default function MapScreen() {
       });
     }
 
-    // ── Continue line → New trench working copy (orange) ──
-    // Same treatment as Draw trench: one vertex renders as a dot, anything more
-    // as the growing line. Nothing is a survey feature until Save.
-    if (continueNewTrench && newTrenchCoords && newTrenchCoords.length > 0) {
-      const isSingle = newTrenchCoords.length === 1;
-      previewLayers.push({
-        id: 'temp-preview-new-trench',
-        name: 'New trench',
-        features: [{
-          type: 'Feature' as const,
-          geometry: isSingle
-            ? { type: 'Point' as const, coordinates: newTrenchCoords[0] }
-            : { type: 'LineString' as const, coordinates: newTrenchCoords },
-          properties: {
-            id: 'temp-preview-new-trench',
-            _id: 'temp-preview-new-trench',
-            _layer_id: 'temp-preview-new-trench',
-            _is_preview: true,
-          },
-        }],
-        visible: true,
-        color: SURVEY_COLOR, // Orange
-        geometryType: (isSingle ? 'Point' : 'LineString') as 'Point' | 'LineString',
-      });
-    }
-
     return [...hldLayers, ...assignmentAreaLayers, ...previewLayers, ...surveyLayers, ...stagedLayers];
-  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, lineToolMode, continueLinePoints, tempLineCoords, selectedLineFeature, selectedPolygonFeature, polygonEditCoords, isolateFeatureId, drawTrenchActive, drawTrenchPoints, continueNewTrench, newTrenchCoords, obstacleCentre, obstacleRadiusM, deleteSectionRange, assignmentPolygons, lockedFeatureIds]);
+  }, [activeGeojson, layerVisibility, activeLayerNames, hasImportedData, importFeatureIdMap, effectiveLayerColors, displayMode, surveyFeatures, lineMoveMode, lineToolMode, continueLinePoints, tempLineCoords, selectedLineFeature, selectedPolygonFeature, polygonEditCoords, isolateFeatureId, drawTrenchActive, drawTrenchPoints, obstacleCentre, obstacleRadiusM, deleteSectionRange, assignmentPolygons, lockedFeatureIds]);
 
   // Build visible layers from the active project's layers
   const visibleLayers = useMemo(() => {
@@ -3181,100 +3178,6 @@ export default function MapScreen() {
     }
 
     const { id: featureId, layerId, layerName } = selectedLineFeature;
-    // ── New-trench save: the drawn polyline becomes its OWN feature ──
-    // Same output as Draw trench (engineer-created, no HLD parent), but drawn
-    // from the line toolbar with the selected line's corners and object points
-    // as snapping anchors. It runs BEFORE the no-op guard on purpose: in this
-    // mode the working copy is still the untouched selected line, so that guard
-    // would read "no change" and abort a perfectly good trench.
-    if (lineToolMode === 'continue-line' && continueNewTrench) {
-      const coords = newTrenchCoords ?? [];
-      if (coords.length < 2) {
-        showToast('Tap a start and at least one more point before saving', 'warning');
-        return;
-      }
-      const trenchGeometry = { type: 'LineString', coordinates: coords };
-      const trenchAttrs = buildConnectionAttrs({ construction_type: 'new_trench' }, continueSnapTarget);
-      let savedTrenchId: string | null = null;
-      try {
-        const sf = await upsertSurveyFeature(
-          null, layerId, layerName,
-          trenchGeometry,
-          trenchAttrs,
-          null, null,
-          continueSnapTarget
-            ? `Drew new trench to ${continueSnapTarget.name} #${continueSnapTarget.id.slice(-6)}`
-            : `Drew new trench (${coords.length} vertices) off ${layerName} #${featureId.slice(-6)}`,
-        );
-        if (sf) {
-          savedTrenchId = sf.id;
-          pushUndo({
-            featureId, layerId,
-            oldLng: 0, oldLat: 0, newLng: 0, newLat: 0,
-            timestamp: Date.now(),
-            surveyUndo: {
-              surveyFeatureId: sf.id,
-              layerId,
-              previousGeometry: trenchGeometry as Record<string, unknown>,
-              previousAttributes: {},
-              previousStatus: 'new',
-              description: `Undo: remove new trench for ${featureId.slice(-8)}`,
-              deleteOnUndo: true,
-            },
-          });
-          showToast(
-            useOfflineStore.getState().isOnline
-              ? `Trench saved (${coords.length} vertices) — tap to draw the next one`
-              : 'Trench kept on device — tap to draw the next one',
-            'success',
-          );
-        } else if (activeProject?.id.startsWith('imported-')) {
-          showToast('Imported project — trench kept on device only', 'info');
-        } else {
-          showToast('Save failed — check the server connection and retry', 'error');
-          return;
-        }
-      } catch (err) {
-        console.error('[Continue] New trench save failed:', err);
-        showToast('Save failed — check the server connection and retry', 'error');
-        return;
-      }
-      // Re-arm for the next trench: nothing staged, and the trench that was
-      // just written becomes the SELECTION. Re-arming on the line we branched
-      // from left the freshly drawn trench unreachable — Shape → Edit shape and
-      // Retire kept acting on the parent line, so deleting or correcting the
-      // trench you had just made meant closing the tool and tapping it again.
-      // Chaining from the new trench is also what a survey run does: feeder
-      // run, then the drop that starts at its end.
-      setNewTrenchCoords(null);
-      setContinueStartPt(null);
-      setContinueLineAnchor(null);
-      setContinueLinePoints(0);
-      setContinueSnapTarget(null);
-      setContinueIsSpur(false);
-      lastContinueTapRef.current = null;
-      setTempLineCoords(coords.map(([lng, lat]) => [lng, lat] as [number, number]));
-      setTempLineOriginal(coords.map(([lng, lat]) => [lng, lat] as [number, number]));
-      if (savedTrenchId) {
-        const baseLayerName = activeLayerNames[layerId] ?? layerId.toUpperCase();
-        setSelectedLineFeature({
-          id: savedTrenchId,
-          layerId,
-          geometryType: 'LineString',
-          // Same title a tapped survey line shows; layerName stays the plain
-          // layer so the next save still writes a clean layer_name.
-          name: `Survey: ${baseLayerName} #${savedTrenchId.slice(-4)}`,
-          layerName: baseLayerName,
-        });
-        setSelectedMapFeatureId(savedTrenchId);
-        // The new trench only exists in the survey layer — switch to Overlay so
-        // it is actually on screen (and tappable) after the save.
-        autoOverlayOnEdit();
-        console.log(`[Continue] New trench ${savedTrenchId.slice(-8)} saved — selected it for edit/delete, tool re-armed`);
-      }
-      return;
-    }
-
     // Resolve the existing survey feature BEFORE the no-op guard (it decides
     // whether the baseline is the previous survey edit or the HLD original).
     const surveyById = surveyFeatures[layerId]?.find((s) => s.id === featureId);
@@ -3515,7 +3418,7 @@ export default function MapScreen() {
     lastContinueTapRef.current = null;
     setDeleteSectionRange(null);
     console.log(`[MoveMode] Saved line geometry for ${featureId.slice(-8)} — SurveyFeature ${existingSurvey ? 'updated' : 'created'}${continueSnapTarget ? ` (snapped to ${continueSnapTarget.name})` : ''}`);
-  },    [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, continueSnapTarget, surveyFeatures, propagateBundleReroute, lineToolMode, continueLinePoints, continueIsSpur, continueNewTrench, newTrenchCoords, activeProject, showToast, bundleSkipLayers, activeLayerNames, autoOverlayOnEdit]);
+  },    [selectedLineFeature, tempLineCoords, tempLineOriginal, getSurveyFeatureForHld, findHldFeatureOriginal, pushUndo, updateSurveyFeature, upsertSurveyFeature, continueSnapTarget, surveyFeatures, propagateBundleReroute, lineToolMode, continueLinePoints, continueIsSpur, activeProject, showToast, bundleSkipLayers, activeLayerNames, autoOverlayOnEdit, handlePointSurveyForm]);
 
   // ── Current coordinates of the selected line ──────────────────────────
   // Every line tool (Detour, Continue, Cut out span, Split) arms from this.
@@ -3615,8 +3518,6 @@ export default function MapScreen() {
       setContinueSnapTarget(null);
       setContinueStartPt(null);
       setContinueIsSpur(false);
-      setContinueNewTrench(false);
-      setNewTrenchCoords(null);
       lastContinueTapRef.current = null;
       setTempLineCoords(null);
       setTempLineOriginal(null);
@@ -3644,31 +3545,9 @@ export default function MapScreen() {
     setContinueStartPt(null);
     setContinueIsSpur(false);
     // Always re-arm in Extend: creating features is opt-in, never a surprise.
-    setContinueNewTrench(false);
-    setNewTrenchCoords(null);
     lastContinueTapRef.current = null;
     autoOverlayOnEdit();
   }, [selectedLineFeature, lineToolMode, tempLineCoords, loadSelectedLineCoords, autoOverlayOnEdit, showToast]);
-
-  // ── Continue line: Extend ⇄ New trench ────────────────────────────────
-  // Both modes draw from the line's baseline, so switching discards any staged
-  // geometry: a half-drawn extension must never leak into a new trench.
-  const handleContinueNewTrenchToggle = useCallback((newTrench: boolean) => {
-    setContinueNewTrench(newTrench);
-    setContinueLineAnchor(null);
-    setContinueStartPt(null);
-    setContinueLinePoints(0);
-    setContinueSnapTarget(null);
-    setContinueIsSpur(false);
-    setNewTrenchCoords(null);
-    lastContinueTapRef.current = null;
-    setTempLineCoords(
-      tempLineOriginal
-        ? tempLineOriginal.map(([lng, lat]) => [lng, lat] as [number, number])
-        : tempLineCoords,
-    );
-    console.log(`[Continue] Mode → ${newTrench ? 'new trench (own feature)' : 'extend selected line'}`);
-  }, [tempLineOriginal, tempLineCoords]);
 
   const handleDeleteSectionConfirm = useCallback(async () => {
     if (!deleteSectionRange || !tempLineCoords || !tempLineOriginal || !selectedLineFeature) return;
@@ -4191,8 +4070,19 @@ export default function MapScreen() {
     return m;
   }, [drawTrenchPoints]);
 
+  // allowJunction: a generated mid-run junction is only right for the FIRST
+  // vertex, the tap that decides what the trench branches off. Applying it to
+  // every later vertex pulled a trench drawn a metre or two beside an existing
+  // run onto that run: the parallel trench collapsed to zero width, and the
+  // perpendicular lock then turned the rest of it into a stub.
   const findTrenchSnap = useCallback(
-    (pt: [number, number]): { lng: number; lat: number; label: string | null } => {
+    (pt: [number, number], allowJunction = true): {
+      lng: number;
+      lat: number;
+      label: string | null;
+      isJunction: boolean;
+      target: ContinueSnapTargetShape | null;
+    } => {
       // 1) Object points (premise / PDP / MFG / chamber) — same resolver the
       //    draw-segment tool uses, so snapping behaves identically.
       const snapPt = findNearestSnapPoint(mapLayerData, pt[0], pt[1]);
@@ -4200,12 +4090,31 @@ export default function MapScreen() {
         const label = snapPt.name
           ? `${snapPt.name} #${String(snapPt.id ?? '').slice(-6)}`
           : `#${String(snapPt.id ?? '').slice(-6)}`;
-        return { lng: snapPt.lng, lat: snapPt.lat, label };
+        return {
+          lng: snapPt.lng,
+          lat: snapPt.lat,
+          label,
+          isJunction: false,
+          target: {
+            id: snapPt.id,
+            layerId: snapPt.layerId,
+            name: snapPt.name,
+            lng: snapPt.lng,
+            lat: snapPt.lat,
+            properties: { ...snapPt.properties },
+            kind: 'object' as const,
+          },
+        };
       }
       // 2) Duct / trench / cable ENDPOINTS — the second thing a drawn trench
       //    must connect to. Only endpoints and vertices, within ~8 m.
       const maxDeg = 8 / 111000;
-      let best: { lng: number; lat: number; label: string | null } | null = null;
+      let best: {
+        lng: number;
+        lat: number;
+        label: string | null;
+        target: ContinueSnapTargetShape | null;
+      } | null = null;
       let bestD = Infinity;
       for (const layer of mapLayerData) {
         for (const f of layer.features) {
@@ -4221,22 +4130,116 @@ export default function MapScreen() {
             if (d < bestD) {
               const fid = String((f.properties as any)?.id ?? (f.properties as any)?._id ?? '');
               bestD = d;
-              best = { lng: c[0], lat: c[1], label: `${layer.name ?? layer.id} end #${fid.slice(-4)}` };
+              const layerName = layer.name ?? layer.id;
+              // Direction of the segment at this end, so a trench started here
+              // can also be locked perpendicular to it.
+              const segA = c === coords[0] ? coords[1] : coords[coords.length - 2];
+              const mLng = 111320 * Math.cos((pt[1] * Math.PI) / 180);
+              const vx = (c[0] - segA[0]) * mLng;
+              const vy = (c[1] - segA[1]) * 110540;
+              const vLen = Math.hypot(vx, vy);
+              const lineDir: [number, number] | undefined = vLen > 0 ? [vx / vLen, vy / vLen] : undefined;
+              best = {
+                lng: c[0],
+                lat: c[1],
+                label: `${layerName} end #${fid.slice(-4)}`,
+                target: {
+                  id: fid,
+                  layerId: layer.id,
+                  name: `${layerName} end`,
+                  lng: c[0],
+                  lat: c[1],
+                  properties: {},
+                  kind: 'line' as const,
+                  vertexIdx: c === coords[0] ? 0 : coords.length - 1,
+                  isEndpoint: true,
+                  lineDir,
+                },
+              };
             }
           }
         }
       }
-      if (best && bestD <= maxDeg) return best;
-      return { lng: pt[0], lat: pt[1], label: null };
+      if (best && bestD <= maxDeg) {
+        return {
+          ...best,
+          isJunction: false,
+        };
+      }
+      // 3) JUNCTION — project onto the interior of a segment. This is the point
+      //    that did not exist yet: a branch may start ON a run, not only at one
+      //    of its corners, and the projection is what makes the two lines share
+      //    an exact coordinate instead of missing by decimetres.
+      const junction = allowJunction ? findNearestLineJunction(mapLayerData, pt[0], pt[1], 8) : null;
+      if (junction) {
+        return {
+          lng: junction.coord[0],
+          lat: junction.coord[1],
+          label: `Junction on ${junction.layerName} #${junction.featureId.slice(-4)}`,
+          isJunction: true,
+          target: {
+            id: junction.featureId,
+            layerId: junction.layerId,
+            name: `${junction.layerName} junction`,
+            lng: junction.coord[0],
+            lat: junction.coord[1],
+            properties: {},
+            kind: 'line' as const,
+            isJunction: true,
+            lineDir: junction.dir,
+          },
+        };
+      }
+      return { lng: pt[0], lat: pt[1], label: null, isJunction: false, target: null };
     },
     [mapLayerData],
   );
 
+  // Turning the 90-degree lock off means the next vertex is a free tap, so the
+  // saved branch must stop claiming it is perpendicular.
+  const handleTrenchPerpendicularChange = useCallback((on: boolean) => {
+    setDrawTrenchPerpendicular(on);
+    if (!on) setDrawTrenchPerpUsed(false);
+  }, []);
+
   const handleTrenchTap = useCallback((lngLat: [number, number]) => {
-    const snap = findTrenchSnap(lngLat);
+    // Dedupe the native double-fire (see lastTrenchTapRef).
+    const now = Date.now();
+    const lastTap = lastTrenchTapRef.current;
+    if (
+      lastTap &&
+      now - lastTap.t < 300 &&
+      Math.abs(lastTap.lng - lngLat[0]) < 1e-6 &&
+      Math.abs(lastTap.lat - lngLat[1]) < 1e-6
+    ) {
+      return;
+    }
+    lastTrenchTapRef.current = { lng: lngLat[0], lat: lngLat[1], t: now };
+    // Only the first vertex may generate a junction: a later tap near an
+    // existing run keeps the position the engineer tapped.
+    const snap = findTrenchSnap(lngLat, drawTrenchPoints.length === 0);
+    let coord: [number, number] = [snap.lng, snap.lat];
+    if (drawTrenchPoints.length === 0) {
+      // The first vertex defines what this trench branches off. Landing on a
+      // line (junction generated mid-run, or its end) arms the perpendicular
+      // lock; landing on an object point does not.
+      setDrawTrenchPerpendicular(!!snap.target?.lineDir);
+      setDrawTrenchConnection(snap.target);
+    } else if (drawTrenchPoints.length === 1 && drawTrenchAnchor && drawTrenchPerpendicular) {
+      const projected = projectPerpendicular(drawTrenchAnchor.point, drawTrenchAnchor.dir, coord);
+      const offAxis = haversineMeters(projected[0], projected[1], coord[0], coord[1]);
+      // 0.2 m = the tap is already on the axis, so projecting would repeat the
+      // start vertex. 15 m = that was not a 90° attempt, so keep the tap.
+      if (offAxis > 0.2 && offAxis <= 15) {
+        coord = projected;
+        setDrawTrenchPerpUsed(true);
+      }
+    }
+    // Everything below is state, so the preview layer shows the vertex (and the
+    // junction it created) on the same frame — nothing waits for Save.
     setDrawTrenchSnapLabel(snap.label);
-    setDrawTrenchPoints((prev) => [...prev, [snap.lng, snap.lat] as [number, number]]);
-  }, [findTrenchSnap]);
+    setDrawTrenchPoints((prev) => [...prev, coord]);
+  }, [findTrenchSnap, drawTrenchPoints.length, drawTrenchAnchor, drawTrenchPerpendicular]);
 
   const handleTrenchToggle = useCallback(() => {
     setActiveSheet(null);
@@ -4244,6 +4247,10 @@ export default function MapScreen() {
       setDrawTrenchActive(false);
       setDrawTrenchPoints([]);
       setDrawTrenchSnapLabel(null);
+      setDrawTrenchPerpendicular(false);
+      setDrawTrenchPerpUsed(false);
+      setDrawTrenchConnection(null);
+      lastTrenchTapRef.current = null;
       return;
     }
     // Draw trench replaces any armed line-edit tool: one tool at a time.
@@ -4261,12 +4268,29 @@ export default function MapScreen() {
     setSelectedLineFeature(null);
     setDrawTrenchPoints([]);
     setDrawTrenchSnapLabel(null);
+    setDrawTrenchPerpendicular(false);
+    setDrawTrenchPerpUsed(false);
+    setDrawTrenchConnection(null);
+    lastTrenchTapRef.current = null;
     setDrawTrenchActive(true);
     console.log('[DrawTrench] Armed — tap the map to place vertices');
   }, [drawTrenchActive]);
 
   const handleTrenchUndoPoint = useCallback(() => {
-    setDrawTrenchPoints((prev) => prev.slice(0, -1));
+    setDrawTrenchPoints((prev) => {
+      const next = prev.slice(0, -1);
+      // Removing the last vertex also removes the junction/anchor it created.
+      if (next.length === 0) {
+        setDrawTrenchPerpendicular(false);
+        setDrawTrenchPerpUsed(false);
+        setDrawTrenchConnection(null);
+      } else if (next.length === 1) {
+        // The perpendicular leg was the vertex just removed, so whatever is
+        // tapped next, this branch is no longer perpendicular.
+        setDrawTrenchPerpUsed(false);
+      }
+      return next;
+    });
     setDrawTrenchSnapLabel(null);
   }, []);
 
@@ -4274,6 +4298,9 @@ export default function MapScreen() {
     setDrawTrenchActive(false);
     setDrawTrenchPoints([]);
     setDrawTrenchSnapLabel(null);
+    setDrawTrenchPerpendicular(false);
+    setDrawTrenchPerpUsed(false);
+    setDrawTrenchConnection(null);
   }, []);
 
   const handleTrenchSave = useCallback(async () => {
@@ -4294,7 +4321,13 @@ export default function MapScreen() {
         drawTrenchLayer,
         layerName,
         geometry,
-        { construction_type: drawTrenchBuildState === 'existing' ? 'existing_trench' : 'new_trench' },
+        buildConnectionAttrs(
+          {
+            construction_type: drawTrenchBuildState === 'existing' ? 'existing_trench' : 'new_trench',
+            ...(drawTrenchPerpUsed ? { perpendicular_to_linked_line: true } : {}),
+          },
+          drawTrenchConnection,
+        ),
         null,
         null,
         `Engineer-drew ${drawTrenchBuildState === 'existing' ? 'existing' : 'new'} trench (${coords.length} vertices, ${lengthM.toFixed(1)} m)`,
@@ -4331,6 +4364,10 @@ export default function MapScreen() {
       // Cancel (✕) is the way out of the tool.
       setDrawTrenchPoints([]);
       setDrawTrenchSnapLabel(null);
+      // Reset the branch anchor too: the next trench derives its own.
+      setDrawTrenchPerpendicular(false);
+      setDrawTrenchPerpUsed(false);
+      setDrawTrenchConnection(null);
       autoOverlayOnEdit();
       // A trench that was just drawn is unclassified: open the same field sheet
       // the point popup opens so its trench classification (depth, width,
@@ -4350,7 +4387,7 @@ export default function MapScreen() {
     } finally {
       setDrawTrenchBusy(false);
     }
-  }, [drawTrenchBusy, drawTrenchPoints, drawTrenchLayer, drawTrenchBuildState, drawTrenchLengthM, activeLayerNames, upsertSurveyFeature, pushUndo, showToast, autoOverlayOnEdit, handlePointSurveyForm]);
+  }, [drawTrenchBusy, drawTrenchPoints, drawTrenchLayer, drawTrenchBuildState, drawTrenchLengthM, drawTrenchPerpUsed, drawTrenchConnection, activeLayerNames, upsertSurveyFeature, pushUndo, showToast, autoOverlayOnEdit, handlePointSurveyForm]);
 
   // ── Draw Segment: independent two-point tool ───────────────────────────
   // Unlike Reroute, this tool never edits the selected line's existing path.
@@ -4427,6 +4464,27 @@ export default function MapScreen() {
             },
           };
         }
+        // 1c) Junction — project onto the INTERIOR of any nearby line, so a
+        //     branch can start mid-run instead of only at a corner or an end.
+        //     The generated point shares its exact coordinate with the run.
+        const junction = findNearestLineJunction(mapLayerData, pt[0], pt[1], 8);
+        if (junction) {
+          return {
+            lng: junction.coord[0],
+            lat: junction.coord[1],
+            snapTarget: {
+              id: junction.featureId,
+              layerId: junction.layerId,
+              name: `${junction.layerName} junction`,
+              lng: junction.coord[0],
+              lat: junction.coord[1],
+              properties: {},
+              kind: 'line' as const,
+              isJunction: true,
+              lineDir: junction.dir,
+            },
+          };
+        }
         // 2) Otherwise snap to the nearest point on the selected line
         //    (within ~15 m) so the segment connects cleanly to the network.
         const onLine = nearestPointOnLine(tempLineCoords!, pt);
@@ -4437,39 +4495,6 @@ export default function MapScreen() {
         // 3) Exact tap location.
         return { lng: pt[0], lat: pt[1], snapTarget: null };
       };
-
-      // ── New-trench mode: each tap builds a trench of its own ────────────
-      // The selected line is only a snapping anchor — nothing about it is
-      // staged. First tap sets the start, every later tap adds a vertex, and
-      // Save writes the polyline as an independent feature (the same output as
-      // Draw trench) then re-arms for the next trench.
-      if (continueNewTrench) {
-        const s = resolveTap(lngLat);
-        if (continueLineAnchor === null) {
-          setContinueStartPt([s.lng, s.lat]);
-          setContinueLineAnchor(0); // marker: start chosen
-          setContinueSnapTarget(s.snapTarget);
-          setNewTrenchCoords([[s.lng, s.lat]]);
-          console.log(`[Continue] New trench start ${s.snapTarget ? `snapped to ${s.snapTarget.name} #${s.snapTarget.id.slice(-6)}` : 'placed'} at [${s.lng.toFixed(6)}, ${s.lat.toFixed(6)}]`);
-          return;
-        }
-        const prior = newTrenchCoords ?? [];
-        const lastPt = prior[prior.length - 1];
-        if (lastPt && lastPt[0] === s.lng && lastPt[1] === s.lat) return;
-        if (prior.length === 0) {
-          console.log('[Continue] New trench has no start — tap the start again');
-          return;
-        }
-        const coords: [number, number][] = [...prior, [s.lng, s.lat]];
-        setContinueSnapTarget(s.snapTarget);
-        setContinueIsSpur(false);
-        setNewTrenchCoords(coords);
-        // Count EXCLUDES the start, so the toolbar's step logic keeps working:
-        // 0 = only the start placed, 1+ = geometry ready to save.
-        setContinueLinePoints(coords.length - 1);
-        console.log(`[Continue] New trench ${coords.length} vertices${s.snapTarget ? ` → ${s.snapTarget.name} #${s.snapTarget.id.slice(-6)}` : ''}`);
-        return;
-      }
 
       // ── Step 1: place the start point ──
       if (continueLineAnchor === null) {
@@ -4533,7 +4558,7 @@ export default function MapScreen() {
       // Segment already ready — ignore extra taps (Save to finish).
       console.log('[Continue] Segment ready — tap Save to finish');
     },
-    [lineToolMode, selectedLineFeature, tempLineCoords, continueLineAnchor, continueLinePoints, continueStartPt, mapLayerData, continueNewTrench, newTrenchCoords],
+    [lineToolMode, selectedLineFeature, tempLineCoords, continueLineAnchor, continueLinePoints, continueStartPt, mapLayerData],
   );
 
   // ── Check if temp line has unsaved changes ──
@@ -5468,11 +5493,7 @@ export default function MapScreen() {
               if (drawTrenchActive) {
                 // Same guard as the empty-ground tap: while the saved trench's
                 // classification sheet is open, taps are not the next trench.
-                if (!surveyForm) {
-                  const snapped = findTrenchSnap(lngLat);
-                  setDrawTrenchSnapLabel(snapped.label);
-                  setDrawTrenchPoints((prev) => [...prev, [snapped.lng, snapped.lat] as [number, number]]);
-                }
+                if (!surveyForm) handleTrenchTap(lngLat);
                 return;
               }
               if (geoMode === 'delete_feature') {
@@ -5712,6 +5733,9 @@ export default function MapScreen() {
               onBuildStateChange={setDrawTrenchBuildState}
               pointCount={drawTrenchPoints.length}
               snapLabel={drawTrenchSnapLabel}
+              anchored={!!drawTrenchAnchor}
+              perpendicular={drawTrenchPerpendicular}
+              onPerpendicularChange={handleTrenchPerpendicularChange}
               busy={drawTrenchBusy}
               onUndoPoint={handleTrenchUndoPoint}
               onCancel={handleTrenchCancel}
@@ -5736,13 +5760,7 @@ export default function MapScreen() {
               moveMode={activeLineTool === 'move'}
               onToggleMove={handleToggleMove}
               onSave={handleSaveLine}
-              hasUnsavedChanges={
-                hasUnsavedLineChanges ||
-                // A staged new trench is not a change to the selected line, so
-                // the working-copy comparison above cannot see it — without this
-                // Save would stay greyed out while a trench is ready.
-                (activeLineTool === 'continue-line' && continueNewTrench && (newTrenchCoords?.length ?? 0) >= 2)
-              }
+              hasUnsavedChanges={hasUnsavedLineChanges}
               onDeleteSection={handleDeleteSectionToggle}
               deleteSectionMode={activeLineTool === 'delete-section'}
               deleteSectionStep={deleteSectionRange ? (deleteSectionRange[0] === deleteSectionRange[1] ? 1 : 2) : 0}
@@ -5776,9 +5794,6 @@ export default function MapScreen() {
               }
               continueMode={activeLineTool === 'continue-line'}
               onContinue={handleContinueToggle}
-              continueNewTrench={continueNewTrench}
-              onContinueNewTrenchChange={handleContinueNewTrenchToggle}
-              continueVertexCount={newTrenchCoords?.length ?? 0}
               continueLineStep={continueLineAnchor === null ? 0 : continueLinePoints >= 1 ? 2 : 1}
               continueLineSegments={continueLinePoints}
               continueSnapLabel={continueSnapTarget ? `Snapped to ${continueSnapTarget.name} #${continueSnapTarget.id.slice(-6)}` : undefined}
