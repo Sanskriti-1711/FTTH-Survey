@@ -457,7 +457,9 @@ describe('P0 map tools on the web build', { concurrency: 1 }, () => {
     // Draw trench is a permanent dock slot now — no tools menu to open first.
     await page.getByLabel('Draw a new trench line on the map').click();
 
-    await page.getByText('Tap the map to place the first vertex').waitFor({ state: 'visible', timeout: UI_TIMEOUT });
+    // Zero vertices: the panel names the tap that starts the line, and says a
+    // start on an existing line brings the 90° branch with it.
+    await page.getByText(/^Tap the map to start/).waitFor({ state: 'visible', timeout: UI_TIMEOUT });
     assert.equal(await page.getByRole('button', { name: 'Save trench' }).isDisabled(), true);
   });
 
