@@ -9,6 +9,7 @@ import {
   saveStoredUser,
   loadStoredUser,
   clearStoredUser,
+  setSessionExpiredHandler,
 } from '../api/client';
 
 // ── Auth Store ────────────────────────────────────────────────────────────
@@ -112,3 +113,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   clearError: () => set({ error: null }),
 }));
+
+// A request refused *after* its refresh token was rejected ends the session:
+// dropping the store's token/user makes `_layout`'s auth guard show the sign-in
+// screen, instead of leaving the tab on an error card that Try Again cannot fix.
+setSessionExpiredHandler(() => {
+  useAuthStore.setState({ user: null, token: null, error: null });
+});

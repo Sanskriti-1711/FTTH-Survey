@@ -130,9 +130,32 @@ function requireOnline(): void {
   }
 }
 
-export async function refreshAccessToken(signal?: AbortSignal): Promise<string | null> {
+/** What a refresh attempt found: a new access token, or a refusal. */
+export interface RefreshResult {
+  access: string | null;
+  /** The server refused the refresh token — the session cannot continue. */
+  rejected: boolean;
+}
+
+// A session the server has refused cannot be recovered by retrying, so the auth
+// guard has to sign the engineer in again. The store registers here because
+// this module cannot import it: the store imports this one.
+let onSessionExpired: (() => void) | null = null;
+
+export function setSessionExpiredHandler(handler: (() => void) | null): void {
+  onSessionExpired = handler;
+}
+
+async function endSession(): Promise<void> {
+  apiClientToken = null;
+  await clearTokens();
+  await clearStoredUser();
+  onSessionExpired?.();
+}
+
+export async function refreshSession(signal?: AbortSignal): Promise<RefreshResult> {
   const refresh = await getRefreshToken();
-  if (!refresh) return null;
+  if (!refresh) return { access: null, rejected: false };
 
   try {
     const res = await fetch(`${getApiBaseUrl()}/api/users/token/refresh/`, {
@@ -142,14 +165,31 @@ export async function refreshAccessToken(signal?: AbortSignal): Promise<string |
       ...(signal ? { signal } : {}),
     });
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      // Rotation retires the token it just replaced, so a second tab (or a
+      // parallel request) can present one that another refresh has already
+      // spent. If the stored pair changed underneath us, that newer access
+      // token is the live one — use it instead of declaring the session dead.
+      const current = await getRefreshToken();
+      if (current && current !== refresh) {
+        const access = await loadStoredToken();
+        if (access) return { access, rejected: false };
+      }
+      return { access: null, rejected: res.status === 401 || res.status === 403 };
+    }
 
     const data = await res.json();
     await saveTokens(data.access, data.refresh ?? refresh);
-    return data.access;
+    return { access: data.access, rejected: false };
   } catch {
-    return null;
+    return { access: null, rejected: false };
   }
+}
+
+/** The new access token, or null. Never ends the session on its own: a refusal
+ *  matters only once the request itself was also refused as unauthenticated. */
+export async function refreshAccessToken(signal?: AbortSignal): Promise<string | null> {
+  return (await refreshSession(signal)).access;
 }
 
 export async function apiFetch<T = unknown>(
@@ -181,10 +221,17 @@ export async function apiFetch<T = unknown>(
   // Auto-refresh on 401, except for auth endpoints that deliberately skip the
   // stale token (there is nothing to refresh for those requests).
   if (res.status === 401 && !skipAuth) {
-    const newToken = await refreshAccessToken();
-    if (newToken) {
-      headers['Authorization'] = `Bearer ${newToken}`;
+    const refreshed = await refreshSession();
+    if (refreshed.access) {
+      headers['Authorization'] = `Bearer ${refreshed.access}`;
       res = await fetch(url, { ...fetchOptions, headers });
+    } else if (refreshed.rejected) {
+      // A refused access token *and* a refused refresh token: no retry can
+      // succeed. Drop the dead session so the auth guard shows sign-in instead
+      // of leaving the screen on "Couldn't Load …" with a Try Again that can
+      // never work.
+      await endSession();
+      throw new ApiError('Your session expired. Please sign in again.', 401);
     }
   }
 

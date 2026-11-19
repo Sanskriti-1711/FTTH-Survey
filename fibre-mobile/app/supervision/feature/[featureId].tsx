@@ -38,6 +38,7 @@ import {
   type FeaturePhotoData,
 } from '../../../lib/api/features';
 import { displayValue, getSupervisionFeature, lldVersionLabel } from '../../../lib/api/supervision';
+import { elementLabel, elementTypeFromName } from '../../../lib/api/aiMeasure';
 import {
   applySpanInspection,
   inspectionProgress,
@@ -437,6 +438,10 @@ export default function SupervisionFeatureScreen() {
   );
   const displaySpanCount = spanComponentCount > 0 ? spanComponentCount : spanFeatureCount;
   const spanLayerLabel = layerName || 'Span layer';
+  // The span's layer names what it is, and the estimate screen reads the same
+  // name, so the tag here is exactly what that screen will assume.
+  const detectedElement = elementTypeFromName(layerName);
+
   const mapCaption = spanMapLoading
     ? 'Loading layer span…'
     : spanMapError ??
@@ -756,6 +761,48 @@ export default function SupervisionFeatureScreen() {
               {mapCaption}
             </Text>
           </View>
+        </View>
+
+        {/* The only entry point for the AI estimate: it opens from the span it
+            measures, so the numbers belong to it. Still writes nothing. */}
+        <View style={[styles.card, { backgroundColor: colors.surface }]}>
+          <View style={styles.cardTitleRow}>
+            <Text style={[styles.cardTitle, { color: colors.textPrimary }]}>AI measurements</Text>
+            {detectedElement ? (
+              <View
+                style={[
+                  styles.elementTag,
+                  {
+                    backgroundColor: colors.primary + '14',
+                    borderColor: colors.primary + '44',
+                  },
+                ]}
+              >
+                <Text style={[styles.elementTagText, { color: colors.primary }]}>
+                  {elementLabel(detectedElement)}
+                </Text>
+              </View>
+            ) : (
+              <Ruler size={16} stroke={colors.textTertiary} />
+            )}
+          </View>
+          <Text style={[styles.cardHint, { color: colors.textSecondary }]}>
+            Photograph the element on this span — the type is read from the span layer name.
+            Depth and width come from the approved design unless something of known size is
+            in the frame.
+          </Text>
+          <Button
+            title="Open AI measurements"
+            variant="secondary"
+            icon={<Ruler size={16} stroke={colors.primary} />}
+            style={{ marginTop: Spacing.xs }}
+            onPress={() =>
+              router.push({
+                pathname: '/supervision/ai-measure',
+                params: { spanId, layer: layerName, projectId, featureId },
+              })
+            }
+          />
         </View>
 
         {/* Field evidence */}
@@ -1253,6 +1300,13 @@ const styles = StyleSheet.create({
   subtitle: { ...Type.meta, marginTop: 2 },
   scroll: { padding: Spacing.md, paddingBottom: Spacing.xxl, gap: Spacing.md },
   mapCard: { borderRadius: Radius.lg, overflow: 'hidden' },
+  elementTag: {
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 2,
+    borderRadius: Radius.full,
+    borderWidth: 1,
+  },
+  elementTagText: { fontSize: 12, fontWeight: '700' },
   mapCaption: {
     flexDirection: 'row',
     alignItems: 'center',

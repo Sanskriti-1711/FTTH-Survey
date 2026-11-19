@@ -102,13 +102,21 @@ export default function SupervisionScreen() {
     // Admins are not field assignees. They still need every supervision
     // project to be reachable from this tab, even when they hold no job.
     if (isAdmin) return supervisionProjects;
-    const projectIds = new Set(
-      (jobs ?? [])
-        .filter((job) => job.scope !== 'feature' && job.scope !== 'span')
-        .map((job) => job.project.id),
-    );
+    // Every assigned project gets a card, including the ones whose only jobs
+    // are feature-scope: their spans are listed above, but the project itself
+    // still has to be reachable from this tab.
+    const projectIds = new Set((jobs ?? []).map((job) => job.project.id));
     return supervisionProjects.filter((project) => projectIds.has(project.id));
   }, [jobs, supervisionProjects, isAdmin]);
+
+  // A project card summarises the jobs that cover more than one span, and falls
+  // back to the feature jobs when those are all it has — otherwise a
+  // feature-only project would read "No assignments yet".
+  const cardJobs = (projectId: string) => {
+    const projectJobs = (jobs ?? []).filter((job) => job.project.id === projectId);
+    const broad = projectJobs.filter((job) => job.scope !== 'feature');
+    return broad.length > 0 ? broad : projectJobs;
+  };
 
   const projectById = useMemo(() => {
     const map: Record<string, Project> = {};
@@ -348,9 +356,7 @@ export default function SupervisionScreen() {
                   <SupervisionCard
                     key={project.id}
                     project={project}
-                    jobs={(jobs ?? []).filter(
-                      (job) => job.project.id === project.id && job.scope !== 'feature',
-                    )}
+                    jobs={cardJobs(project.id)}
                     onPress={() =>
                       router.push({
                         pathname: '/supervision/[projectId]',
@@ -466,7 +472,7 @@ function SupervisionCard({
           <Text style={[styles.jobMeta, { color: colors.textSecondary }]} numberOfLines={1}>
             {lldVersionLabel(project)} ·{' '}
             {jobs.length > 0
-              ? `${jobs.length} ${jobs.length === 1 ? 'task' : 'tasks'} · ${featureTotal} features`
+              ? `${jobs.length} ${jobs.length === 1 ? 'task' : 'tasks'} · ${featureTotal} ${featureTotal === 1 ? 'feature' : 'features'}`
               : 'No assignments yet'}
           </Text>
         </View>
