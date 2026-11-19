@@ -11,7 +11,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import {
   AlertTriangle,
@@ -257,10 +257,10 @@ export default function SupervisionFeatureScreen() {
     type: 'success' | 'error';
   }>({ visible: false, message: '', type: 'success' });
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (options?: { silent?: boolean }) => {
     if (!projectId || !featureId) return;
     const seq = ++loadSeqRef.current;
-    setLoading(true);
+    if (!options?.silent) setLoading(true);
     setError(null);
     try {
       const [data, proj] = await Promise.all([
@@ -351,6 +351,20 @@ export default function SupervisionFeatureScreen() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // A tape reading is written to the server while this screen stays mounted,
+  // so returning from the OCR screen has to reload it for the form to show the
+  // value. The first focus is skipped: the effect above already loaded it.
+  const focusedOnce = useRef(false);
+  useFocusEffect(
+    useCallback(() => {
+      if (!focusedOnce.current) {
+        focusedOnce.current = true;
+        return;
+      }
+      void load({ silent: true });
+    }, [load])
+  );
 
   const fields = useMemo(
     () =>
@@ -704,7 +718,7 @@ export default function SupervisionFeatureScreen() {
           <Text style={[styles.centerText, { color: colors.textSecondary }]}>
             {error ?? 'This span is no longer available.'}
           </Text>
-          <Button title="Try Again" variant="secondary" size="sm" onPress={load} />
+          <Button title="Try Again" variant="secondary" size="sm" onPress={() => void load()} />
         </View>
       </SafeAreaView>
     );
@@ -799,6 +813,31 @@ export default function SupervisionFeatureScreen() {
             onPress={() =>
               router.push({
                 pathname: '/supervision/ai-measure',
+                params: { spanId, layer: layerName, projectId, featureId },
+              })
+            }
+          />
+        </View>
+
+        {/* Tape OCR: the one path that yields a real as-built reading, so it
+            sits beside the estimate instead of inside it. */}
+        <View style={[styles.card, { backgroundColor: colors.surface }]}>
+          <View style={styles.cardTitleRow}>
+            <Text style={[styles.cardTitle, { color: colors.textPrimary }]}>Tape measurement</Text>
+            <Ruler size={16} stroke={colors.textTertiary} />
+          </View>
+          <Text style={[styles.cardHint, { color: colors.textSecondary }]}>
+            Photograph the tape lying across the span. The printed numbers are read by OCR and
+            the difference fills Actual Depth, Actual Width or Measured Length for you to confirm.
+          </Text>
+          <Button
+            title="Read the tape (OCR)"
+            variant="secondary"
+            icon={<Ruler size={16} stroke={colors.primary} />}
+            style={{ marginTop: Spacing.xs }}
+            onPress={() =>
+              router.push({
+                pathname: '/supervision/tape-measure',
                 params: { spanId, layer: layerName, projectId, featureId },
               })
             }
