@@ -1,4 +1,5 @@
 import { apiFetch } from './client';
+import { photoFormPart } from './form';
 import type { Project, Layer, Feature, GeoJSONFeature } from '../utils/types';
 
 // ── Projects API ──────────────────────────────────────────────────────────
@@ -143,12 +144,7 @@ export async function uploadGpkg(
     const webFile = new File([blob], file.name, { type: file.type || 'application/zip' });
     form.append('file', webFile);
   } else {
-    // React Native: use the standard RN pattern
-    form.append('file', {
-      uri: file.uri,
-      name: file.name,
-      type: file.type,
-    } as unknown as Blob);
+    form.append('file', photoFormPart(file));
   }
 
   return apiFetch(`/api/projects/${projectId}/import/upload/`, {

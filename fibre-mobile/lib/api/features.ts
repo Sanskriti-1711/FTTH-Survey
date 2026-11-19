@@ -1,5 +1,6 @@
 import { Platform } from 'react-native';
 import { apiFetch } from './client';
+import { photoFormPart } from './form';
 import type { Feature } from '../utils/types';
 
 // ── Features API ──────────────────────────────────────────────────────────
@@ -83,11 +84,7 @@ export async function uploadFeaturePhoto(
   uploaded_at: string;
 }> {
   const form = new FormData();
-  form.append('photo', {
-    uri: photo.uri,
-    name: photo.name,
-    type: photo.type,
-  } as unknown as Blob);
+  form.append('photo', photoFormPart(photo));
 
   return apiFetch(`/api/features/${featureId}/upload-photo/`, {
     method: 'POST',
@@ -137,11 +134,7 @@ export async function uploadFeaturePhotoToGallery(
     const blob = await (await fetch(photo.uri)).blob();
     form.append('photos', blob, photo.name);
   } else {
-    form.append('photos', {
-      uri: photo.uri,
-      name: photo.name,
-      type: photo.type,
-    } as unknown as Blob);
+    form.append('photos', photoFormPart(photo));
   }
 
   return apiFetch(`/api/features/${featureId}/photos/`, {

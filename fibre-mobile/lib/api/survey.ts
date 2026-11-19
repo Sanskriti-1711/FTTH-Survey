@@ -19,6 +19,7 @@
 //             /api/survey/sync/process/      POST
 
 import { apiFetch } from './client';
+import { photoFormPart } from './form';
 import type {
   GPSTrace,
   GPSPoint,
@@ -288,11 +289,7 @@ export async function uploadSurveyFeaturePhoto(
   uploaded_at: string;
 }> {
   const form = new FormData();
-  form.append('photo', {
-    uri: photo.uri,
-    name: photo.name,
-    type: photo.type,
-  } as unknown as Blob);
+  form.append('photo', photoFormPart(photo));
 
   return apiFetch(`/api/survey/survey-features/${featureId}/upload-photo/`, {
     method: 'POST',
@@ -339,11 +336,7 @@ export async function uploadSurveyFeaturePhotos(
 }> {
   const form = new FormData();
   photos.forEach((photo) => {
-    form.append('photos', {
-      uri: photo.uri,
-      name: photo.name,
-      type: photo.type,
-    } as unknown as Blob);
+    form.append('photos', photoFormPart(photo));
   });
 
   return apiFetch(`/api/survey/survey-features/${featureId}/photos/`, {
