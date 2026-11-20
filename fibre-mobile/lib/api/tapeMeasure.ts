@@ -1,4 +1,4 @@
-import { apiFetch } from './client';
+import { ApiError, apiFetch } from './client';
 import type { AiElementType } from '../utils/element-type';
 
 // ── Tape measurement API ──────────────────────────────────────────────────
@@ -68,19 +68,39 @@ export interface TapeMeasurementResult {
   engine: string;
 }
 
+// OCR runs tesseract on the server, which takes a few seconds on a laptop and
+// up to a minute on a loaded 0.1-CPU host. Without a deadline a request that
+// never answers leaves the button on "Reading…" for good.
+const TAPE_TIMEOUT_MS = 120_000;
+
 /** POST /api/features/{id}/tape-measurements/ — read the tape, never persist. */
 export async function measureTape(
   featureId: string,
   input: { photoId: string; elementType: AiElementType; dimension: string }
 ): Promise<TapeMeasurementResult> {
-  return apiFetch(`/api/features/${featureId}/tape-measurements/`, {
-    method: 'POST',
-    body: JSON.stringify({
-      photo_id: input.photoId,
-      element_type: input.elementType,
-      dimension: input.dimension,
-    }),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TAPE_TIMEOUT_MS);
+  try {
+    return await apiFetch(`/api/features/${featureId}/tape-measurements/`, {
+      method: 'POST',
+      signal: controller.signal,
+      body: JSON.stringify({
+        photo_id: input.photoId,
+        element_type: input.elementType,
+        dimension: input.dimension,
+      }),
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new ApiError(
+        'The tape read took too long. Keep two printed numbers on the blade in the frame, avoid glare, and try again.',
+        0
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
