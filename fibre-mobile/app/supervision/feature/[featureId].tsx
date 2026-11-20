@@ -28,9 +28,11 @@ import MapLibreMap, { type MapLayerData } from '../../../lib/components/MapLibre
 import { StatusBadge } from '../../../components/ui/StatusBadge';
 import { Button } from '../../../components/ui/Button';
 import { Toast } from '../../../components/ui/Toast';
+import { confirmAction, notify } from '../../../lib/utils/dialog';
 import { entryFields } from '../../../lib/components/MeasurementEntrySheet';
 import SpanInspectionForm from '../../../lib/components/SpanInspectionForm';
 import {
+  deleteFeaturePhoto,
   getFeaturePhotos,
   submitFeatures,
   updateFieldMeasurements,
@@ -249,6 +251,7 @@ export default function SupervisionFeatureScreen() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [deletingPhotoId, setDeletingPhotoId] = useState<string | null>(null);
   const [confirmingSubmit, setConfirmingSubmit] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [toast, setToast] = useState<{
@@ -726,6 +729,28 @@ export default function SupervisionFeatureScreen() {
 
   const atPhotoLimit = photoLimit > 0 && photos.length >= photoLimit;
 
+  const removePhoto = async (photo: FeaturePhotoData) => {
+    if (deletingPhotoId) return;
+    const confirmed = await confirmAction(
+      'Delete this photo?',
+      'It is removed from this span for everyone and cannot be recovered.',
+      'Delete'
+    );
+    if (!confirmed) return;
+    setDeletingPhotoId(photo.id);
+    try {
+      await deleteFeaturePhoto(featureId, photo.id);
+      setPhotos((prev) => prev.filter((row) => row.id !== photo.id));
+    } catch (err) {
+      notify(
+        'Could not delete the photo',
+        err instanceof Error ? err.message : 'The photo is still attached to this span.'
+      );
+    } finally {
+      setDeletingPhotoId(null);
+    }
+  };
+
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]}>
       <View style={styles.header}>
@@ -861,12 +886,28 @@ export default function SupervisionFeatureScreen() {
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
               <View style={styles.photoRow}>
                 {photos.map((photo) => (
-                  <Image
-                    key={photo.id}
-                    source={{ uri: photo.url }}
-                    style={styles.photo}
-                    accessibilityLabel={photo.description || 'Site photo'}
-                  />
+                  <View key={photo.id} style={styles.photoWrap}>
+                    <Image
+                      source={{ uri: photo.url }}
+                      style={styles.photo}
+                      accessibilityLabel={photo.description || 'Site photo'}
+                    />
+                    {locked ? null : (
+                      <TouchableOpacity
+                        onPress={() => removePhoto(photo)}
+                        style={styles.photoDelete}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Delete ${photo.description || 'site photo'}`}
+                        disabled={deletingPhotoId === photo.id}
+                      >
+                        {deletingPhotoId === photo.id ? (
+                          <ActivityIndicator size="small" color="#FFFFFF" />
+                        ) : (
+                          <Trash2 size={13} stroke="#FFFFFF" />
+                        )}
+                      </TouchableOpacity>
+                    )}
+                  </View>
                 ))}
               </View>
             </ScrollView>
@@ -1378,6 +1419,20 @@ const styles = StyleSheet.create({
   summaryPillText: { fontSize: 11, fontWeight: '700' },
   photoRow: { flexDirection: 'row', gap: Spacing.sm, paddingVertical: Spacing.sm },
   photo: { width: 104, height: 78, borderRadius: Radius.md, backgroundColor: '#00000010' },
+  // The delete badge sits on the photo itself, so a full gallery row stays
+  // one swipe wide instead of doubling in height for a row of buttons.
+  photoWrap: { width: 104, height: 78, borderRadius: Radius.md, overflow: 'hidden' },
+  photoDelete: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#00000099',
+  },
   photoActions: { flexDirection: 'row', gap: Spacing.sm, marginTop: Spacing.xs },
   photoBtn: { flex: 1 },
   field: { gap: Spacing.xs, marginTop: Spacing.sm },

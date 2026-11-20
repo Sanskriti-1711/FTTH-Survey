@@ -114,6 +114,20 @@ export async function getFeaturePhotos(featureId: string): Promise<{
 }
 
 /**
+ * DELETE /api/features/{id}/photos/{photo_id}/ — remove one photo from the
+ * gallery. Uploads made by the tape/AI measurement screens land here too, so
+ * this is also how an engineer drops a photo a reading left behind.
+ */
+export async function deleteFeaturePhoto(
+  featureId: string,
+  photoId: string
+): Promise<{ detail: string; count: number }> {
+  return apiFetch(`/api/features/${featureId}/photos/${photoId}/`, {
+    method: 'DELETE',
+  });
+}
+
+/**
  * POST /api/features/{id}/photos/ — append one or more photos to the gallery.
  * The legacy upload-photo route only replaces the single `Feature.photo` column,
  * so repeated captures of the same feature would overwrite each other.
