@@ -24,6 +24,7 @@ import {
 import type { Feature, Layer, Project } from '../../lib/utils/types';
 import { useThemeStore } from '../../lib/stores/theme';
 import { Radius, Spacing, Type } from '../../lib/theme/colors';
+import { layerLoadMessage, layerLoadVerdict } from '../../lib/utils/layer-load';
 
 const LAYER_COLORS = [
   '#2563EB',
@@ -75,6 +76,7 @@ export default function SupervisionMapScreen() {
   const [selected, setSelected] = useState<{ feature: Feature; layer: Layer } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [failedLayerCount, setFailedLayerCount] = useState(0);
   const [fitBounds, setFitBounds] = useState<{
     bounds: [number, number, number, number];
     padding: { top: number; right: number; bottom: number; left: number };
@@ -86,6 +88,7 @@ export default function SupervisionMapScreen() {
     if (!projectId) return;
     setLoading(true);
     setError(null);
+    setFailedLayerCount(0);
     try {
       const [proj, layerList] = await Promise.all([
         getProject(projectId),
@@ -97,17 +100,31 @@ export default function SupervisionMapScreen() {
       const detail = await Promise.all(
         layerList.map((layer) =>
           getSupervisionLayerFeatures(projectId, layer.layer_id)
-            .then((data) => ({ layerId: layer.layer_id, features: data.features ?? [] }))
-            .catch(() => ({ layerId: layer.layer_id, features: [] as Feature[] })),
+            .then((data) => ({
+              layerId: layer.layer_id,
+              features: data.features ?? [],
+              failed: false,
+            }))
+            .catch(() => ({ layerId: layer.layer_id, features: [] as Feature[], failed: true })),
         ),
       );
       const byLayer: Record<string, Feature[]> = {};
       const allCoords: [number, number][] = [];
+      const failed = detail.filter((row) => row.failed).length;
       for (const { layerId, features } of detail) {
         byLayer[layerId] = features;
         for (const feature of features) flattenCoords(feature.geometry, allCoords);
       }
       setFeaturesByLayer(byLayer);
+      setFailedLayerCount(failed);
+
+      // A project whose layers all failed is not a project without geometry.
+      // Say so, and leave the retry button reachable, instead of drawing the
+      // "No mapped features" card over a broken endpoint.
+      if (layerLoadVerdict(layerList.length, failed) === 'failed') {
+        setError(layerLoadMessage(layerList.length, failed));
+        return;
+      }
 
       if (allCoords.length > 0) {
         const lngs = allCoords.map((c) => c[0]);
@@ -207,6 +224,12 @@ export default function SupervisionMapScreen() {
         </View>
         {project && <StatusBadge status={project.status} />}
       </View>
+
+      {!loading && !error && failedLayerCount > 0 ? (
+        <Text style={[styles.partialNote, { color: colors.warning }]}>
+          {layerLoadMessage(layers.length, failedLayerCount)}
+        </Text>
+      ) : null}
 
       {loading ? (
         <View style={styles.center}>
@@ -379,6 +402,7 @@ const styles = StyleSheet.create({
   title: { fontSize: 17, fontWeight: '700' },
   subtitle: { ...Type.meta, marginTop: 2 },
   mapWrap: { flex: 1 },
+  partialNote: { ...Type.meta, paddingHorizontal: Spacing.md, paddingBottom: Spacing.sm },
   center: {
     flex: 1,
     alignItems: 'center',
