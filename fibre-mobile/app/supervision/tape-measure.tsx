@@ -13,6 +13,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import { AlertTriangle, ArrowLeft, Camera, Image as ImageIcon, Ruler } from 'lucide-react-native';
 import { Button } from '../../components/ui/Button';
+import { Input } from '../../components/ui/Input';
 import {
   AI_ELEMENT_TYPES,
   elementLabel,
@@ -23,8 +24,12 @@ import {
 import {
   measureTape,
   TAPE_DIMENSIONS,
+  typedTapeReading,
   withTapeReading,
+  type TapeMeasurement,
   type TapeMeasurementResult,
+  type TapeReading,
+  type TapeSource,
 } from '../../lib/api/tapeMeasure';
 import { updateFieldMeasurements } from '../../lib/api/features';
 import { getSupervisionFeature } from '../../lib/api/supervision';
@@ -67,6 +72,7 @@ export default function TapeMeasureScreen() {
   const [result, setResult] = useState<TapeMeasurementResult | null>(null);
   const [reading, setReading] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [typed, setTyped] = useState('');
 
   const selected = options.find((option) => option.id === dimension) ?? options[0];
 
@@ -127,21 +133,36 @@ export default function TapeMeasureScreen() {
     }
   };
 
-  const fillForm = async () => {
-    if (!result?.measurement || !featureId || !projectId || applying) return;
-    const { feature } = await getSupervisionFeature(projectId, featureId);
+  // The photo's reading and the typed one land in the same place — the span's
+  // actual_* field — tagged with which of the two produced it.
+  const applyReading = async (
+    measurement: TapeMeasurement,
+    readings: TapeReading[],
+    photoId: string | null,
+    source: TapeSource
+  ) => {
+    if (applying) return;
+    if (!featureId || !projectId) {
+      notify(
+        'Open this from a span',
+        'A tape reading belongs to the span it measures. Open this screen from the span record.'
+      );
+      return;
+    }
     setApplying(true);
     try {
+      const { feature } = await getSupervisionFeature(projectId, featureId);
       const merged = withTapeReading(
         (feature.field_measurements ?? {}) as Record<string, unknown>,
-        result.measurement,
-        result.photo_id,
-        result.readings
+        measurement,
+        photoId,
+        readings,
+        source
       );
       await updateFieldMeasurements(featureId, merged, feature.comparison_notes ?? '');
       notify(
         'Form filled',
-        `${result.measurement.label} is ${result.measurement.value} ${result.measurement.unit}. Check it against the tape and save the inspection.`
+        `${measurement.label} is ${measurement.value} ${measurement.unit}. Check it against the tape and save the inspection.`
       );
       router.back();
     } catch (err) {
@@ -152,6 +173,18 @@ export default function TapeMeasureScreen() {
     } finally {
       setApplying(false);
     }
+  };
+
+  const fillForm = () => {
+    if (!result?.measurement) return;
+    void applyReading(result.measurement, result.readings, result.photo_id, 'tape_ocr');
+  };
+
+  const typedMeasurement = selected ? typedTapeReading(selected, typed) : null;
+
+  const fillTyped = () => {
+    if (!typedMeasurement) return;
+    void applyReading(typedMeasurement, [], null, 'tape_typed');
   };
 
   const readingsText = result?.readings.length
@@ -346,9 +379,39 @@ export default function TapeMeasureScreen() {
           <Text style={[styles.hint, { color: colors.textTertiary }]}>
             {photo
               ? 'Read the tape to see what the printed numbers say.'
-              : 'Photograph the tape to read a measurement.'}
+              : 'Photograph the tape, or type the number you read off it.'}
           </Text>
         )}
+
+        <View style={[styles.typedCard, { backgroundColor: colors.surface }]}>
+          <Text style={[styles.resultTitle, { color: colors.textPrimary }]}>
+            Type the reading
+          </Text>
+          <Text style={[styles.typedText, { color: colors.textSecondary }]}>
+            {result && !result.measurement
+              ? 'The photo could not be read. Read the blade yourself and enter the number.'
+              : 'Read the blade yourself and enter the number.'}
+          </Text>
+          <Input
+            label={selected ? `${selected.label} (${selected.unit})` : 'Reading'}
+            value={typed}
+            onChangeText={setTyped}
+            keyboardType="decimal-pad"
+            placeholder={selected?.unit === 'm' ? '0.00' : '0'}
+            returnKeyType="done"
+          />
+          <Button
+            title={
+              typedMeasurement && selected
+                ? `Fill ${selected.label.toLowerCase()} with ${typedMeasurement.value} ${selected.unit}`
+                : 'Fill the form'
+            }
+            variant="secondary"
+            disabled={!typedMeasurement}
+            loading={applying}
+            onPress={fillTyped}
+          />
+        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -416,4 +479,6 @@ const styles = StyleSheet.create({
   },
   noteText: { ...Type.label, flex: 1, fontWeight: '400' },
   hint: { ...Type.body },
+  typedCard: { borderRadius: Radius.lg, padding: Spacing.lg, marginTop: Spacing.xl },
+  typedText: { ...Type.meta, marginTop: Spacing.xs, marginBottom: Spacing.md },
 });

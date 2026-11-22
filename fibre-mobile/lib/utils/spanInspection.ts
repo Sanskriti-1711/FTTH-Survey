@@ -71,6 +71,16 @@ export const NUMERIC_INSPECTION_KEYS = [
 
 export const CHECK_KEYS = [...LLD_CHECKS, ...CONSTRUCTION_CHECKS].map((check) => check.key);
 
+/**
+ * The number an engineer typed, or null when there is not one. A blade is read
+ * as `1,5` too, so the comma is the decimal point here. Returning null rather
+ * than 0 matters: an empty field must not become a 0 mm depth on the record.
+ */
+export function positiveNumber(text: string): number | null {
+  const value = Number(text.replace(',', '.').trim());
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
 export interface SpanInspectionState {
   values: Record<string, string>;
   checks: Record<string, CheckValue>;

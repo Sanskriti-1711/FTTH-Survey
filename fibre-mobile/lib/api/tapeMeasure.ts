@@ -1,5 +1,6 @@
 import { ApiError, apiFetch } from './client';
 import type { AiElementType } from '../utils/element-type';
+import { positiveNumber } from '../utils/spanInspection';
 
 // ── Tape measurement API ──────────────────────────────────────────────────
 //
@@ -68,6 +69,30 @@ export interface TapeMeasurementResult {
   engine: string;
 }
 
+/** Where the number came from, kept on the record so a reviewer can tell. */
+export type TapeSource = 'tape_ocr' | 'tape_typed';
+
+/**
+ * The reading the engineer typed off the blade, or null when what they typed is
+ * not a positive number. This is the path for photos no engine can read, so a
+ * blank field or a stray character must not become a measurement.
+ */
+export function typedTapeReading(
+  option: TapeDimensionOption,
+  text: string
+): TapeMeasurement | null {
+  const value = positiveNumber(text);
+  if (value === null) return null;
+  return {
+    key: option.key,
+    label: option.label,
+    value,
+    unit: option.unit,
+    // Typed by the engineer who is holding the tape: no OCR uncertainty.
+    confidence: 1,
+  };
+}
+
 // OCR runs tesseract on the server, which takes a few seconds on a laptop and
 // up to a minute on a loaded 0.1-CPU host. Without a deadline a request that
 // never answers leaves the button on "Reading…" for good.
@@ -111,7 +136,8 @@ export function withTapeReading(
   saved: Record<string, unknown>,
   measurement: TapeMeasurement | null,
   photoId: string | null,
-  readings: TapeReading[]
+  readings: TapeReading[],
+  source: TapeSource = 'tape_ocr'
 ): Record<string, unknown> {
   if (!measurement) return { ...saved };
   const first = readings[0];
@@ -122,7 +148,7 @@ export function withTapeReading(
       value: measurement.value,
       unit: measurement.unit,
       label: measurement.label,
-      source: 'tape_ocr',
+      source,
       confidence: measurement.confidence,
       photo_id: photoId,
       ...(first && last
