@@ -244,7 +244,14 @@ export function applySpanInspection(
     const value = raw.trim();
     if (!value) continue;
     if ((NUMERIC_INSPECTION_KEYS as readonly string[]).includes(key)) {
-      next[key] = { value: Number(value) };
+      const number = Number(value);
+      // Saving the form unchanged used to drop a tape reading's trail (the
+      // photo, the engine, the two blade numbers) that the tape screen had
+      // just written, so a reviewer could never retrace it.
+      // Read from `saved`: the loop above has already cleared `next`.
+      const previous = saved[key] as { value?: unknown } | undefined;
+      next[key] =
+        previous && Number(previous.value) === number ? previous : { value: number };
     } else {
       next[key] = { value };
     }

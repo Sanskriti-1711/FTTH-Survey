@@ -398,6 +398,7 @@ export default function TapeMeasureScreen() {
             onChangeText={setTyped}
             keyboardType="decimal-pad"
             placeholder={selected?.unit === 'm' ? '0.00' : '0'}
+            hint={selected ? undefined : 'Choose what you photographed first.'}
             returnKeyType="done"
           />
           <Button
