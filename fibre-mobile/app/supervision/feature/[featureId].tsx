@@ -1334,13 +1334,6 @@ const styles = StyleSheet.create({
   subtitle: { ...Type.meta, marginTop: 2 },
   scroll: { padding: Spacing.md, paddingBottom: Spacing.xxl, gap: Spacing.md },
   mapCard: { borderRadius: Radius.lg, overflow: 'hidden' },
-  elementTag: {
-    paddingHorizontal: Spacing.sm,
-    paddingVertical: 2,
-    borderRadius: Radius.full,
-    borderWidth: 1,
-  },
-  elementTagText: { fontSize: 12, fontWeight: '700' },
   mapCaption: {
     flexDirection: 'row',
     alignItems: 'center',
