@@ -208,18 +208,36 @@ export default function TapeMeasureScreen() {
             <Text style={[styles.subtitle, { color: colors.textSecondary }]} numberOfLines={2}>
               {spanId ? `Span ${spanId}` : layer || 'Read the numbers off the tape'}
             </Text>
+            {elementType ? (
+              <View
+                style={[
+                  styles.typeBadge,
+                  { backgroundColor: colors.primary + '14', borderColor: colors.primary + '44' },
+                ]}
+              >
+                <Text style={[styles.typeBadgeText, { color: colors.primary }]}>
+                  {elementLabel(elementType)}
+                </Text>
+              </View>
+            ) : null}
           </View>
         </View>
 
         {photo ? (
           <Image source={{ uri: photo.uri }} style={styles.preview} resizeMode="cover" />
         ) : (
-          <View style={[styles.captureCard, { backgroundColor: colors.surface }]}>
-            <Camera size={32} stroke={colors.primary} />
-            <Text style={[styles.captureTitle, { color: colors.textPrimary }]}>No photo yet</Text>
-            <Text style={[styles.captureText, { color: colors.textSecondary }]}>
-              Lay the tape across the depth or width (or along the length) and keep at least two
-              printed numbers in the frame. The digits are the scale, so nothing else is needed.
+          <View
+            style={[
+              styles.photoPlaceholder,
+              { backgroundColor: colors.surface, borderColor: colors.outlineLight },
+            ]}
+          >
+            <Camera size={26} stroke={colors.textTertiary} />
+            <Text style={[styles.photoPlaceholderText, { color: colors.textSecondary }]}>
+              No photo yet
+            </Text>
+            <Text style={[styles.photoPlaceholderHint, { color: colors.textTertiary }]}>
+              Photograph the tape with both ends in frame and the numbers facing the camera.
             </Text>
           </View>
         )}
@@ -240,14 +258,7 @@ export default function TapeMeasureScreen() {
           />
         </View>
 
-        {detected ? (
-          <View style={[styles.detectedRow, { borderColor: colors.outlineLight }]}>
-            <Ruler size={15} stroke={colors.textSecondary} />
-            <Text style={[styles.detectedText, { color: colors.textSecondary }]}>
-              {elementLabel(detected)} — read from the span layer name.
-            </Text>
-          </View>
-        ) : (
+        {!detected ? (
           <>
             <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>
               What did you photograph?
@@ -287,7 +298,7 @@ export default function TapeMeasureScreen() {
               })}
             </View>
           </>
-        )}
+        ) : null}
 
         <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>
           What is the tape measuring?
@@ -339,6 +350,31 @@ export default function TapeMeasureScreen() {
             onPress={runRead}
             style={{ marginBottom: Spacing.xl }}
           />
+        ) : null}
+
+        {result?.framing && !result.framing.ok ? (
+          <View
+            style={[
+              styles.retakeCard,
+              { backgroundColor: colors.surface, borderColor: colors.warning },
+            ]}
+          >
+            <View style={styles.retakeHeader}>
+              <AlertTriangle size={16} stroke={colors.warning} />
+              <Text style={[styles.retakeTitle, { color: colors.textPrimary }]}>
+                Reframe and reshoot
+              </Text>
+            </View>
+            <Text style={[styles.retakeText, { color: colors.textSecondary }]}>
+              {result.framing.message}
+            </Text>
+            <Button
+              title="Retake photo"
+              variant="secondary"
+              onPress={capture}
+              style={{ marginTop: Spacing.md }}
+            />
+          </View>
         ) : null}
 
         {result ? (
@@ -433,28 +469,34 @@ const styles = StyleSheet.create({
     backgroundColor: '#F3F4F6',
     marginBottom: Spacing.md,
   },
-  captureCard: {
-    borderRadius: Radius.lg,
-    padding: Spacing.xl,
-    alignItems: 'center',
-    gap: Spacing.sm,
-    marginBottom: Spacing.md,
-  },
-  captureTitle: { ...Type.title },
-  captureText: { ...Type.body, textAlign: 'center' },
   actionRow: { flexDirection: 'row', gap: Spacing.md, marginBottom: Spacing.xl },
   actionButton: { flex: 1 },
   sectionTitle: { ...Type.title, marginBottom: Spacing.md },
-  detectedRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.sm,
+  typeBadge: {
+    alignSelf: 'flex-start',
+    marginTop: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 4,
+    borderRadius: Radius.full,
     borderWidth: 1,
-    borderRadius: Radius.md,
-    padding: Spacing.md,
-    marginBottom: Spacing.lg,
   },
-  detectedText: { ...Type.label, flex: 1, fontWeight: '400' },
+  typeBadgeText: { ...Type.label, fontWeight: '600' },
+  photoPlaceholder: {
+    width: '100%',
+    height: 240,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.sm,
+    marginBottom: Spacing.md,
+  },
+  photoPlaceholderText: { ...Type.title },
+  photoPlaceholderHint: {
+    ...Type.meta,
+    textAlign: 'center',
+    paddingHorizontal: Spacing.lg,
+  },
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.sm, marginBottom: Spacing.xl },
   chip: {
     minHeight: 48,
@@ -480,6 +522,15 @@ const styles = StyleSheet.create({
   },
   noteText: { ...Type.label, flex: 1, fontWeight: '400' },
   hint: { ...Type.body },
+  retakeCard: {
+    borderRadius: Radius.lg,
+    borderWidth: 1.5,
+    padding: Spacing.lg,
+    marginBottom: Spacing.md,
+  },
+  retakeHeader: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
+  retakeTitle: { ...Type.title, flex: 1 },
+  retakeText: { ...Type.body, marginTop: Spacing.xs },
   typedCard: { borderRadius: Radius.lg, padding: Spacing.lg, marginTop: Spacing.xl },
   typedText: { ...Type.meta, marginTop: Spacing.xs, marginBottom: Spacing.md },
 });

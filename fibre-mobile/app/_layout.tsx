@@ -70,7 +70,6 @@ export default function RootLayout() {
         <Stack.Screen name="map" options={{ animation: 'fade' }} />
         <Stack.Screen name="feature/[featureId]" options={{ animation: 'slide_from_bottom' }} />
         <Stack.Screen name="supervision/[projectId]" options={{ animation: 'slide_from_right' }} />
-        <Stack.Screen name="supervision/ai-measure" options={{ animation: 'slide_from_bottom' }} />
         <Stack.Screen
           name="supervision/feature/[featureId]"
           options={{ animation: 'slide_from_bottom' }}

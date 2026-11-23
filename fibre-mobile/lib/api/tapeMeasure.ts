@@ -60,6 +60,24 @@ export interface TapeMeasurement {
   confidence: number;
 }
 
+/**
+ * The server's framing verdict: was the blade's printed ladder legible, evenly
+ * spaced and wholly inside the photo? False means the photo cannot be measured
+ * and the engineer should reframe and shoot again.
+ */
+export interface TapeFraming {
+  ok: boolean;
+  verdict: string;
+  message: string;
+  detail?: {
+    glyphs?: number;
+    ladder?: number;
+    pitch_px?: number | null;
+    evenness?: number | null;
+    covers?: number | null;
+  } | null;
+}
+
 export interface TapeMeasurementResult {
   measurement: TapeMeasurement | null;
   readings: TapeReading[];
@@ -67,6 +85,7 @@ export interface TapeMeasurementResult {
   notes: string;
   photo_id: string | null;
   engine: string;
+  framing?: TapeFraming | null;
 }
 
 /** Where the number came from, kept on the record so a reviewer can tell. */
