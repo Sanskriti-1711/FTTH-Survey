@@ -31,8 +31,11 @@ import { notify } from '../../lib/utils/dialog';
 // disagree with the reading on the record.
 //
 // That also sets the pace: one frame is one full read, so the loop is slower
-// than a camera frame and only ever has one request in flight. The shutter
-// takes a full-resolution photo and reads *that*, which is what gets saved.
+// than a camera frame and only ever has one request in flight. The next frame
+// is scheduled when the last one comes back, because a fixed timer stacks
+// requests behind a slow read and puts a number on screen that belongs to a
+// frame the camera left seconds ago. The shutter takes a full-resolution photo
+// and reads *that*, which is what gets saved.
 
 const POLL_MS = 1800;
 // A reading older than this is marked as such: the engineer has probably moved
@@ -68,6 +71,11 @@ export default function TapeLiveScreen() {
   const [result, setResult] = useState<TapeMeasurementResult | null>(null);
   const [measuring, setMeasuring] = useState(false);
   const [saving, setSaving] = useState(false);
+  // The last number the reader actually locked, kept across the frames that
+  // refuse. A number that vanishes every other frame reads as broken even when
+  // every read is honest, and the crew is watching this while they line the
+  // clip up — the number has to be there to settle onto.
+  const [kept, setKept] = useState<{ mm: number; at: number } | null>(null);
 
   // The frame loop. `takePictureAsync` is the only way to get pixels out of the
   // preview, so a "stream" here is a still every POLL_MS with the previous one
@@ -81,9 +89,15 @@ export default function TapeLiveScreen() {
       if (busyRef.current || cancelled || !cameraRef.current) return;
       busyRef.current = true;
       try {
+        // Silent: this still is the poller's, not the engineer's. CameraX
+        // plays its shutter sound for every capture, so without this the
+        // phone clicks at the crew every couple of seconds while they are
+        // lining the tape up. The deliberate "Take photo" keeps its sound as
+        // confirmation; only the automatic frames are muted.
         const shot = await cameraRef.current.takePictureAsync({
           quality: 0.35,
           skipProcessing: true,
+          shutterSound: false,
         });
         if (!shot?.uri || cancelled) return;
         const next = await readTapeFrame(shot.uri, elementType, dimension);
@@ -91,6 +105,9 @@ export default function TapeLiveScreen() {
         setLive(next);
         setLiveAt(Date.now());
         setPollError(null);
+        if (next.clip.usable && next.clip.reading_mm !== null) {
+          setKept({ mm: next.clip.reading_mm, at: Date.now() });
+        }
       } catch (error) {
         if (!cancelled) {
           setPollError(
@@ -102,11 +119,17 @@ export default function TapeLiveScreen() {
       }
     };
 
-    void tick();
-    const timer = setInterval(tick, POLL_MS);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const run = async () => {
+      const started = Date.now();
+      await tick();
+      if (cancelled) return;
+      timer = setTimeout(run, Math.max(0, POLL_MS - (Date.now() - started)));
+    };
+    void run();
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      if (timer) clearTimeout(timer);
     };
   }, [permission?.granted, paused, elementType, dimension]);
 
@@ -171,6 +194,10 @@ export default function TapeLiveScreen() {
   const stale = live !== null && Date.now() - liveAt > STALE_MS;
   const usable = Boolean(live?.clip.usable);
   const guide = frameGuide(live);
+  // Amber, not green: a kept number is what the blade said a moment ago, not
+  // what this frame says, and the two must not look alike.
+  const keptAge = kept ? Math.max(0, Math.round((Date.now() - kept.at) / 1000)) : 0;
+  const keptTone = usable ? '#34D399' : kept ? '#FBBF24' : '#F8FAFC';
 
   if (!permission) {
     return (
@@ -225,8 +252,8 @@ export default function TapeLiveScreen() {
 
         <View style={styles.bottomPanel}>
           <View style={styles.readingRow}>
-            <Text style={[styles.reading, { color: usable ? '#34D399' : '#F8FAFC' }]}>
-              {usable ? `${live?.clip.reading_mm} mm` : '—'}
+            <Text style={[styles.reading, { color: keptTone }]}>
+              {usable ? `${live?.clip.reading_mm} mm` : kept ? `${kept.mm} mm` : '—'}
             </Text>
             {measuring || (busyRef.current && !live) ? (
               <ActivityIndicator color="#FFFFFF" style={{ marginLeft: Spacing.md }} />
@@ -236,11 +263,13 @@ export default function TapeLiveScreen() {
           <Text style={styles.stageLine}>
             {usable && live?.clip.label
               ? `at the clip face · ${live.clip.divisions_to_face} div past ${live.clip.label.value}`
-              : live?.clip.stage
-                ? live.clip.stage === 'blade'
-                  ? 'no tape in this frame'
-                  : `refused at ${live.clip.stage}`
-                : 'looking for the tape'}
+              : kept
+                ? `last good ${keptAge}s ago · ${live?.clip.stage === 'blade' ? 'no tape in this frame' : `refused at ${live?.clip.stage}`}`
+                : live?.clip.stage
+                  ? live.clip.stage === 'blade'
+                    ? 'no tape in this frame'
+                    : `refused at ${live.clip.stage}`
+                  : 'looking for the tape'}
           </Text>
 
           <Text style={styles.guide} numberOfLines={3}>
@@ -249,7 +278,7 @@ export default function TapeLiveScreen() {
 
           <Text style={styles.meta}>
             {live
-              ? `${stale ? 'stale — ' : ''}read in ${live.elapsed_ms} ms`
+              ? `${stale ? 'stale — ' : ''}read in ${live.elapsed_ms} ms · next frame when this one returns`
               : 'one full server read per frame'}
           </Text>
 

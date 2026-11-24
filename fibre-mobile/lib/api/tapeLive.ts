@@ -1,4 +1,5 @@
 import { apiFetch } from './client';
+import { photoFormPart } from './form';
 
 // ── Live viewfinder ───────────────────────────────────────────────────────
 //
@@ -44,8 +45,12 @@ export async function readTapeFrame(
   dimension: string
 ): Promise<LiveFrameResult> {
   const form = new FormData();
-  // React Native's FormData takes a file descriptor, not a Blob.
-  form.append('frame', { uri, name: 'frame.jpg', type: 'image/jpeg' } as unknown as Blob);
+  // Expo's fetch builds the multipart body in JavaScript and rejects React
+  // Native's `{ uri, name, type }` part with "Unsupported FormDataPart
+  // implementation" — the error the viewfinder was showing on every frame,
+  // which meant no frame ever reached the server and no number could appear.
+  // The File-backed part the photo uploads use is the one it accepts.
+  form.append('frame', photoFormPart({ uri, name: 'frame.jpg', type: 'image/jpeg' }));
   form.append('element_type', elementType);
   form.append('dimension', dimension);
 
