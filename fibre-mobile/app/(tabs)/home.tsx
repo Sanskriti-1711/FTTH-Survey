@@ -7,7 +7,7 @@ import {
   TouchableOpacity,
   RefreshControl,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useThemeStore } from '../../lib/stores/theme';
 import { useAuthStore } from '../../lib/stores/auth';
@@ -125,8 +125,16 @@ export default function HomeScreen() {
   const activeFilterLabel =
     filterChips.find((c) => c.key === statusFilter)?.label ?? 'matching';
 
+  // The profile button and the greeting sat under the status bar on Android:
+  // with edge-to-edge drawing, the native SafeAreaView did not keep the header
+  // clear of it. The inset is applied here, once, so the scroll content and its
+  // indicator both start below the clock.
+  const insets = useSafeAreaInsets();
+
   return (
-    <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]}>
+    <View
+      style={[styles.safe, { backgroundColor: colors.background, paddingTop: insets.top }]}
+    >
       <ScrollView
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
@@ -329,7 +337,7 @@ export default function HomeScreen() {
           </TouchableOpacity>
         </View>
       </ScrollView>
-    </SafeAreaView>
+    </View>
   );
 }
 
