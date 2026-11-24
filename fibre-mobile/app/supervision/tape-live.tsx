@@ -237,7 +237,9 @@ export default function TapeLiveScreen() {
             {usable && live?.clip.label
               ? `at the clip face · ${live.clip.divisions_to_face} div past ${live.clip.label.value}`
               : live?.clip.stage
-                ? `refused at ${live.clip.stage}`
+                ? live.clip.stage === 'blade'
+                  ? 'no tape in this frame'
+                  : `refused at ${live.clip.stage}`
                 : 'looking for the tape'}
           </Text>
 
