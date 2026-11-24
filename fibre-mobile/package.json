@@ -24,6 +24,7 @@
     "@turf/length": "^7.3.5",
     "expo": "~57.0.9",
     "expo-build-properties": "~57.0.8",
+    "expo-camera": "~57.0.6",
     "expo-constants": "~57.0.8",
     "expo-dev-client": "^57.0.10",
     "expo-dev-launcher": "^57.0.10",

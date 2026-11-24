@@ -22,17 +22,15 @@ import {
   type AiElementType,
 } from '../../lib/api/aiMeasure';
 import {
+  fillTapeReading,
   measureTape,
   TAPE_DIMENSIONS,
   typedTapeReading,
-  withTapeReading,
   type TapeMeasurement,
   type TapeMeasurementResult,
   type TapeReading,
   type TapeSource,
 } from '../../lib/api/tapeMeasure';
-import { updateFieldMeasurements } from '../../lib/api/features';
-import { getSupervisionFeature } from '../../lib/api/supervision';
 import { useThemeStore } from '../../lib/stores/theme';
 import { Radius, Spacing, Type } from '../../lib/theme/colors';
 import { notify } from '../../lib/utils/dialog';
@@ -151,15 +149,7 @@ export default function TapeMeasureScreen() {
     }
     setApplying(true);
     try {
-      const { feature } = await getSupervisionFeature(projectId, featureId);
-      const merged = withTapeReading(
-        (feature.field_measurements ?? {}) as Record<string, unknown>,
-        measurement,
-        photoId,
-        readings,
-        source
-      );
-      await updateFieldMeasurements(featureId, merged, feature.comparison_notes ?? '');
+      await fillTapeReading({ featureId, projectId, measurement, readings, photoId, source });
       notify(
         'Form filled',
         `${measurement.label} is ${measurement.value} ${measurement.unit}. Check it against the tape and save the inspection.`
@@ -241,6 +231,19 @@ export default function TapeMeasureScreen() {
             </Text>
           </View>
         )}
+
+        <Button
+          title="Live viewfinder"
+          variant="secondary"
+          icon={<Ruler size={18} stroke={colors.primary} />}
+          onPress={() =>
+            router.push({
+              pathname: '/supervision/tape-live',
+              params: { spanId, layer, featureId, projectId },
+            })
+          }
+          style={{ marginBottom: Spacing.md }}
+        />
 
         <View style={styles.actionRow}>
           <Button

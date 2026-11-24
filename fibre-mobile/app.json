@@ -2,7 +2,7 @@
   "expo": {
     "name": "Fiber360",
     "slug": "fibre360-mobile",
-    "version": "1.0.12",
+    "version": "1.0.13",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "fibre360",
@@ -22,7 +22,7 @@
       }
     },
     "android": {
-      "versionCode": 7,
+      "versionCode": 8,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0D5CFF"
@@ -46,6 +46,7 @@
       "expo-router",
       "expo-secure-store",
       "expo-image-picker",
+      "expo-camera",
       "expo-document-picker",
       "expo-location",
       "@maplibre/maplibre-react-native",

@@ -1,4 +1,6 @@
 import { ApiError, apiFetch } from './client';
+import { updateFieldMeasurements } from './features';
+import { getSupervisionFeature } from './supervision';
 import type { AiElementType } from '../utils/element-type';
 import { positiveNumber } from '../utils/spanInspection';
 
@@ -145,6 +147,30 @@ export async function measureTape(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Write a reading into the span's `actual_*` field, tagged with the photo it
+ * came from. Shared by the photo screen and the live viewfinder so a reading
+ * saved from either place is recorded identically.
+ */
+export async function fillTapeReading(input: {
+  featureId: string;
+  projectId: string;
+  measurement: TapeMeasurement;
+  readings: TapeReading[];
+  photoId: string | null;
+  source: TapeSource;
+}): Promise<void> {
+  const { feature } = await getSupervisionFeature(input.projectId, input.featureId);
+  const merged = withTapeReading(
+    (feature.field_measurements ?? {}) as Record<string, unknown>,
+    input.measurement,
+    input.photoId,
+    input.readings,
+    input.source
+  );
+  await updateFieldMeasurements(input.featureId, merged, feature.comparison_notes ?? '');
 }
 
 /**
