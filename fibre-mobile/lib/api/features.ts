@@ -107,7 +107,8 @@ export interface FeaturePhotoData {
 /** GET /api/features/{id}/photos/ — the full site-photo gallery. */
 export async function getFeaturePhotos(featureId: string): Promise<{
   count: number;
-  max_photos: number;
+  /** null means the span has no photo-count limit. */
+  max_photos: number | null;
   results: FeaturePhotoData[];
 }> {
   return apiFetch(`/api/features/${featureId}/photos/`);
@@ -137,7 +138,8 @@ export async function uploadFeaturePhotoToGallery(
   photo: { uri: string; name: string; type: string }
 ): Promise<{
   count: number;
-  max_photos: number;
+  /** null means the span has no photo-count limit. */
+  max_photos: number | null;
   uploaded: FeaturePhotoData[];
 }> {
   const form = new FormData();
