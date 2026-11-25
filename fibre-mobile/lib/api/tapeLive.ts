@@ -19,6 +19,11 @@ export interface LiveClipReading {
   divisions_to_face: number | null;
   blade_confirmed: boolean;
   tape_angle_deg: number | null;
+  // A number the printed digits earned while a check stayed weak. It is a real
+  // reading and it is shown, but the overlay says it is a best effort.
+  confidence?: 'high' | 'low' | null;
+  low_confidence?: boolean;
+  confidence_note?: string | null;
 }
 
 export interface LiveFraming {
@@ -71,6 +76,9 @@ export async function readTapeFrame(
 /** The one line the engineer can act on, from a refusal and the framing check. */
 export function frameGuide(result: LiveFrameResult | null): string {
   if (!result) return 'Point the camera at the tape';
+  if (result.clip.usable && result.clip.low_confidence) {
+    return result.clip.confidence_note ?? 'Read, but check it against the blade';
+  }
   if (result.clip.usable) return 'Hold still — the clip is read';
   if (!result.clip.blade_confirmed) {
     return 'Blade not confirmed — fill the frame with the tape, flat to the camera';

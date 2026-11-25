@@ -193,11 +193,14 @@ export default function TapeLiveScreen() {
 
   const stale = live !== null && Date.now() - liveAt > STALE_MS;
   const usable = Boolean(live?.clip.usable);
+  // A best-effort reading is still shown — that is the number the crew asked
+  // for — but never in the green of a confirmed one.
+  const low = Boolean(usable && live?.clip.low_confidence);
   const guide = frameGuide(live);
   // Amber, not green: a kept number is what the blade said a moment ago, not
   // what this frame says, and the two must not look alike.
   const keptAge = kept ? Math.max(0, Math.round((Date.now() - kept.at) / 1000)) : 0;
-  const keptTone = usable ? '#34D399' : kept ? '#FBBF24' : '#F8FAFC';
+  const keptTone = usable && !low ? '#34D399' : kept || low ? '#FBBF24' : '#F8FAFC';
 
   if (!permission) {
     return (
@@ -253,7 +256,11 @@ export default function TapeLiveScreen() {
         <View style={styles.bottomPanel}>
           <View style={styles.readingRow}>
             <Text style={[styles.reading, { color: keptTone }]}>
-              {usable ? `${live?.clip.reading_mm} mm` : kept ? `${kept.mm} mm` : '—'}
+              {usable
+                ? `${low ? '~' : ''}${live?.clip.reading_mm} mm`
+                : kept
+                  ? `${kept.mm} mm`
+                  : '—'}
             </Text>
             {measuring || (busyRef.current && !live) ? (
               <ActivityIndicator color="#FFFFFF" style={{ marginLeft: Spacing.md }} />
@@ -261,8 +268,10 @@ export default function TapeLiveScreen() {
           </View>
 
           <Text style={styles.stageLine}>
-            {usable && live?.clip.label
-              ? `at the clip face · ${live.clip.divisions_to_face} div past ${live.clip.label.value}`
+            {usable && low
+              ? 'best effort — the blade was not fully confirmed'
+              : usable && live?.clip.label
+                ? `at the clip face · ${live.clip.divisions_to_face} div past ${live.clip.label.value}`
               : kept
                 ? `last good ${keptAge}s ago · ${live?.clip.stage === 'blade' ? 'no tape in this frame' : `refused at ${live?.clip.stage}`}`
                 : live?.clip.stage
