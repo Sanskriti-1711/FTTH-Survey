@@ -2,7 +2,7 @@
   "expo": {
     "name": "Fiber360",
     "slug": "fibre360-mobile",
-    "version": "1.0.13",
+    "version": "1.0.14",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "fibre360",
